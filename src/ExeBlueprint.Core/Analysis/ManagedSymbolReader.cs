@@ -1139,7 +1139,7 @@ internal static class ManagedSymbolReader
             }
 
             declaredLocals.Add(localIndex);
-            statements.Add($"{type} {LocalName(context, localIndex)} = default;");
+            statements.Add(DeclareLocalWithDefault(context, localIndex, type));
         }
 
         var currentRegions = orderedRegions.ToHashSet();
@@ -1669,7 +1669,7 @@ internal static class ManagedSymbolReader
             }
 
             declaredLocals.Add(localIndex);
-            statements.Add($"{type} {LocalName(context, localIndex)} = default;");
+            statements.Add(DeclareLocalWithDefault(context, localIndex, type));
         }
 
         var nestedContext = context with
@@ -1869,7 +1869,7 @@ internal static class ManagedSymbolReader
                     return null;
                 }
 
-                statements.Add($"{type} {LocalName(context, localIndex)} = default;");
+                statements.Add(DeclareLocalWithDefault(context, localIndex, type));
             }
         }
 
@@ -2621,6 +2621,9 @@ internal static class ManagedSymbolReader
     private static string LocalName(ReconContext context, int index) =>
         context.LocalNames.TryGetValue(index, out var name) ? name : $"v{index}";
 
+    private static string DeclareLocalWithDefault(ReconContext context, int index, string type) =>
+        $"{type} {LocalName(context, index)} = {(IsKnownReferenceType(context.Metadata, type) ? "default!" : "default")};";
+
     // 有讀到區域變數型別就用實際型別宣告，否則退回 var。ref／編譯器產生的型別一律用 var 比較安全。
     private static string LocalDeclarationType(ReconContext context, int index)
     {
@@ -2665,6 +2668,10 @@ internal static class ManagedSymbolReader
             }
 
             args[index] = RenderArgument(argument, index < info.ParameterTypes.Count ? info.ParameterTypes[index] : null);
+            if (RequiresNullForgivingComparerArgument(context, info, argument))
+            {
+                args[index] += "!";
+            }
         }
 
         string? receiver = null;
@@ -2731,6 +2738,17 @@ internal static class ManagedSymbolReader
 
         return true;
     }
+
+    private static bool RequiresNullForgivingComparerArgument(
+        ReconContext context,
+        CallInfo info,
+        string argument) =>
+        info.ParamCount == 1 &&
+        info.Name == nameof(object.GetHashCode) &&
+        info.DeclaringType.StartsWith("System.Collections.Generic.EqualityComparer<", StringComparison.Ordinal) &&
+        context.ExpressionTypes.TryGetValue(argument, out var argumentType) &&
+        (argumentType.EndsWith("?", StringComparison.Ordinal) ||
+         argumentType.StartsWith("System.Nullable<", StringComparison.Ordinal));
 
     // 把運算子方法（op_Equality 等）還原成運算子語法，避免產生 Type.op_Equality(a, b) 這種非法 C#。
     // 對應不到的運算子就放棄整個方法，退回 IL 註解。

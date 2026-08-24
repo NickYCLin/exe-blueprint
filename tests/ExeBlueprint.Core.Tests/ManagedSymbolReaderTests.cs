@@ -156,6 +156,28 @@ public sealed class ManagedSymbolReaderTests
     }
 
     [Fact]
+    public async Task PreservesNullableSkeletonExpressions()
+    {
+        var coreDocument = await new BlueprintAnalyzer().AnalyzeAsync(typeof(BlueprintAnalyzer).Assembly.Location);
+        var reader = Assert.Single(
+            coreDocument.Files[0].Code!.Types,
+            type => type.FullName == "ExeBlueprint.Analysis.ManagedSymbolReader");
+        var accessibility = Assert.Single(
+            reader.Methods,
+            method => method.Name == "GetFieldAccessibility");
+        Assert.Contains("string v0 = default!;", accessibility.Body);
+
+        var fixtureDocument = await new BlueprintAnalyzer().AnalyzeAsync(typeof(NullableHashFixture).Assembly.Location);
+        var fixture = Assert.Single(
+            fixtureDocument.Files[0].Code!.Types,
+            type => type.FullName == typeof(NullableHashFixture).FullName);
+        var getHashCode = Assert.Single(fixture.Methods, method => method.Name == nameof(GetHashCode));
+        Assert.Contains(
+            getHashCode.Body,
+            statement => statement.Contains("GetHashCode(this.Value!)", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task ReconstructsBooleanAndEnumCallArguments()
     {
         var assemblyPath = typeof(ManagedSymbolReaderTests).Assembly.Location;
@@ -801,6 +823,8 @@ internal class NestedTypeFixture<T>
 }
 
 internal readonly record struct StructInitializerFixture(string Value);
+
+internal sealed record NullableHashFixture(int? Value);
 
 internal sealed class RefLikePropertyFixture
 {
