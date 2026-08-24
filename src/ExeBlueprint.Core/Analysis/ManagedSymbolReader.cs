@@ -672,7 +672,7 @@ internal static class ManagedSymbolReader
 
             var instr = instructions[index];
 
-            // 先按 metadata 的保護區域邊界還原標準 try/catch/finally；沒有明確區域資料時不猜測。
+            // 先按 metadata 的保護區域邊界還原標準 try/catch/finally/fault；沒有明確區域資料時不猜測。
             if (stack.Count == 0)
             {
                 var startingRegions = context.ExceptionRegions
@@ -680,7 +680,7 @@ internal static class ManagedSymbolReader
                     .ToArray();
                 if (startingRegions.Length > 0)
                 {
-                    var outerFinally = TryFindOuterFinally(startingRegions);
+                    var outerCleanup = TryFindOuterCleanup(startingRegions);
                     var structuredException = startingRegions.All(region =>
                             region.Kind is ExceptionRegionKind.Catch or ExceptionRegionKind.Filter)
                         ? TryStructureCatch(
@@ -692,14 +692,14 @@ internal static class ManagedSymbolReader
                             startingRegions,
                             declaredLocals,
                             depth + 1)
-                        : outerFinally is ExceptionRegionInfo finallyRegion
-                            ? TryStructureFinally(
+                        : outerCleanup is ExceptionRegionInfo cleanupRegion
+                            ? TryStructureCleanup(
                                 context,
                                 instructions,
                                 offsetToIndex,
                                 index,
                                 end,
-                                finallyRegion,
+                                cleanupRegion,
                                 declaredLocals,
                                 depth + 1)
                             : null;
@@ -888,32 +888,33 @@ internal static class ManagedSymbolReader
         return stack.Count == 0 ? statements : null;
     }
 
-    // Roslyn 會把 try/catch/finally 編譯成內層 catch regions，再以較大的 finally region
-    // 包住整段 try/catch。只有所有同起點的其他區域都完整落在 finally 保護範圍內時才接受。
-    private static ExceptionRegionInfo? TryFindOuterFinally(IReadOnlyList<ExceptionRegionInfo> startingRegions)
+    // 編譯器會把 try/catch/finally 編譯成內層 catch regions，再以較大的 finally region
+    // 包住整段 try/catch。fault 也使用相同的外層保護形狀。只有所有同起點的其他區域都完整
+    // 落在單一 cleanup region 的保護範圍內時才接受。
+    private static ExceptionRegionInfo? TryFindOuterCleanup(IReadOnlyList<ExceptionRegionInfo> startingRegions)
     {
-        var finallyRegions = startingRegions
-            .Where(region => region.Kind == ExceptionRegionKind.Finally)
+        var cleanupRegions = startingRegions
+            .Where(region => region.Kind is ExceptionRegionKind.Finally or ExceptionRegionKind.Fault)
             .ToArray();
-        if (finallyRegions.Length != 1)
+        if (cleanupRegions.Length != 1)
         {
             return null;
         }
 
-        var outerFinally = finallyRegions[0];
-        var outerTryEnd = outerFinally.TryOffset + outerFinally.TryLength;
+        var outerCleanup = cleanupRegions[0];
+        var outerTryEnd = outerCleanup.TryOffset + outerCleanup.TryLength;
         if (startingRegions.Any(region =>
-                region != outerFinally &&
+                region != outerCleanup &&
                 (region.Kind is not (ExceptionRegionKind.Catch or ExceptionRegionKind.Filter) ||
-                 region.TryOffset != outerFinally.TryOffset ||
-                 region.TryLength >= outerFinally.TryLength ||
+                 region.TryOffset != outerCleanup.TryOffset ||
+                 region.TryLength >= outerCleanup.TryLength ||
                  ExceptionClauseStartOffset(region) < region.TryOffset + region.TryLength ||
                  region.HandlerOffset + region.HandlerLength > outerTryEnd)))
         {
             return null;
         }
 
-        return outerFinally;
+        return outerCleanup;
     }
 
     private static int ExceptionClauseStartOffset(ExceptionRegionInfo region) =>
@@ -1528,9 +1529,10 @@ internal static class ManagedSymbolReader
         return name;
     }
 
-    // try/finally 的控制流程由 exception region metadata 決定。只接受 Roslyn 常見的
-    // try 尾端 leave／throw／合法 rethrow → finally 尾端 endfinally 形狀，避免靠跳轉猜區塊。
-    private static StructuredException? TryStructureFinally(
+    // finally 與 fault 的控制流程由 exception region metadata 決定。只接受標準的
+    // try 尾端 leave／throw／合法 rethrow → handler 尾端 endfinally 形狀，避免靠跳轉猜區塊。
+    // C# 沒有 fault 語法，因此輸出語意等價的 catch { handler; throw; }。
+    private static StructuredException? TryStructureCleanup(
         ReconContext context,
         Instr[] instructions,
         Dictionary<int, int> offsetToIndex,
@@ -1540,7 +1542,8 @@ internal static class ManagedSymbolReader
         HashSet<int> declaredLocals,
         int depth)
     {
-        if (depth > MaxStructureDepth || region.Kind != ExceptionRegionKind.Finally)
+        if (depth > MaxStructureDepth ||
+            region.Kind is not (ExceptionRegionKind.Finally or ExceptionRegionKind.Fault))
         {
             return null;
         }
@@ -1569,14 +1572,14 @@ internal static class ManagedSymbolReader
             return null;
         }
 
-        // Release 最佳化會讓內層 try/catch 的所有 leave 直接跳過 finally，且最後一個
-        // catch handler 恰好結束在 finally handler 起點；此時尾端 leave 屬於 catch，不能先剝掉。
+        // Release 最佳化會讓內層 try/catch 的所有 leave 直接跳過外層 cleanup handler，且最後一個
+        // catch handler 恰好結束在 cleanup handler 起點；此時尾端 leave 屬於 catch，不能先剝掉。
         var nestedCatchEndsAtTryEnd = context.ExceptionRegions.Any(candidate =>
             candidate.Kind is ExceptionRegionKind.Catch or ExceptionRegionKind.Filter &&
             candidate.TryOffset == region.TryOffset &&
             candidate.HandlerOffset + candidate.HandlerLength == tryEndOffset);
         var tryBodyEnd = nestedCatchEndsAtTryEnd || tryTerminates ? tryEndIndex : tryEndIndex - 1;
-        var finallyBodyEnd = handlerEndIndex - 1;
+        var cleanupBodyEnd = handlerEndIndex - 1;
         var nestedCatchExceptionLocals = new HashSet<int>();
         foreach (var nestedCatch in context.ExceptionRegions.Where(candidate =>
                      candidate.Kind is ExceptionRegionKind.Catch or ExceptionRegionKind.Filter &&
@@ -1623,7 +1626,7 @@ internal static class ManagedSymbolReader
         }
 
         var storedLocals = instructions[tryStartIndex..tryBodyEnd]
-            .Concat(instructions[handlerStartIndex..finallyBodyEnd])
+            .Concat(instructions[handlerStartIndex..cleanupBodyEnd])
             .Select(instruction => TryGetStoredLocalIndex(context, instruction))
             .Where(localIndex => localIndex is not null)
             .Select(localIndex => localIndex!.Value)
@@ -1669,15 +1672,15 @@ internal static class ManagedSymbolReader
             tryBodyEnd,
             new HashSet<int>(declaredLocals),
             depth);
-        var finallyBody = TryStructure(
+        var cleanupBody = TryStructure(
             nestedContext with { LeaveRedirect = context.LeaveRedirect },
             instructions,
             offsetToIndex,
             handlerStartIndex,
-            finallyBodyEnd,
+            cleanupBodyEnd,
             new HashSet<int>(declaredLocals),
             depth);
-        if (tryBody is null || finallyBody is null)
+        if (tryBody is null || cleanupBody is null)
         {
             return null;
         }
@@ -1686,9 +1689,14 @@ internal static class ManagedSymbolReader
         statements.Add("{");
         statements.AddRange(tryBody.Select(line => $"    {line}"));
         statements.Add("}");
-        statements.Add("finally");
+        statements.Add(region.Kind == ExceptionRegionKind.Finally ? "finally" : "catch");
         statements.Add("{");
-        statements.AddRange(finallyBody.Select(line => $"    {line}"));
+        statements.AddRange(cleanupBody.Select(line => $"    {line}"));
+        if (region.Kind == ExceptionRegionKind.Fault)
+        {
+            statements.Add("    throw;");
+        }
+
         statements.Add("}");
         return new StructuredException(statements, handlerEndIndex);
     }

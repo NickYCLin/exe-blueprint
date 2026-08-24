@@ -271,6 +271,132 @@ public sealed class IlBodyReconstructionTests
     }
 
     [Fact]
+    public void ReconstructsFaultAsCatchAndRethrow()
+    {
+        // CLR fault 只在例外路徑執行；C# 沒有 fault，等價輸出為 catch { cleanup; throw; }。
+        byte[] il =
+        [
+            0x02,       // IL_0000 ldarg.0
+            0x17,       // IL_0001 ldc.i4.1
+            0x58,       // IL_0002 add
+            0x0A,       // IL_0003 stloc.0
+            0xDE, 0x06, // IL_0004 leave.s IL_000C
+            0x06,       // IL_0006 ldloc.0
+            0x1F, 0x0A, // IL_0007 ldc.i4.s 10
+            0x58,       // IL_0009 add
+            0x0A,       // IL_000A stloc.0
+            0xDC,       // IL_000B endfinally
+            0x06,       // IL_000C ldloc.0
+            0x2A        // IL_000D ret
+        ];
+        var regions = new[]
+        {
+            new ManagedSymbolReader.ExceptionRegionInfo(
+                ExceptionRegionKind.Fault,
+                TryOffset: 0,
+                TryLength: 6,
+                HandlerOffset: 6,
+                HandlerLength: 6)
+        };
+
+        var body = Reconstruct(
+            il,
+            isInstance: false,
+            returnType: "int",
+            localTypes: ["int"],
+            exceptionRegions: regions);
+
+        Assert.NotNull(body);
+        Assert.Equal(
+            [
+                "int v0 = default;",
+                "try",
+                "{",
+                "    v0 = (arg0 + 1);",
+                "}",
+                "catch",
+                "{",
+                "    v0 = (v0 + 10);",
+                "    throw;",
+                "}",
+                "return v0;"
+            ],
+            body);
+    }
+
+    [Fact]
+    public void ReconstructsTerminalTryWithFault()
+    {
+        byte[] il =
+        [
+            0x14,       // IL_0000 ldnull
+            0x7A,       // IL_0001 throw
+            0x02,       // IL_0002 ldarg.0
+            0x17,       // IL_0003 ldc.i4.1
+            0x58,       // IL_0004 add
+            0x10, 0x00, // IL_0005 starg.s 0
+            0xDC        // IL_0007 endfinally
+        ];
+        var regions = new[]
+        {
+            new ManagedSymbolReader.ExceptionRegionInfo(
+                ExceptionRegionKind.Fault,
+                TryOffset: 0,
+                TryLength: 2,
+                HandlerOffset: 2,
+                HandlerLength: 6)
+        };
+
+        var body = Reconstruct(
+            il,
+            isInstance: false,
+            returnType: "void",
+            exceptionRegions: regions);
+
+        Assert.NotNull(body);
+        Assert.Equal(
+            [
+                "try",
+                "{",
+                "    throw null;",
+                "}",
+                "catch",
+                "{",
+                "    arg0 = (arg0 + 1);",
+                "    throw;",
+                "}"
+            ],
+            body);
+    }
+
+    [Fact]
+    public void BailsOnFaultWithoutEndFinally()
+    {
+        byte[] il =
+        [
+            0x00,       // IL_0000 nop
+            0xDE, 0x01, // IL_0001 leave.s IL_0004
+            0x2A,       // IL_0003 ret（fault handler 不可用 ret 收尾）
+            0x2A        // IL_0004 ret
+        ];
+        var regions = new[]
+        {
+            new ManagedSymbolReader.ExceptionRegionInfo(
+                ExceptionRegionKind.Fault,
+                TryOffset: 0,
+                TryLength: 3,
+                HandlerOffset: 3,
+                HandlerLength: 1)
+        };
+
+        Assert.Null(Reconstruct(
+            il,
+            isInstance: false,
+            returnType: "void",
+            exceptionRegions: regions));
+    }
+
+    [Fact]
     public void ReconstructsCatchFromExceptionRegion()
     {
         // static int M(int n) { try { return n + 1; } catch (InvalidOperationException) { return -1; } }
