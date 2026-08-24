@@ -226,6 +226,52 @@ public sealed class ManagedSymbolReaderTests
     }
 
     [Fact]
+    public async Task ExtractsNestedTypeOwnershipAndGenericContext()
+    {
+        var assemblyPath = typeof(NestedTypeFixture<>).Assembly.Location;
+        var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
+        var types = document.Files[0].Code!.Types;
+
+        var outer = Assert.Single(
+            types,
+            type => type.FullName == "ExeBlueprint.Core.Tests.NestedTypeFixture");
+        Assert.False(outer.IsNested);
+        Assert.Null(outer.DeclaringType);
+        Assert.Equal(["T"], outer.GenericParameters);
+
+        var child = Assert.Single(
+            types,
+            type => type.FullName == "ExeBlueprint.Core.Tests.NestedTypeFixture.Child");
+        Assert.True(child.IsNested);
+        Assert.Equal(outer.FullName, child.DeclaringType);
+        Assert.Equal(outer.Namespace, child.Namespace);
+        Assert.Equal(["T", "U"], child.GenericParameters);
+        Assert.Equal(1, child.InheritedGenericParameterCount);
+
+        var state = Assert.Single(
+            types,
+            type => type.FullName == "ExeBlueprint.Core.Tests.NestedTypeFixture.Child.State");
+        Assert.Equal(child.FullName, state.DeclaringType);
+        Assert.Equal(["T", "U"], state.GenericParameters);
+        Assert.Equal(2, state.InheritedGenericParameterCount);
+    }
+
+    [Fact]
+    public async Task ExtractsRefLikeTypeShape()
+    {
+        var assemblyPath = typeof(RefStructFixture).Assembly.Location;
+        var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
+        var fixture = Assert.Single(
+            document.Files[0].Code!.Types,
+            type => type.FullName == "ExeBlueprint.Core.Tests.RefStructFixture");
+
+        Assert.Equal("struct", fixture.Kind);
+        Assert.True(fixture.IsRefLike);
+        var buffer = Assert.Single(fixture.Properties, property => property.Name == nameof(RefStructFixture.Buffer));
+        Assert.Equal("System.Span<byte>", buffer.Type);
+    }
+
+    [Fact]
     public async Task ReconstructsCompilerGeneratedSwitchTable()
     {
         var assemblyPath = typeof(SwitchFixture).Assembly.Location;
@@ -613,6 +659,38 @@ internal sealed class DispatchDerivedFixture : DispatchBaseFixture, IDisposable
     {
         Dispatched = null;
     }
+}
+
+internal class NestedTypeFixture<T>
+{
+    public sealed class Child<U>
+    {
+        public T? OuterValue { get; init; }
+
+        public U? InnerValue { get; init; }
+
+        public enum State : byte
+        {
+            Ready = 2
+        }
+
+        public readonly struct Leaf
+        {
+            public int Number { get; init; }
+        }
+    }
+}
+
+internal sealed class RefLikePropertyFixture
+{
+    private readonly byte[] _buffer = [];
+
+    public ReadOnlySpan<byte> Header => _buffer;
+}
+
+internal ref struct RefStructFixture
+{
+    public Span<byte> Buffer { get; set; }
 }
 
 internal static class ExceptionHandlingFixture

@@ -60,7 +60,7 @@ internal static class ManagedSymbolReader
             var definition = metadata.GetTypeDefinition(typeHandle);
 
             var name = StripArity(metadata.GetString(definition.Name));
-            var namespaceName = metadata.GetString(definition.Namespace);
+            var namespaceName = GetTypeDefinitionNamespace(metadata, typeHandle);
             if (name == "<Module>")
             {
                 continue;
@@ -73,6 +73,11 @@ internal static class ManagedSymbolReader
             }
 
             namespaces.Add(namespaceName);
+            var fullName = GetTypeDefinitionFullName(metadata, typeHandle);
+            var declaringTypeHandle = definition.GetDeclaringType();
+            var declaringTypeName = declaringTypeHandle.IsNil
+                ? null
+                : GetTypeDefinitionFullName(metadata, declaringTypeHandle);
             var baseTypeName = GetTypeName(metadata, definition.BaseType);
             var methods = new List<MethodModel>();
 
@@ -81,7 +86,7 @@ internal static class ManagedSymbolReader
                 var method = metadata.GetMethodDefinition(methodHandle);
                 var methodName = metadata.GetString(method.Name);
                 var hasBody = method.RelativeVirtualAddress != 0;
-                var declaringName = BuildTypeFullName(namespaceName, name);
+                var declaringName = fullName;
                 var il = hasBody ? TryReadIl(peReader, method) : null;
                 var localTypes = hasBody ? TryReadLocalTypes(peReader, method) : [];
                 var exceptionRegions = hasBody ? TryReadExceptionRegions(peReader, metadata, method) : [];
@@ -132,7 +137,7 @@ internal static class ManagedSymbolReader
             var isSealed = attributes.HasFlag(TypeAttributes.Sealed);
             types.Add(new TypeModel
             {
-                FullName = BuildTypeFullName(namespaceName, name),
+                FullName = fullName,
                 Namespace = namespaceName,
                 Name = name,
                 Kind = kind,
@@ -140,7 +145,15 @@ internal static class ManagedSymbolReader
                 IsStatic = kind == "class" && isAbstract && isSealed,
                 IsAbstract = isAbstract,
                 IsSealed = isSealed,
-                IsNested = !definition.GetDeclaringType().IsNil,
+                IsRefLike = HasCustomAttribute(
+                    metadata,
+                    definition.GetCustomAttributes(),
+                    "System.Runtime.CompilerServices.IsByRefLikeAttribute"),
+                IsNested = !declaringTypeHandle.IsNil,
+                DeclaringType = declaringTypeName,
+                InheritedGenericParameterCount = declaringTypeHandle.IsNil
+                    ? 0
+                    : metadata.GetTypeDefinition(declaringTypeHandle).GetGenericParameters().Count,
                 BaseType = baseTypeName,
                 Interfaces = ReadInterfaces(metadata, definition),
                 GenericParameters = ReadTypeGenericParameters(metadata, definition),
@@ -183,10 +196,7 @@ internal static class ManagedSymbolReader
 
         var handle = (MethodDefinitionHandle)MetadataTokens.Handle(token);
         var method = metadata.GetMethodDefinition(handle);
-        var declaringType = metadata.GetTypeDefinition(method.GetDeclaringType());
-        var fullName = BuildTypeFullName(
-            metadata.GetString(declaringType.Namespace),
-            metadata.GetString(declaringType.Name));
+        var fullName = GetTypeDefinitionFullName(metadata, method.GetDeclaringType());
         return (handle, $"{fullName}.{metadata.GetString(method.Name)}");
     }
 
@@ -2798,10 +2808,7 @@ internal static class ManagedSymbolReader
         {
             case HandleKind.MethodDefinition:
                 var method = metadata.GetMethodDefinition((MethodDefinitionHandle)handle);
-                var declaringType = metadata.GetTypeDefinition(method.GetDeclaringType());
-                var typeName = BuildTypeFullName(
-                    metadata.GetString(declaringType.Namespace),
-                    StripArity(metadata.GetString(declaringType.Name)));
+                var typeName = GetTypeDefinitionFullName(metadata, method.GetDeclaringType());
                 return $"{typeName}.{metadata.GetString(method.Name)}";
 
             case HandleKind.MemberReference:
@@ -2834,16 +2841,10 @@ internal static class ManagedSymbolReader
         switch (handle.Kind)
         {
             case HandleKind.TypeDefinition:
-                var definition = metadata.GetTypeDefinition((TypeDefinitionHandle)handle);
-                return BuildTypeFullName(
-                    metadata.GetString(definition.Namespace),
-                    StripArity(metadata.GetString(definition.Name)));
+                return GetTypeDefinitionFullName(metadata, (TypeDefinitionHandle)handle);
 
             case HandleKind.TypeReference:
-                var reference = metadata.GetTypeReference((TypeReferenceHandle)handle);
-                return BuildTypeFullName(
-                    metadata.GetString(reference.Namespace),
-                    StripArity(metadata.GetString(reference.Name)));
+                return GetTypeReferenceFullName(metadata, (TypeReferenceHandle)handle);
 
             case HandleKind.TypeSpecification:
                 try
@@ -2861,6 +2862,40 @@ internal static class ManagedSymbolReader
         }
     }
 
+    private static bool HasCustomAttribute(
+        MetadataReader metadata,
+        CustomAttributeHandleCollection attributes,
+        string fullName)
+    {
+        foreach (var handle in attributes)
+        {
+            try
+            {
+                var attribute = metadata.GetCustomAttribute(handle);
+                string? attributeType = attribute.Constructor.Kind switch
+                {
+                    HandleKind.MethodDefinition => GetTypeName(
+                        metadata,
+                        metadata.GetMethodDefinition((MethodDefinitionHandle)attribute.Constructor).GetDeclaringType()),
+                    HandleKind.MemberReference => GetTypeName(
+                        metadata,
+                        metadata.GetMemberReference((MemberReferenceHandle)attribute.Constructor).Parent),
+                    _ => null
+                };
+                if (attributeType == fullName)
+                {
+                    return true;
+                }
+            }
+            catch (BadImageFormatException)
+            {
+                // 畸形 attribute 不應中止其餘 metadata 分析。
+            }
+        }
+
+        return false;
+    }
+
     private static string StripArity(string name)
     {
         var backtick = name.IndexOf('`', StringComparison.Ordinal);
@@ -2869,6 +2904,34 @@ internal static class ManagedSymbolReader
 
     private static string BuildTypeFullName(string namespaceName, string name) =>
         string.IsNullOrEmpty(namespaceName) ? name : $"{namespaceName}.{name}";
+
+    private static string GetTypeDefinitionFullName(MetadataReader metadata, TypeDefinitionHandle handle)
+    {
+        var definition = metadata.GetTypeDefinition(handle);
+        var name = StripArity(metadata.GetString(definition.Name));
+        var declaringType = definition.GetDeclaringType();
+        return declaringType.IsNil
+            ? BuildTypeFullName(metadata.GetString(definition.Namespace), name)
+            : $"{GetTypeDefinitionFullName(metadata, declaringType)}.{name}";
+    }
+
+    private static string GetTypeDefinitionNamespace(MetadataReader metadata, TypeDefinitionHandle handle)
+    {
+        var definition = metadata.GetTypeDefinition(handle);
+        var declaringType = definition.GetDeclaringType();
+        return declaringType.IsNil
+            ? metadata.GetString(definition.Namespace)
+            : GetTypeDefinitionNamespace(metadata, declaringType);
+    }
+
+    private static string GetTypeReferenceFullName(MetadataReader metadata, TypeReferenceHandle handle)
+    {
+        var reference = metadata.GetTypeReference(handle);
+        var name = StripArity(metadata.GetString(reference.Name));
+        return reference.ResolutionScope.Kind == HandleKind.TypeReference
+            ? $"{GetTypeReferenceFullName(metadata, (TypeReferenceHandle)reference.ResolutionScope)}.{name}"
+            : BuildTypeFullName(metadata.GetString(reference.Namespace), name);
+    }
 
     private static MethodModel BuildMethod(
         MetadataReader metadata,

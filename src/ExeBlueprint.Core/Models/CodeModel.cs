@@ -39,7 +39,13 @@ public sealed record TypeModel
 
     public bool IsSealed { get; init; }
 
+    public bool IsRefLike { get; init; }
+
     public bool IsNested { get; init; }
+
+    public string? DeclaringType { get; init; }
+
+    public int InheritedGenericParameterCount { get; init; }
 
     public string? BaseType { get; init; }
 

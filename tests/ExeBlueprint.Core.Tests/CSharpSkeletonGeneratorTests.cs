@@ -111,6 +111,42 @@ public sealed class CSharpSkeletonGeneratorTests
     }
 
     [Fact]
+    public async Task EmitsNestedTypesWithOwnedGenericParameters()
+    {
+        var assemblyPath = typeof(NestedTypeFixture<>).Assembly.Location;
+        var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
+        var source = Assert.Single(
+            CSharpSkeletonGenerator.Generate(document),
+            file => file.RelativePath.EndsWith("ExeBlueprint.Core.Tests.cs", StringComparison.Ordinal)).Content;
+
+        Assert.Contains("internal class NestedTypeFixture<T>", source);
+        Assert.Contains("    public sealed class Child<U>", source);
+        Assert.DoesNotContain("class Child<T, U>", source, StringComparison.Ordinal);
+        Assert.Contains("        public T OuterValue { get; set; }", source);
+        Assert.Contains("        public U InnerValue { get; set; }", source);
+        Assert.Contains("        public enum State : byte", source);
+        Assert.Contains("            Ready = 2,", source);
+        Assert.Contains("        public struct Leaf", source);
+    }
+
+    [Fact]
+    public async Task EmitsRefStructAndComputedRefLikePropertyStubs()
+    {
+        var assemblyPath = typeof(RefStructFixture).Assembly.Location;
+        var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
+        var source = Assert.Single(
+            CSharpSkeletonGenerator.Generate(document),
+            file => file.RelativePath.EndsWith("ExeBlueprint.Core.Tests.cs", StringComparison.Ordinal)).Content;
+
+        Assert.Contains("internal ref struct RefStructFixture", source);
+        Assert.Contains("public System.Span<byte> Buffer", source);
+        Assert.Contains("get => throw new global::System.NotImplementedException();", source);
+        Assert.Contains("set { }", source);
+        Assert.Contains("public System.ReadOnlySpan<byte> Header", source);
+        Assert.DoesNotContain("System.ReadOnlySpan<byte> Header { get; }", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void GeneratesSolutionAndReferencesForRelatedAssemblies()
     {
         var document = new BlueprintDocument

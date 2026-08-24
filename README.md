@@ -21,7 +21,7 @@ ExeBlueprint 用來整理 Windows 應用程式套件。它會掃描 EXE、DLL、
 - 讀取 PE 架構、子系統、section 與簽章資料
 - 分辨 .NET assembly 與原生 PE
 - 讀取 PE imports 與 .NET assembly references
-- 讀出 .NET assembly 的命名空間、型別、欄位、屬性、事件、方法簽章、virtual／override／sealed dispatch 旗標、enum 常值與繼承關係
+- 讀出 .NET assembly 的命名空間、型別、巢狀宣告關係、ref-like 旗標、欄位、屬性、事件、方法簽章、virtual／override／sealed dispatch 旗標、enum 常值與繼承關係
 - 掃描 IL 建立方法層級呼叫圖，看得出程式流程怎麼串
 - 把每個方法的 IL 反組譯成可讀指令（呼叫、字串、分支目標都解析出來）
 - 用堆疊模擬把方法 IL 還原成 C# 陳述式，把條件分支還原成 if／if-else，迴圈還原成 while／do-while（可巢狀），並還原標準 try/catch、含混合巢狀 `&&`／`||` 短路條件的 catch filter、try/finally、fault 與複合 try/catch/finally，也支援保護區直接拋出例外的 terminal try
@@ -137,7 +137,7 @@ src/ExeBlueprint.Cli/bin/Release/net10.0/win-x64/publish/exe-blueprint.exe
 - 解開 Inno Setup、NSIS、MSI、PyInstaller 與 Electron 套件
 - 深化原生 PE 分析：把 Ghidra 的函式進一步還原成呼叫圖與程式碼（目前先列出函式清單）
 - 擴充中介模型，補上 UI、資源和設定（函式、型別、欄位、屬性、事件、呼叫圖已完成 .NET 部分）
-- 補齊例外處理與型別引用，讓骨架能直接編譯成多專案 solution（目前會產生 `.slnx` 與套件內的 `ProjectReference`，已保留完整命名空間及欄位／屬性／事件修飾詞，能區分 virtual、override、sealed override 與 final 介面實作，並還原 if／if-else、while／do-while、標準 switch、try/catch、含混合巢狀短路條件的 catch filter、try/finally、以 catch/rethrow 等價表示的 fault、複合 try/catch/finally、terminal try、char 常值、enum 常值與區域變數型別）
+- 補齊例外處理與型別引用，讓骨架能直接編譯成多專案 solution（目前會產生 `.slnx` 與套件內的 `ProjectReference`，已保留完整命名空間、泛型巢狀型別、ref struct 及欄位／屬性／事件修飾詞，能區分 virtual、override、sealed override 與 final 介面實作，並還原 if／if-else、while／do-while、標準 switch、try/catch、含混合巢狀短路條件的 catch filter、try/finally、以 catch/rethrow 等價表示的 fault、複合 try/catch/finally、terminal try、char 常值、enum 常值與區域變數型別）
 - 優先支援易語言、VB6、Delphi 到 C# 的轉換
 - 讓 C++／Rust／Go 產生器也還原方法體、支援易語言（目前這三個語言只還原結構）
 - 比較原程式與重建版本的輸入、輸出和副作用

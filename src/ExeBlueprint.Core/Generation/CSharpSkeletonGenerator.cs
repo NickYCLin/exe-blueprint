@@ -5,7 +5,7 @@ namespace ExeBlueprint.Generation;
 
 // 把 CodeModel 轉成可閱讀的 C# 骨架。
 // 這是「轉語言」鏈路的第一步：還原型別與成員的形狀，能安全結構化的方法也帶回方法體。
-// 產出的程式碼用來對照與接手改寫，不保證能直接編譯（泛型限制、巢狀型別等尚未完整還原）。
+// 產出的程式碼用來對照與接手改寫，不保證能直接編譯（泛型限制、外部依賴等尚未完整還原）。
 public static class CSharpSkeletonGenerator
 {
     private const int MaxIlLinesInBody = 40;
@@ -35,16 +35,34 @@ public static class CSharpSkeletonGenerator
             var projectDirectory = project.ProjectDirectory;
 
             var emittableTypes = artifact.Code!.Types
-                .Where(type => !type.IsNested && !IsCompilerGenerated(type.Name) && type.Kind != "delegate")
+                .Where(type => !IsCompilerGenerated(type.Name) && type.Kind != "delegate")
                 .ToArray();
+            var nestedTypesByDeclaringType = emittableTypes
+                .Where(type => type.IsNested && !string.IsNullOrEmpty(type.DeclaringType))
+                .GroupBy(type => type.DeclaringType!, StringComparer.Ordinal)
+                .ToDictionary(
+                    group => group.Key,
+                    group => group.OrderBy(type => type.Name, StringComparer.Ordinal).ToArray(),
+                    StringComparer.Ordinal);
+            var topLevelTypes = emittableTypes
+                .Where(type => !type.IsNested)
+                .ToArray();
+            var refLikeTypes = artifact.Code.Types
+                .Where(type => type.IsRefLike)
+                .Select(type => type.FullName)
+                .ToHashSet(StringComparer.Ordinal);
 
-            foreach (var namespaceGroup in emittableTypes.GroupBy(type => type.Namespace).OrderBy(group => group.Key, StringComparer.Ordinal))
+            foreach (var namespaceGroup in topLevelTypes.GroupBy(type => type.Namespace).OrderBy(group => group.Key, StringComparer.Ordinal))
             {
                 var fileName = string.IsNullOrEmpty(namespaceGroup.Key) ? "_GlobalNamespace" : namespaceGroup.Key;
                 files.Add(new GeneratedFile
                 {
                     RelativePath = $"{projectDirectory}/{fileName}.cs",
-                    Content = BuildNamespaceFile(namespaceGroup.Key, namespaceGroup)
+                    Content = BuildNamespaceFile(
+                        namespaceGroup.Key,
+                        namespaceGroup,
+                        nestedTypesByDeclaringType,
+                        refLikeTypes)
                 });
             }
 
@@ -80,7 +98,11 @@ public static class CSharpSkeletonGenerator
         return files;
     }
 
-    private static string BuildNamespaceFile(string namespaceName, IEnumerable<TypeModel> types)
+    private static string BuildNamespaceFile(
+        string namespaceName,
+        IEnumerable<TypeModel> types,
+        IReadOnlyDictionary<string, TypeModel[]> nestedTypesByDeclaringType,
+        IReadOnlySet<string> refLikeTypes)
     {
         var builder = new StringBuilder();
         builder.AppendLine("// 由 ExeBlueprint 自動產生的 C# 骨架，供對照與接手改寫，不保證可直接編譯。");
@@ -96,7 +118,7 @@ public static class CSharpSkeletonGenerator
         var ordered = types.OrderBy(type => type.Name, StringComparer.Ordinal).ToArray();
         for (var index = 0; index < ordered.Length; index++)
         {
-            AppendType(builder, ordered[index], indent);
+            AppendType(builder, ordered[index], indent, nestedTypesByDeclaringType, refLikeTypes);
             if (index < ordered.Length - 1)
             {
                 builder.AppendLine();
@@ -106,7 +128,12 @@ public static class CSharpSkeletonGenerator
         return builder.ToString();
     }
 
-    private static void AppendType(StringBuilder builder, TypeModel type, string indent)
+    private static void AppendType(
+        StringBuilder builder,
+        TypeModel type,
+        string indent,
+        IReadOnlyDictionary<string, TypeModel[]> nestedTypesByDeclaringType,
+        IReadOnlySet<string> refLikeTypes)
     {
         var declaration = BuildTypeDeclaration(type);
         builder.AppendLine($"{indent}{declaration}");
@@ -157,6 +184,7 @@ public static class CSharpSkeletonGenerator
 
         foreach (var property in type.Properties.Where(property => !IsCompilerGenerated(property.Name)))
         {
+            var propertyType = Humanize(property.Type, type.GenericParameters, []);
             var accessors = new StringBuilder("{ ");
             if (property.HasGetter)
             {
@@ -179,7 +207,41 @@ public static class CSharpSkeletonGenerator
                 property.IsVirtual,
                 property.IsFinal,
                 property.IsNewSlot);
-            builder.AppendLine($"{body}{modifiers}{Humanize(property.Type, type.GenericParameters, [])} {SafeName(property.Name)} {accessors}");
+            if (type.Kind != "interface" &&
+                !property.IsAbstract &&
+                IsRefLikeType(propertyType, refLikeTypes))
+            {
+                builder.AppendLine($"{body}{modifiers}{propertyType} {SafeName(property.Name)}");
+                builder.AppendLine($"{body}{{");
+                if (property.HasGetter)
+                {
+                    var getterAccessibility = new StringBuilder();
+                    AppendAccessorAccessibility(
+                        getterAccessibility,
+                        property.GetterAccessibility,
+                        property.Accessibility,
+                        property.HasSetter);
+                    builder.AppendLine($"{body}    {getterAccessibility}get => throw new global::System.NotImplementedException();");
+                }
+
+                if (property.HasSetter)
+                {
+                    var setterAccessibility = new StringBuilder();
+                    AppendAccessorAccessibility(
+                        setterAccessibility,
+                        property.SetterAccessibility,
+                        property.Accessibility,
+                        property.HasGetter);
+                    builder.AppendLine($"{body}    {setterAccessibility}set {{ }}");
+                }
+
+                builder.AppendLine($"{body}}}");
+            }
+            else
+            {
+                builder.AppendLine($"{body}{modifiers}{propertyType} {SafeName(property.Name)} {accessors}");
+            }
+
             wroteMember = true;
         }
 
@@ -214,6 +276,23 @@ public static class CSharpSkeletonGenerator
         {
             AppendMethod(builder, type, methods[index], body);
             if (index < methods.Length - 1)
+            {
+                builder.AppendLine();
+            }
+        }
+
+        var nestedTypes = nestedTypesByDeclaringType.TryGetValue(type.FullName, out var children)
+            ? children
+            : [];
+        if ((wroteMember || methods.Length > 0) && nestedTypes.Length > 0)
+        {
+            builder.AppendLine();
+        }
+
+        for (var index = 0; index < nestedTypes.Length; index++)
+        {
+            AppendType(builder, nestedTypes[index], body, nestedTypesByDeclaringType, refLikeTypes);
+            if (index < nestedTypes.Length - 1)
             {
                 builder.AppendLine();
             }
@@ -461,12 +540,20 @@ public static class CSharpSkeletonGenerator
             }
         }
 
+        if (type.Kind == "struct" && type.IsRefLike)
+        {
+            parts.Add("ref");
+        }
+
         parts.Add(type.Kind);
 
         var name = CleanName(type.Name);
-        if (type.GenericParameters.Count > 0)
+        var declaredGenericParameters = type.GenericParameters
+            .Skip(type.InheritedGenericParameterCount)
+            .ToArray();
+        if (declaredGenericParameters.Length > 0)
         {
-            name += $"<{string.Join(", ", type.GenericParameters)}>";
+            name += $"<{string.Join(", ", declaredGenericParameters)}>";
         }
 
         parts.Add(name);
@@ -489,6 +576,19 @@ public static class CSharpSkeletonGenerator
         }
 
         return bases.Count == 0 ? declaration : $"{declaration} : {string.Join(", ", bases)}";
+    }
+
+    private static bool IsRefLikeType(string typeName, IReadOnlySet<string> refLikeTypes)
+    {
+        var genericStart = typeName.IndexOf('<', StringComparison.Ordinal);
+        var definitionName = genericStart < 0 ? typeName : typeName[..genericStart];
+        return definitionName is
+            "System.Span" or
+            "System.ReadOnlySpan" or
+            "System.TypedReference" or
+            "System.ArgIterator" or
+            "System.RuntimeArgumentHandle" ||
+            refLikeTypes.Contains(definitionName);
     }
 
     private static bool ShouldSkipMethod(MethodModel method)
@@ -623,7 +723,7 @@ public static class CSharpSkeletonGenerator
         需要對照原程式的 IL 或反組譯結果補回實作。
 
         用途是拿來對照結構、接手改寫或轉成其他語言的起點，不保證能直接編譯：
-        泛型限制、巢狀型別、運算子多載與 P/Invoke 等尚未完整處理。
+        泛型限制、套件外依賴、運算子多載與 P/Invoke 等尚未完整處理。
 
         """;
 

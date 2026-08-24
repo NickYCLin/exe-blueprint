@@ -33,7 +33,7 @@ Blueprint 中介資料
 - `input`：輸入類型、檔案數與總大小
 - `summary`：PE、assembly、型別、方法、資源和相依關係數量
 - `files`：每個檔案的格式、雜湊和分析資料，受管組件另含 `code`
-- `files[].code`：.NET 型別、欄位、屬性、事件、方法簽章與 dispatch 旗標、入口點、方法層級呼叫圖與各方法反組譯出的 IL
+- `files[].code`：.NET 型別、巢狀宣告與 ref-like 關係、欄位、屬性、事件、方法簽章與 dispatch 旗標、入口點、方法層級呼叫圖與各方法反組譯出的 IL
 - `dependencies`：PE imports 與 assembly references
 - `technologies`：語言、runtime、框架和工具鏈判斷
 - `warnings`：略過或無法分析的項目
@@ -73,7 +73,7 @@ Ghidra 安裝目錄來自 `--ghidra` 或環境變數 `GHIDRA_INSTALL_DIR`。找�
 重建器不會直接翻譯零碎的反編譯文字。它會先把函式、型別、呼叫、UI、資源和外部副作用整理成中介資料，再由目標語言產生器輸出專案。
 
 目前已有第一個產生器 `CSharpSkeletonGenerator`，吃 `CodeModel` 輸出 C# 骨架：
-還原命名空間、型別、欄位、屬性、事件、方法簽章與繼承，並保留完整型別名稱及成員的可見性、static／abstract／virtual／override／sealed override 與 readonly 修飾詞；metadata 中標為 final new-slot 的隱含介面實作會輸出成一般非 virtual 成員，避免 sealed 類別產生無效 C#。
+還原命名空間、型別、泛型巢狀宣告、ref struct、欄位、屬性、事件、方法簽章與繼承，並保留完整型別名稱及成員的可見性、static／abstract／virtual／override／sealed override 與 readonly 修飾詞；metadata 中標為 final new-slot 的隱含介面實作會輸出成一般非 virtual 成員，避免 sealed 類別產生無效 C#。ref-like 屬性不會輸出成需要 backing field 的 auto-property，而是使用無儲存欄位的 accessor stub。
 多個輸入 assembly 會輸出 `Reconstructed.slnx`，套件內可對上的 assembly reference 會轉成 `ProjectReference`。方法體由 `ManagedSymbolReader` 的 IL 還原器重建：
 先把 IL 解碼成指令陣列，用區間遞迴結構化把條件分支還原成 if／if-else，比對 Roslyn 的
 while／for 形狀（先跳條件、主體、條件、往回跳）還原成 while，並把底測式（往回跳收尾）還原成 do-while（皆可巢狀）；
@@ -86,7 +86,7 @@ IL `switch` 跳表可還原直接 return／throw 的分支，也能處理各 cas
 含回跳、會產生陳述式或不規則控制分支的 filter，以及非標準例外區域目前仍會退回反組譯 IL 註解加 `NotImplementedException`。
 重建採全有或全無：遇到無法結構化的跳轉、參照編譯器產生的名稱或任何不支援的指令，就整個方法放棄，
 寧可不還原也不產出語意錯誤的程式碼。enum 會保留底層整數型別與各成員原始數值；
-型別引用已保留完整命名空間，但套件外依賴、泛型限制與巢狀型別仍可能需要手動補齊，因此不保證可直接編譯。
+型別引用已保留完整命名空間，但套件外依賴與泛型限制仍可能需要手動補齊，因此不保證可直接編譯。
 
 另外也有 `CppSkeletonGenerator`、`RustSkeletonGenerator`、`GoSkeletonGenerator`，
 共用 `SkeletonSupport` 挑型別與 `LanguageTypeMap` 做基本型別對應，各自輸出該語言的型別與方法簽章骨架
