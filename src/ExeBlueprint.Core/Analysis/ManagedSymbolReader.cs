@@ -2631,16 +2631,49 @@ internal static class ManagedSymbolReader
         return true;
     }
 
-    // 參數型別是 char、實際傳的又是整數常值時，還原成 char 常值（例如 StartsWith(60) → StartsWith('<')）。
+    // bool、char 與 enum 在 IL 中都以整數常值傳遞；依正式參數型別還原成可編譯的 C# 引數。
     private static string RenderArgument(string argument, string? parameterType)
     {
-        if (parameterType != "char" || !int.TryParse(argument, out var value) || value is < 0 or > 0xFFFF)
+        if (!long.TryParse(argument, out var value))
         {
             return argument;
         }
 
-        return FormatCharLiteral((char)value);
+        if (parameterType == "bool" && value is 0 or 1)
+        {
+            return value == 1 ? "true" : "false";
+        }
+
+        if (parameterType == "char" && value is >= 0 and <= 0xFFFF)
+        {
+            return FormatCharLiteral((char)value);
+        }
+
+        return IsNumericOrReferenceParameter(parameterType)
+            ? argument
+            : $"unchecked(({parameterType}){argument})";
     }
+
+    private static bool IsNumericOrReferenceParameter(string? parameterType) => parameterType is null
+        or "sbyte"
+        or "byte"
+        or "short"
+        or "ushort"
+        or "int"
+        or "uint"
+        or "long"
+        or "ulong"
+        or "nint"
+        or "nuint"
+        or "float"
+        or "double"
+        or "decimal"
+        or "string"
+        or "object"
+        or "TypedReference"
+        || parameterType.StartsWith('!')
+        || parameterType.StartsWith("ref ", StringComparison.Ordinal)
+        || parameterType.EndsWith('*');
 
     private static string FormatCharLiteral(char value) => value switch
     {

@@ -92,15 +92,47 @@ public sealed class ManagedSymbolReaderTests
         var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
         var methods = document.Files[0].Code!.Types.SelectMany(type => type.Methods).ToArray();
 
-        // char 參數的整數常值應還原成 char 常值（NormalizeFieldName 會呼叫 name.StartsWith('<')）。
+        // char 參數的整數常值應還原成 char 常值。
+        var fixtureDocument = await new BlueprintAnalyzer().AnalyzeAsync(typeof(ManagedSymbolReaderTests).Assembly.Location);
+        var fixture = Assert.Single(
+            fixtureDocument.Files[0].Code!.Types,
+            type => type.FullName == typeof(TypedArgumentFixture).FullName);
+        var startsWith = Assert.Single(fixture.Methods, method => method.Name == nameof(TypedArgumentFixture.StartsWithLessThan));
         Assert.Contains(
-            methods,
-            method => method.Body.Any(line => line.Contains("StartsWith('<')", StringComparison.Ordinal)));
+            startsWith.Body,
+            line => line.Contains("StartsWith('<')", StringComparison.Ordinal));
 
         // 讀得到區域變數型別時，宣告應用實際型別而非 var。
         Assert.Contains(
             methods,
             method => method.Body.Any(line => line.TrimStart().StartsWith("System.Text.StringBuilder v", StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public async Task ReconstructsBooleanAndEnumCallArguments()
+    {
+        var assemblyPath = typeof(ManagedSymbolReaderTests).Assembly.Location;
+        var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
+        var fixture = Assert.Single(
+            document.Files[0].Code!.Types,
+            type => type.FullName == typeof(TypedArgumentFixture).FullName);
+
+        var startsWith = Assert.Single(fixture.Methods, method => method.Name == nameof(TypedArgumentFixture.StartsWithIgnoreCase));
+        Assert.Contains(
+            startsWith.Body,
+            line => line.Contains("unchecked((System.StringComparison)5)", StringComparison.Ordinal));
+
+        var delete = Assert.Single(fixture.Methods, method => method.Name == nameof(TypedArgumentFixture.DeleteRecursively));
+        Assert.Contains(
+            delete.Body,
+            line => line.Contains("System.IO.Directory.Delete(path, true)", StringComparison.Ordinal));
+
+        var deleteNonRecursively = Assert.Single(
+            fixture.Methods,
+            method => method.Name == nameof(TypedArgumentFixture.DeleteNonRecursively));
+        Assert.Contains(
+            deleteNonRecursively.Body,
+            line => line.Contains("System.IO.Directory.Delete(path, false)", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -691,6 +723,20 @@ internal sealed class RefLikePropertyFixture
 internal ref struct RefStructFixture
 {
     public Span<byte> Buffer { get; set; }
+}
+
+internal static class TypedArgumentFixture
+{
+    public static bool StartsWithLessThan(string value) => value.StartsWith('<');
+
+    public static bool StartsWithIgnoreCase(string value) =>
+        value.StartsWith("prefix", StringComparison.OrdinalIgnoreCase);
+
+    public static void DeleteRecursively(string path) =>
+        Directory.Delete(path, recursive: true);
+
+    public static void DeleteNonRecursively(string path) =>
+        Directory.Delete(path, recursive: false);
 }
 
 internal static class ExceptionHandlingFixture

@@ -79,7 +79,7 @@ Ghidra 安裝目錄來自 `--ghidra` 或環境變數 `GHIDRA_INSTALL_DIR`。找�
 while／for 形狀（先跳條件、主體、條件、往回跳）還原成 while，並把底測式（往回跳收尾）還原成 do-while（皆可巢狀）；
 區塊內以堆疊模擬還原載入、算式、欄位、屬性、方法呼叫、`new`、運算子、`return`、`throw`；
 auto-property 的隱藏欄位會還原成屬性名稱，運算子方法還原成運算子語法。
-呼叫時若參數型別是 char，整數常值會還原成 char 常值；區域變數會依方法的 local signature 用實際型別宣告。
+呼叫時會依正式參數型別，把 IL 整數常值還原成 bool、char 或具明確轉型的 enum 引數；區域變數會依方法的 local signature 用實際型別宣告。
 IL `switch` 跳表可還原直接 return／throw 的分支，也能處理各 case 指派區域變數後回到共同 join 的形狀；這類區域變數會提升到 switch 外並依 IL locals init 語意先設成 default。
 標準 `try/catch`、`try/finally`、`fault` 與複合 `try/catch/finally` 會依 exception region metadata 的保護區域與 handler 邊界還原，不靠跳轉位置猜測；保護區可用 `leave` 正常離開，也可由 `throw` 或合法巢狀 `rethrow` 直接終止。C# 沒有 `fault` 語法，因此會輸出語意等價的 `catch` 並在 handler 尾端重新拋出。
 `catch` 支援多個 handler、未命名 catch-all、具名例外變數、重新拋出，以及 Roslyn 產生的直線運算式與可混合巢狀的 `&&`／`||` 短路 `when` filter；filter 後接一般 catch 或與 finally 複合也能還原。跨區塊的區域變數會提升到 `try` 外並依 IL locals init 語意先設成 default。
