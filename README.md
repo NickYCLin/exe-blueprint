@@ -14,8 +14,8 @@ ExeBlueprint 用來整理 Windows 應用程式套件。它會掃描 EXE、DLL、
 - 讀出 .NET assembly 的命名空間、型別、欄位、屬性、方法簽章與繼承關係
 - 掃描 IL 建立方法層級呼叫圖，看得出程式流程怎麼串
 - 把每個方法的 IL 反組譯成可讀指令（呼叫、字串、分支目標都解析出來）
-- 用堆疊模擬把方法 IL 還原成 C# 陳述式，並把條件分支還原成 if／if-else（可巢狀）
-- 帶迴圈或 switch 的方法還原不了，會保留反組譯 IL 當註解
+- 用堆疊模擬把方法 IL 還原成 C# 陳述式，把條件分支還原成 if／if-else，迴圈還原成 while（可巢狀）
+- 帶 switch 或非標準流程的方法還原不了，會保留反組譯 IL 當註解
 - 把 .NET 型別轉出一份 C# 骨架，能還原的方法直接給程式碼，其餘附上原始 IL
 - 找出套件內可以對上的 EXE／DLL 相依關係
 - 依檔案內容辨識常見語言、runtime、框架與安裝器
@@ -63,8 +63,8 @@ dotnet run --project .\src\ExeBlueprint.Cli -- analyze .\App.exe --json-only
 dotnet run --project .\src\ExeBlueprint.Cli -- analyze .\App.exe --emit-csharp
 ```
 
-骨架會放在輸出目錄的 `reconstructed-csharp/`。沒有迴圈／switch 的方法會用堆疊模擬還原成
-C# 陳述式（含 if／if-else）；還原不了的方法會把原始 IL 放進註解當依據，方法體先用 `NotImplementedException`。
+骨架會放在輸出目錄的 `reconstructed-csharp/`。能結構化的方法會用堆疊模擬還原成
+C# 陳述式（含 if／if-else 與 while 迴圈）；還原不了的方法會把原始 IL 放進註解當依據，方法體先用 `NotImplementedException`。
 用來對照結構或當轉語言的起點，不保證能直接編譯。
 
 輸出目錄已有報告時，程式預設不會覆寫。確定要覆寫可加上 `--force`。
@@ -100,7 +100,7 @@ src/ExeBlueprint.Cli/bin/Release/net10.0/win-x64/publish/exe-blueprint.exe
 - 解開 Inno Setup、NSIS、MSI、PyInstaller 與 Electron 套件
 - 串接 ILSpy、Ghidra 等分析後端（讓原生 PE 也能還原函式與流程）
 - 擴充中介模型，補上 UI、資源和設定（函式、型別、欄位、屬性、呼叫圖已完成 .NET 部分）
-- 還原迴圈與 switch，並補上區域變數型別，讓骨架長出完整方法體、能直接編譯成多專案 solution（目前已能還原 if／if-else）
+- 還原 switch、do-while，並補上 char／enum 常值與區域變數型別，讓骨架能直接編譯成多專案 solution（目前已能還原 if／if-else 與 while）
 - 優先支援易語言、VB6、Delphi 到 C# 的轉換
 - 加入 C++、Rust、Go 和易語言程式碼產生器（C# 骨架已有第一版）
 - 比較原程式與重建版本的輸入、輸出和副作用

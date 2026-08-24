@@ -66,10 +66,11 @@ Blueprint 中介資料
 
 目前已有第一個產生器 `CSharpSkeletonGenerator`，吃 `CodeModel` 輸出 C# 骨架：
 還原命名空間、型別、欄位、屬性、方法簽章與繼承。方法體由 `ManagedSymbolReader` 的 IL 還原器重建：
-先把 IL 解碼成指令陣列，用區間遞迴結構化把條件分支還原成 if／if-else（可巢狀），
+先把 IL 解碼成指令陣列，用區間遞迴結構化把條件分支還原成 if／if-else，並比對 Roslyn 的
+while／for 形狀（先跳條件、主體、條件、往回跳）還原成 while（皆可巢狀）；
 區塊內以堆疊模擬還原載入、算式、欄位、屬性、方法呼叫、`new`、運算子、`return`、`throw`；
 auto-property 的隱藏欄位會還原成屬性名稱，運算子方法還原成運算子語法。
-帶迴圈（回跳）、switch 或例外處理的方法目前還原不了，會退回反組譯 IL 註解加 `NotImplementedException`。
+帶 switch、do-while、例外處理或非標準流程的方法目前還原不了，會退回反組譯 IL 註解加 `NotImplementedException`。
 重建採全有或全無：遇到無法結構化的跳轉、參照編譯器產生的名稱或任何不支援的指令，就整個方法放棄，
 寧可不還原也不產出語意錯誤的程式碼。char／enum 常值目前以整數呈現，區域變數型別用 `var`，所以不保證可直接編譯。
 

@@ -410,6 +410,14 @@ internal static class ManagedSymbolReader
         bool IsInstance,
         string ReturnType);
 
+    // 測試用進入點：以現成的 MetadataReader 直接餵 IL bytes 驗證還原結果。
+    internal static IReadOnlyList<string>? ReconstructBodyForTest(
+        MetadataReader metadata,
+        byte[] il,
+        bool isInstance,
+        string returnType) =>
+        TryReconstructLinearBody(metadata, il, isInstance, new Dictionary<int, string>(), returnType);
+
     // 把方法的 IL 還原成 C#。先解碼成指令陣列，再用區間遞迴結構化還原 if／if-else（可巢狀）。
     // 採全有或全無：遇到迴圈（回跳）、switch、例外處理或任何無法結構化的跳轉就整個方法放棄，
     // 退回 IL 註解，寧可不還原也不要產出語意錯誤的程式碼。輸出的 C# 不保證能編譯，但語意貼近原程式。
@@ -495,14 +503,38 @@ internal static class ManagedSymbolReader
 
             if (instr.Name is "br" or "br.s")
             {
-                // 只允許往前跳到本區間結尾（等同順順落下）；其餘無條件跳轉無法結構化。
+                // 往前跳到本區間結尾＝順順落下，略過即可。
                 if (offsetToIndex.TryGetValue(instr.Target, out var branchIndex) && branchIndex == end)
                 {
                     index++;
                     continue;
                 }
 
-                return null;
+                // 否則嘗試比對「先跳到條件測試」的 while／for 迴圈形狀。
+                var loop = TryMatchWhileLoop(instructions, offsetToIndex, index, end);
+                if (loop is null || stack.Count != 0)
+                {
+                    return null;
+                }
+
+                var loopCondition = TryBuildLoopCondition(context, instructions, loop.Value.CondStart, loop.Value.BranchIndex, declaredLocals);
+                if (loopCondition is null)
+                {
+                    return null;
+                }
+
+                var loopBody = TryStructure(context, instructions, offsetToIndex, loop.Value.BodyStart, loop.Value.BodyEnd, declaredLocals, depth + 1);
+                if (loopBody is null)
+                {
+                    return null;
+                }
+
+                statements.Add($"while ({loopCondition})");
+                statements.Add("{");
+                statements.AddRange(loopBody.Select(line => $"    {line}"));
+                statements.Add("}");
+                index = loop.Value.JoinIndex;
+                continue;
             }
 
             // 條件分支：往前跳才可能是 if。回跳代表迴圈，直接放棄。
@@ -614,6 +646,119 @@ internal static class ManagedSymbolReader
             "bgt" or "bgt.s" or "bgt.un" or "bgt.un.s" => $"{left} <= {right}",
             "ble" or "ble.s" or "ble.un" or "ble.un.s" => $"{left} > {right}",
             "blt" or "blt.s" or "blt.un" or "blt.un.s" => $"{left} >= {right}",
+            _ => string.Empty
+        };
+
+        return condition.Length > 0;
+    }
+
+    // 比對 Roslyn 的 while／for 形狀：br→條件、主體、條件、往回跳主體的條件分支。
+    private static (int CondStart, int BranchIndex, int BodyStart, int BodyEnd, int JoinIndex)? TryMatchWhileLoop(
+        Instr[] instructions,
+        Dictionary<int, int> offsetToIndex,
+        int headerIndex,
+        int end)
+    {
+        var header = instructions[headerIndex];
+        if (!offsetToIndex.TryGetValue(header.Target, out var condStart) || condStart <= headerIndex || condStart > end)
+        {
+            return null;
+        }
+
+        var bodyStart = headerIndex + 1;
+        if (bodyStart > condStart || bodyStart >= instructions.Length)
+        {
+            return null;
+        }
+
+        var bodyStartOffset = instructions[bodyStart].Offset;
+
+        // 條件區塊必須是直線，最後以「往回跳主體開頭」的條件分支收尾。
+        for (var index = condStart; index < end; index++)
+        {
+            var instr = instructions[index];
+            if (!instr.IsBranch)
+            {
+                continue;
+            }
+
+            if (instr.Name is "br" or "br.s" || instr.Target != bodyStartOffset)
+            {
+                return null;
+            }
+
+            return (condStart, index, bodyStart, condStart, index + 1);
+        }
+
+        return null;
+    }
+
+    private static string? TryBuildLoopCondition(
+        ReconContext context,
+        Instr[] instructions,
+        int condStart,
+        int branchIndex,
+        HashSet<int> declaredLocals)
+    {
+        var stack = new Stack<string>();
+        var statements = new List<string>();
+        for (var index = condStart; index < branchIndex; index++)
+        {
+            var instr = instructions[index];
+            if (instr.IsBranch || !ApplySimpleInstruction(context, instr, stack, statements, declaredLocals, out var terminal) || terminal)
+            {
+                return null;
+            }
+        }
+
+        // 迴圈條件必須是純運算式，不能夾帶副作用陳述式。
+        if (statements.Count != 0 || !TryBuildTakenCondition(instructions[branchIndex].Name, stack, out var condition) || stack.Count != 0)
+        {
+            return null;
+        }
+
+        return condition;
+    }
+
+    // 分支「成立時」的 C# 條件；用於迴圈（往回跳＝再跑一次主體）。
+    private static bool TryBuildTakenCondition(string name, Stack<string> stack, out string condition)
+    {
+        condition = string.Empty;
+        switch (name)
+        {
+            case "brtrue":
+            case "brtrue.s":
+                if (!TryPop(stack, out var truthy))
+                {
+                    return false;
+                }
+
+                condition = truthy;
+                return true;
+            case "brfalse":
+            case "brfalse.s":
+                if (!TryPop(stack, out var falsy))
+                {
+                    return false;
+                }
+
+                condition = $"!({falsy})";
+                return true;
+        }
+
+        if (!TryPop(stack, out var right) || !TryPop(stack, out var left))
+        {
+            return false;
+        }
+
+        condition = name switch
+        {
+            "beq" or "beq.s" => $"{left} == {right}",
+            "bne.un" or "bne.un.s" => $"{left} != {right}",
+            "bge" or "bge.s" or "bge.un" or "bge.un.s" => $"{left} >= {right}",
+            "bgt" or "bgt.s" or "bgt.un" or "bgt.un.s" => $"{left} > {right}",
+            "ble" or "ble.s" or "ble.un" or "ble.un.s" => $"{left} <= {right}",
+            "blt" or "blt.s" or "blt.un" or "blt.un.s" => $"{left} < {right}",
             _ => string.Empty
         };
 
