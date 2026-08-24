@@ -28,6 +28,24 @@ public sealed class ManagedSymbolReaderTests
     }
 
     [Fact]
+    public async Task DisassemblesMethodBodiesIntoReadableIl()
+    {
+        var assemblyPath = typeof(BlueprintAnalyzer).Assembly.Location;
+        var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
+        var code = document.Files[0].Code!;
+
+        var methodsWithIl = code.Types
+            .SelectMany(type => type.Methods)
+            .Where(method => method.Il.Count > 0)
+            .ToArray();
+
+        Assert.NotEmpty(methodsWithIl);
+        Assert.All(methodsWithIl, method =>
+            Assert.All(method.Il, instruction => Assert.StartsWith("IL_", instruction, StringComparison.Ordinal)));
+        Assert.Contains(methodsWithIl, method => method.Il[^1].EndsWith("ret", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task SummaryAggregatesManagedTypeAndMethodCounts()
     {
         var assemblyPath = typeof(BlueprintAnalyzer).Assembly.Location;

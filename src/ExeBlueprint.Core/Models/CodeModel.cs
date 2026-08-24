@@ -103,6 +103,10 @@ public sealed record MethodModel
     public IReadOnlyList<string> GenericParameters { get; init; } = [];
 
     public IReadOnlyList<ParameterModel> Parameters { get; init; } = [];
+
+    public IReadOnlyList<string> Il { get; init; } = [];
+
+    public bool IlTruncated { get; init; }
 }
 
 public sealed record ParameterModel

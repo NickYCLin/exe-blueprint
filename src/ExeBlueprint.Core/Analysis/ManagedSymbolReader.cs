@@ -15,6 +15,7 @@ internal static class ManagedSymbolReader
 {
     private const int MaxTypes = 5_000;
     private const int MaxCallEdges = 50_000;
+    private const int MaxIlInstructions = 400;
 
     public static async Task<CodeModel?> TryReadAsync(string path, CancellationToken cancellationToken)
     {
@@ -57,7 +58,7 @@ internal static class ManagedSymbolReader
             cancellationToken.ThrowIfCancellationRequested();
             var definition = metadata.GetTypeDefinition(typeHandle);
 
-            var name = metadata.GetString(definition.Name);
+            var name = StripArity(metadata.GetString(definition.Name));
             var namespaceName = metadata.GetString(definition.Namespace);
             if (name == "<Module>")
             {
@@ -80,16 +81,28 @@ internal static class ManagedSymbolReader
                 var methodName = metadata.GetString(method.Name);
                 var hasBody = method.RelativeVirtualAddress != 0;
                 var declaringName = BuildTypeFullName(namespaceName, name);
-                methods.Add(BuildMethod(metadata, methodHandle, method, methodName, hasBody, entryPointMethod.Handle));
+                var il = hasBody ? TryReadIl(peReader, method) : null;
+
+                var model = BuildMethod(metadata, methodHandle, method, methodName, hasBody, entryPointMethod.Handle);
+                if (il is { Length: > 0 })
+                {
+                    var (instructions, ilTruncated) = Disassemble(metadata, il);
+                    model = model with { Il = instructions, IlTruncated = ilTruncated };
+                }
+
+                methods.Add(model);
                 methodCount++;
 
-                if (hasBody && edges.Count < MaxCallEdges)
+                if (il is { Length: > 0 })
                 {
-                    CollectCalls(peReader, metadata, method, $"{declaringName}.{methodName}", edges, seenEdges);
-                }
-                else if (hasBody)
-                {
-                    truncated = true;
+                    if (edges.Count < MaxCallEdges)
+                    {
+                        CollectCalls(metadata, il, $"{declaringName}.{methodName}", edges, seenEdges);
+                    }
+                    else
+                    {
+                        truncated = true;
+                    }
                 }
             }
 
@@ -156,32 +169,39 @@ internal static class ManagedSymbolReader
         return (handle, $"{fullName}.{metadata.GetString(method.Name)}");
     }
 
+    private static byte[]? TryReadIl(PEReader peReader, MethodDefinition method)
+    {
+        try
+        {
+            return peReader.GetMethodBody(method.RelativeVirtualAddress).GetILBytes();
+        }
+        catch (Exception exception) when (exception is BadImageFormatException or InvalidOperationException)
+        {
+            return null;
+        }
+    }
+
     private static void CollectCalls(
-        PEReader peReader,
         MetadataReader metadata,
-        MethodDefinition method,
+        byte[] il,
         string caller,
         List<CallEdge> edges,
         HashSet<(string, string, string)> seenEdges)
     {
-        byte[] il;
-        try
-        {
-            var body = peReader.GetMethodBody(method.RelativeVirtualAddress);
-            il = body.GetILBytes() ?? [];
-        }
-        catch (Exception exception) when (exception is BadImageFormatException or InvalidOperationException)
-        {
-            return;
-        }
-
-        foreach (var (kind, token) in EnumerateCallSites(il))
+        foreach (var instruction in EnumerateInstructions(il))
         {
             if (edges.Count >= MaxCallEdges)
             {
                 return;
             }
 
+            var kind = CallKind(instruction.OpValue);
+            if (kind is null || instruction.OperandOffset + 4 > il.Length)
+            {
+                continue;
+            }
+
+            var token = BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(instruction.OperandOffset, 4));
             var callee = ResolveMemberName(metadata, token);
             if (callee is null)
             {
@@ -196,11 +216,38 @@ internal static class ManagedSymbolReader
         }
     }
 
-    private static IEnumerable<(string Kind, int Token)> EnumerateCallSites(byte[] il)
+    private static (IReadOnlyList<string> Instructions, bool Truncated) Disassemble(MetadataReader metadata, byte[] il)
+    {
+        var instructions = new List<string>();
+        var truncated = false;
+        foreach (var instruction in EnumerateInstructions(il))
+        {
+            if (instructions.Count >= MaxIlInstructions)
+            {
+                truncated = true;
+                break;
+            }
+
+            if (!OpCodesByValue.TryGetValue(instruction.OpValue, out var opCode))
+            {
+                continue;
+            }
+
+            var operand = FormatOperand(metadata, il, instruction, opCode.OperandType);
+            instructions.Add($"IL_{instruction.Offset:X4}: {opCode.Name}{operand}");
+        }
+
+        return (instructions, truncated);
+    }
+
+    private readonly record struct IlInstruction(int Offset, short OpValue, int OperandOffset, int OperandSize);
+
+    private static IEnumerable<IlInstruction> EnumerateInstructions(byte[] il)
     {
         var position = 0;
         while (position < il.Length)
         {
+            var offset = position;
             short opValue;
             var first = il[position++];
             if (first == 0xFE)
@@ -230,17 +277,106 @@ internal static class ManagedSymbolReader
                 }
 
                 var count = BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(position, 4));
-                position += 4 + (count * 4);
+                var total = 4 + (count * 4);
+                yield return new IlInstruction(offset, opValue, position, total);
+                position += total;
                 continue;
             }
 
-            var kind = CallKind(opValue);
-            if (kind is not null && position + 4 <= il.Length)
+            yield return new IlInstruction(offset, opValue, position, operandSize);
+            position += operandSize;
+        }
+    }
+
+    private static string FormatOperand(MetadataReader metadata, byte[] il, IlInstruction instruction, OperandType operandType)
+    {
+        var offset = instruction.OperandOffset;
+        if (operandType == OperandType.InlineNone || offset + instruction.OperandSize > il.Length)
+        {
+            return string.Empty;
+        }
+
+        switch (operandType)
+        {
+            case OperandType.InlineMethod:
+            case OperandType.InlineField:
+            case OperandType.InlineType:
+            case OperandType.InlineTok:
+                return $" {ResolveTokenName(metadata, BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)))}";
+            case OperandType.InlineString:
+                return $" {FormatUserString(metadata, BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)))}";
+            case OperandType.InlineSig:
+                return $" sig(0x{BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)):X8})";
+            case OperandType.InlineI:
+                return $" {BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4))}";
+            case OperandType.InlineI8:
+                return $" {BinaryPrimitives.ReadInt64LittleEndian(il.AsSpan(offset, 8))}";
+            case OperandType.InlineR:
+                return $" {BitConverter.Int64BitsToDouble(BinaryPrimitives.ReadInt64LittleEndian(il.AsSpan(offset, 8)))}";
+            case OperandType.ShortInlineR:
+                return $" {BitConverter.Int32BitsToSingle(BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)))}";
+            case OperandType.InlineVar:
+                return $" {BinaryPrimitives.ReadUInt16LittleEndian(il.AsSpan(offset, 2))}";
+            case OperandType.ShortInlineVar:
+                return $" {il[offset]}";
+            case OperandType.ShortInlineI:
+                return $" {(sbyte)il[offset]}";
+            case OperandType.InlineBrTarget:
+                return $" IL_{offset + 4 + BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)):X4}";
+            case OperandType.ShortInlineBrTarget:
+                return $" IL_{offset + 1 + (sbyte)il[offset]:X4}";
+            case OperandType.InlineSwitch:
+                return $" ({(instruction.OperandSize - 4) / 4} targets)";
+            default:
+                return string.Empty;
+        }
+    }
+
+    private static string FormatUserString(MetadataReader metadata, int token)
+    {
+        try
+        {
+            var value = metadata.GetUserString(MetadataTokens.UserStringHandle(token));
+            var escaped = value
+                .Replace("\\", "\\\\", StringComparison.Ordinal)
+                .Replace("\"", "\\\"", StringComparison.Ordinal)
+                .ReplaceLineEndings(" ");
+            if (escaped.Length > 120)
             {
-                yield return (kind, BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(position, 4)));
+                escaped = escaped[..120] + "…";
             }
 
-            position += operandSize;
+            return $"\"{escaped}\"";
+        }
+        catch (Exception exception) when (exception is BadImageFormatException or ArgumentException)
+        {
+            return $"str(0x{token:X8})";
+        }
+    }
+
+    private static string ResolveTokenName(MetadataReader metadata, int token)
+    {
+        var handle = MetadataTokens.EntityHandle(token);
+        switch (handle.Kind)
+        {
+            case HandleKind.MethodDefinition:
+            case HandleKind.MemberReference:
+            case HandleKind.MethodSpecification:
+                return ResolveMemberName(metadata, token) ?? $"token(0x{token:X8})";
+
+            case HandleKind.FieldDefinition:
+                var field = metadata.GetFieldDefinition((FieldDefinitionHandle)handle);
+                var declaringType = GetTypeName(metadata, field.GetDeclaringType());
+                var fieldName = metadata.GetString(field.Name);
+                return declaringType is null ? fieldName : $"{declaringType}.{fieldName}";
+
+            case HandleKind.TypeDefinition:
+            case HandleKind.TypeReference:
+            case HandleKind.TypeSpecification:
+                return GetTypeName(metadata, handle) ?? $"token(0x{token:X8})";
+
+            default:
+                return $"token(0x{token:X8})";
         }
     }
 
@@ -274,7 +410,7 @@ internal static class ManagedSymbolReader
                 var declaringType = metadata.GetTypeDefinition(method.GetDeclaringType());
                 var typeName = BuildTypeFullName(
                     metadata.GetString(declaringType.Namespace),
-                    metadata.GetString(declaringType.Name));
+                    StripArity(metadata.GetString(declaringType.Name)));
                 return $"{typeName}.{metadata.GetString(method.Name)}";
 
             case HandleKind.MemberReference:
@@ -310,13 +446,13 @@ internal static class ManagedSymbolReader
                 var definition = metadata.GetTypeDefinition((TypeDefinitionHandle)handle);
                 return BuildTypeFullName(
                     metadata.GetString(definition.Namespace),
-                    metadata.GetString(definition.Name));
+                    StripArity(metadata.GetString(definition.Name)));
 
             case HandleKind.TypeReference:
                 var reference = metadata.GetTypeReference((TypeReferenceHandle)handle);
                 return BuildTypeFullName(
                     metadata.GetString(reference.Namespace),
-                    metadata.GetString(reference.Name));
+                    StripArity(metadata.GetString(reference.Name)));
 
             case HandleKind.TypeSpecification:
                 try
@@ -332,6 +468,12 @@ internal static class ManagedSymbolReader
             default:
                 return null;
         }
+    }
+
+    private static string StripArity(string name)
+    {
+        var backtick = name.IndexOf('`', StringComparison.Ordinal);
+        return backtick < 0 ? name : name[..backtick];
     }
 
     private static string BuildTypeFullName(string namespaceName, string name) =>
@@ -553,19 +695,20 @@ internal static class ManagedSymbolReader
 
     private const int OperandSwitch = -1;
 
-    private static readonly IReadOnlyDictionary<short, int> OperandSizes = BuildOperandSizes();
+    private static readonly IReadOnlyDictionary<short, OpCode> OpCodesByValue = BuildOpCodeTable();
 
-    private static IReadOnlyDictionary<short, int> BuildOperandSizes()
+    private static readonly IReadOnlyDictionary<short, int> OperandSizes =
+        OpCodesByValue.ToDictionary(pair => pair.Key, pair => OperandLength(pair.Value.OperandType));
+
+    private static IReadOnlyDictionary<short, OpCode> BuildOpCodeTable()
     {
-        var map = new Dictionary<short, int>();
+        var map = new Dictionary<short, OpCode>();
         foreach (var field in typeof(OpCodes).GetFields(BindingFlags.Public | BindingFlags.Static))
         {
-            if (field.GetValue(null) is not OpCode opCode)
+            if (field.GetValue(null) is OpCode opCode)
             {
-                continue;
+                map[opCode.Value] = opCode;
             }
-
-            map[opCode.Value] = OperandLength(opCode.OperandType);
         }
 
         return map;

@@ -156,6 +156,8 @@ public static class MarkdownReportWriter
             builder.AppendLine();
             builder.AppendLine($"- 程式入口：{(string.IsNullOrEmpty(code.EntryPointMethod) ? "無（程式庫或找不到入口）" : $"`{EscapeInline(code.EntryPointMethod)}`")}");
             builder.AppendLine($"- 命名空間：{code.NamespaceCount}；型別：{code.TypeCount}；方法：{code.MethodCount}；呼叫關係：{code.CallEdgeCount}");
+            var methodsWithIl = code.Types.Sum(type => type.Methods.Count(method => method.Il.Count > 0));
+            builder.AppendLine($"- 已反組譯出 IL 的方法：{methodsWithIl}（可用 `--emit-csharp` 產生 C# 骨架）");
             if (code.Truncated)
             {
                 builder.AppendLine("- 內容過大，型別或呼叫關係已截斷，完整資料請看 blueprint.json。");
