@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="src/ExeBlueprint.Core/ExeBlueprint.Core.csproj" />
+  <Project Path="src/ExeBlueprint.Cli/ExeBlueprint.Cli.csproj" />
+  <Project Path="tests/ExeBlueprint.Core.Tests/ExeBlueprint.Core.Tests.csproj" />
+</Solution>

@@ -1,0 +1,26 @@
+**/bin/
+**/obj/
+.vs/
+.idea/
+.vscode/
+TestResults/
+artifacts/
+exe-blueprint-output/
+samples/private/
+inputs/
+*.user
+*.suo
+*.nupkg
+*.snupkg
+
+# Never publish binaries submitted for analysis or reconstructed proprietary code.
+*.exe
+*.dll
+*.sys
+*.msi
+*.msix
+*.appx
+*.pdb
+*.dmp
+*.e
+*.ec
