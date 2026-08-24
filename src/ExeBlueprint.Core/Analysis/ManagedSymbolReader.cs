@@ -1,0 +1,489 @@
+using System.Buffers.Binary;
+using System.Collections.Immutable;
+using System.Reflection;
+using System.Reflection.Emit;
+using System.Reflection.Metadata;
+using System.Reflection.Metadata.Ecma335;
+using System.Reflection.PortableExecutable;
+using ExeBlueprint.Models;
+
+namespace ExeBlueprint.Analysis;
+
+// 讀 .NET assembly 的型別、方法與方法層級呼叫圖。
+// 只讀 metadata 與 IL，不執行輸入程式，結果可以直接當證據。
+internal static class ManagedSymbolReader
+{
+    private const int MaxTypes = 5_000;
+    private const int MaxCallEdges = 50_000;
+
+    public static async Task<CodeModel?> TryReadAsync(string path, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var stream = new FileStream(
+                path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                81920,
+                useAsync: true);
+            using var peReader = new PEReader(stream, PEStreamOptions.LeaveOpen);
+            if (!peReader.HasMetadata)
+            {
+                return null;
+            }
+
+            var metadata = peReader.GetMetadataReader();
+            return Read(peReader, metadata, cancellationToken);
+        }
+        catch (Exception exception) when (exception is BadImageFormatException or IOException or InvalidOperationException)
+        {
+            return null;
+        }
+    }
+
+    private static CodeModel Read(PEReader peReader, MetadataReader metadata, CancellationToken cancellationToken)
+    {
+        var entryPointMethod = ResolveEntryPoint(peReader, metadata);
+        var namespaces = new HashSet<string>(StringComparer.Ordinal);
+        var types = new List<TypeModel>();
+        var edges = new List<CallEdge>();
+        var seenEdges = new HashSet<(string, string, string)>();
+        var methodCount = 0;
+        var truncated = false;
+
+        foreach (var typeHandle in metadata.TypeDefinitions)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var definition = metadata.GetTypeDefinition(typeHandle);
+
+            var name = metadata.GetString(definition.Name);
+            var namespaceName = metadata.GetString(definition.Namespace);
+            if (name == "<Module>")
+            {
+                continue;
+            }
+
+            if (types.Count >= MaxTypes)
+            {
+                truncated = true;
+                break;
+            }
+
+            namespaces.Add(namespaceName);
+            var baseTypeName = GetTypeName(metadata, definition.BaseType);
+            var methods = new List<MethodModel>();
+
+            foreach (var methodHandle in definition.GetMethods())
+            {
+                var method = metadata.GetMethodDefinition(methodHandle);
+                var methodName = metadata.GetString(method.Name);
+                var hasBody = method.RelativeVirtualAddress != 0;
+                var declaringName = BuildTypeFullName(namespaceName, name);
+                methods.Add(new MethodModel
+                {
+                    Name = methodName,
+                    Signature = BuildMethodSignature(metadata, method, methodName),
+                    Accessibility = GetMethodAccessibility(method.Attributes),
+                    IsStatic = method.Attributes.HasFlag(MethodAttributes.Static),
+                    IsAbstract = method.Attributes.HasFlag(MethodAttributes.Abstract),
+                    IsVirtual = method.Attributes.HasFlag(MethodAttributes.Virtual),
+                    IsEntryPoint = methodHandle == entryPointMethod.Handle,
+                    HasBody = hasBody
+                });
+                methodCount++;
+
+                if (hasBody && edges.Count < MaxCallEdges)
+                {
+                    CollectCalls(peReader, metadata, method, $"{declaringName}.{methodName}", edges, seenEdges);
+                }
+                else if (hasBody)
+                {
+                    truncated = true;
+                }
+            }
+
+            types.Add(new TypeModel
+            {
+                FullName = BuildTypeFullName(namespaceName, name),
+                Namespace = namespaceName,
+                Name = name,
+                Kind = GetTypeKind(definition.Attributes, baseTypeName),
+                Accessibility = GetTypeAccessibility(definition.Attributes),
+                BaseType = baseTypeName,
+                Methods = methods
+            });
+        }
+
+        return new CodeModel
+        {
+            Kind = "managed",
+            EntryPointMethod = entryPointMethod.FullName,
+            NamespaceCount = namespaces.Count,
+            TypeCount = types.Count,
+            MethodCount = methodCount,
+            CallEdgeCount = edges.Count,
+            Truncated = truncated,
+            Types = types,
+            CallGraph = edges
+        };
+    }
+
+    private static (MethodDefinitionHandle Handle, string? FullName) ResolveEntryPoint(
+        PEReader peReader,
+        MetadataReader metadata)
+    {
+        var corHeader = peReader.PEHeaders.CorHeader;
+        if (corHeader is null || corHeader.Flags.HasFlag(CorFlags.NativeEntryPoint))
+        {
+            return (default, null);
+        }
+
+        var token = corHeader.EntryPointTokenOrRelativeVirtualAddress;
+        if (token == 0 || (token & 0xFF000000) != 0x06000000)
+        {
+            return (default, null);
+        }
+
+        var handle = (MethodDefinitionHandle)MetadataTokens.Handle(token);
+        var method = metadata.GetMethodDefinition(handle);
+        var declaringType = metadata.GetTypeDefinition(method.GetDeclaringType());
+        var fullName = BuildTypeFullName(
+            metadata.GetString(declaringType.Namespace),
+            metadata.GetString(declaringType.Name));
+        return (handle, $"{fullName}.{metadata.GetString(method.Name)}");
+    }
+
+    private static void CollectCalls(
+        PEReader peReader,
+        MetadataReader metadata,
+        MethodDefinition method,
+        string caller,
+        List<CallEdge> edges,
+        HashSet<(string, string, string)> seenEdges)
+    {
+        byte[] il;
+        try
+        {
+            var body = peReader.GetMethodBody(method.RelativeVirtualAddress);
+            il = body.GetILBytes() ?? [];
+        }
+        catch (Exception exception) when (exception is BadImageFormatException or InvalidOperationException)
+        {
+            return;
+        }
+
+        foreach (var (kind, token) in EnumerateCallSites(il))
+        {
+            if (edges.Count >= MaxCallEdges)
+            {
+                return;
+            }
+
+            var callee = ResolveMemberName(metadata, token);
+            if (callee is null)
+            {
+                continue;
+            }
+
+            var edge = (caller, callee, kind);
+            if (seenEdges.Add(edge))
+            {
+                edges.Add(new CallEdge { Caller = caller, Callee = callee, Kind = kind });
+            }
+        }
+    }
+
+    private static IEnumerable<(string Kind, int Token)> EnumerateCallSites(byte[] il)
+    {
+        var position = 0;
+        while (position < il.Length)
+        {
+            short opValue;
+            var first = il[position++];
+            if (first == 0xFE)
+            {
+                if (position >= il.Length)
+                {
+                    yield break;
+                }
+
+                opValue = (short)(0xFE00 | il[position++]);
+            }
+            else
+            {
+                opValue = first;
+            }
+
+            if (!OperandSizes.TryGetValue(opValue, out var operandSize))
+            {
+                yield break;
+            }
+
+            if (operandSize == OperandSwitch)
+            {
+                if (position + 4 > il.Length)
+                {
+                    yield break;
+                }
+
+                var count = BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(position, 4));
+                position += 4 + (count * 4);
+                continue;
+            }
+
+            var kind = CallKind(opValue);
+            if (kind is not null && position + 4 <= il.Length)
+            {
+                yield return (kind, BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(position, 4)));
+            }
+
+            position += operandSize;
+        }
+    }
+
+    private static string? CallKind(short opValue)
+    {
+        if (opValue == OpCodes.Call.Value)
+        {
+            return "call";
+        }
+
+        if (opValue == OpCodes.Callvirt.Value)
+        {
+            return "callvirt";
+        }
+
+        if (opValue == OpCodes.Newobj.Value)
+        {
+            return "newobj";
+        }
+
+        return null;
+    }
+
+    private static string? ResolveMemberName(MetadataReader metadata, int token)
+    {
+        var handle = MetadataTokens.EntityHandle(token);
+        switch (handle.Kind)
+        {
+            case HandleKind.MethodDefinition:
+                var method = metadata.GetMethodDefinition((MethodDefinitionHandle)handle);
+                var declaringType = metadata.GetTypeDefinition(method.GetDeclaringType());
+                var typeName = BuildTypeFullName(
+                    metadata.GetString(declaringType.Namespace),
+                    metadata.GetString(declaringType.Name));
+                return $"{typeName}.{metadata.GetString(method.Name)}";
+
+            case HandleKind.MemberReference:
+                var member = metadata.GetMemberReference((MemberReferenceHandle)handle);
+                if (member.GetKind() != MemberReferenceKind.Method)
+                {
+                    return null;
+                }
+
+                var parent = GetTypeName(metadata, member.Parent);
+                var memberName = metadata.GetString(member.Name);
+                return parent is null ? memberName : $"{parent}.{memberName}";
+
+            case HandleKind.MethodSpecification:
+                var spec = metadata.GetMethodSpecification((MethodSpecificationHandle)handle);
+                return ResolveMemberName(metadata, MetadataTokens.GetToken(spec.Method));
+
+            default:
+                return null;
+        }
+    }
+
+    private static string? GetTypeName(MetadataReader metadata, EntityHandle handle)
+    {
+        if (handle.IsNil)
+        {
+            return null;
+        }
+
+        switch (handle.Kind)
+        {
+            case HandleKind.TypeDefinition:
+                var definition = metadata.GetTypeDefinition((TypeDefinitionHandle)handle);
+                return BuildTypeFullName(
+                    metadata.GetString(definition.Namespace),
+                    metadata.GetString(definition.Name));
+
+            case HandleKind.TypeReference:
+                var reference = metadata.GetTypeReference((TypeReferenceHandle)handle);
+                return BuildTypeFullName(
+                    metadata.GetString(reference.Namespace),
+                    metadata.GetString(reference.Name));
+
+            case HandleKind.TypeSpecification:
+                try
+                {
+                    var specification = metadata.GetTypeSpecification((TypeSpecificationHandle)handle);
+                    return specification.DecodeSignature(SignatureTypeNameProvider.Instance, null);
+                }
+                catch (BadImageFormatException)
+                {
+                    return null;
+                }
+
+            default:
+                return null;
+        }
+    }
+
+    private static string BuildTypeFullName(string namespaceName, string name) =>
+        string.IsNullOrEmpty(namespaceName) ? name : $"{namespaceName}.{name}";
+
+    private static string BuildMethodSignature(MetadataReader metadata, MethodDefinition method, string methodName)
+    {
+        try
+        {
+            var signature = method.DecodeSignature(SignatureTypeNameProvider.Instance, null);
+            var parameters = string.Join(", ", signature.ParameterTypes);
+            return $"{signature.ReturnType} {methodName}({parameters})";
+        }
+        catch (BadImageFormatException)
+        {
+            return $"{methodName}(...)";
+        }
+    }
+
+    private static string GetTypeKind(TypeAttributes attributes, string? baseTypeName)
+    {
+        if (attributes.HasFlag(TypeAttributes.Interface))
+        {
+            return "interface";
+        }
+
+        return baseTypeName switch
+        {
+            "System.Enum" => "enum",
+            "System.ValueType" => "struct",
+            "System.MulticastDelegate" or "System.Delegate" => "delegate",
+            _ => "class"
+        };
+    }
+
+    private static string GetTypeAccessibility(TypeAttributes attributes) =>
+        (attributes & TypeAttributes.VisibilityMask) switch
+        {
+            TypeAttributes.Public or TypeAttributes.NestedPublic => "public",
+            TypeAttributes.NestedFamily => "protected",
+            TypeAttributes.NestedFamORAssem => "protected internal",
+            TypeAttributes.NestedFamANDAssem => "private protected",
+            TypeAttributes.NestedPrivate => "private",
+            _ => "internal"
+        };
+
+    private static string GetMethodAccessibility(MethodAttributes attributes) =>
+        (attributes & MethodAttributes.MemberAccessMask) switch
+        {
+            MethodAttributes.Public => "public",
+            MethodAttributes.Family => "protected",
+            MethodAttributes.FamORAssem => "protected internal",
+            MethodAttributes.FamANDAssem => "private protected",
+            MethodAttributes.Assembly => "internal",
+            MethodAttributes.Private => "private",
+            _ => "private"
+        };
+
+    private const int OperandSwitch = -1;
+
+    private static readonly IReadOnlyDictionary<short, int> OperandSizes = BuildOperandSizes();
+
+    private static IReadOnlyDictionary<short, int> BuildOperandSizes()
+    {
+        var map = new Dictionary<short, int>();
+        foreach (var field in typeof(OpCodes).GetFields(BindingFlags.Public | BindingFlags.Static))
+        {
+            if (field.GetValue(null) is not OpCode opCode)
+            {
+                continue;
+            }
+
+            map[opCode.Value] = OperandLength(opCode.OperandType);
+        }
+
+        return map;
+    }
+
+    private static int OperandLength(OperandType operandType) => operandType switch
+    {
+        OperandType.InlineNone => 0,
+        OperandType.ShortInlineBrTarget or OperandType.ShortInlineI or OperandType.ShortInlineVar => 1,
+        OperandType.InlineVar => 2,
+        OperandType.InlineI8 or OperandType.InlineR => 8,
+        OperandType.InlineSwitch => OperandSwitch,
+        _ => 4
+    };
+}
+
+internal sealed class SignatureTypeNameProvider : ISignatureTypeProvider<string, object?>
+{
+    public static readonly SignatureTypeNameProvider Instance = new();
+
+    public string GetArrayType(string elementType, ArrayShape shape) =>
+        $"{elementType}[{new string(',', Math.Max(shape.Rank - 1, 0))}]";
+
+    public string GetByReferenceType(string elementType) => $"ref {elementType}";
+
+    public string GetFunctionPointerType(MethodSignature<string> signature) => "method*";
+
+    public string GetGenericInstantiation(string genericType, ImmutableArray<string> typeArguments) =>
+        $"{genericType}<{string.Join(", ", typeArguments)}>";
+
+    public string GetGenericMethodParameter(object? genericContext, int index) => $"!!{index}";
+
+    public string GetGenericTypeParameter(object? genericContext, int index) => $"!{index}";
+
+    public string GetModifiedType(string modifier, string unmodifiedType, bool isRequired) => unmodifiedType;
+
+    public string GetPinnedType(string elementType) => elementType;
+
+    public string GetPointerType(string elementType) => $"{elementType}*";
+
+    public string GetPrimitiveType(PrimitiveTypeCode typeCode) => typeCode switch
+    {
+        PrimitiveTypeCode.Boolean => "bool",
+        PrimitiveTypeCode.Byte => "byte",
+        PrimitiveTypeCode.SByte => "sbyte",
+        PrimitiveTypeCode.Char => "char",
+        PrimitiveTypeCode.Int16 => "short",
+        PrimitiveTypeCode.UInt16 => "ushort",
+        PrimitiveTypeCode.Int32 => "int",
+        PrimitiveTypeCode.UInt32 => "uint",
+        PrimitiveTypeCode.Int64 => "long",
+        PrimitiveTypeCode.UInt64 => "ulong",
+        PrimitiveTypeCode.Single => "float",
+        PrimitiveTypeCode.Double => "double",
+        PrimitiveTypeCode.IntPtr => "nint",
+        PrimitiveTypeCode.UIntPtr => "nuint",
+        PrimitiveTypeCode.Object => "object",
+        PrimitiveTypeCode.String => "string",
+        PrimitiveTypeCode.Void => "void",
+        PrimitiveTypeCode.TypedReference => "TypedReference",
+        _ => typeCode.ToString()
+    };
+
+    public string GetSZArrayType(string elementType) => $"{elementType}[]";
+
+    public string GetTypeFromDefinition(MetadataReader reader, TypeDefinitionHandle handle, byte rawTypeKind)
+    {
+        var definition = reader.GetTypeDefinition(handle);
+        return reader.GetString(definition.Name);
+    }
+
+    public string GetTypeFromReference(MetadataReader reader, TypeReferenceHandle handle, byte rawTypeKind)
+    {
+        var reference = reader.GetTypeReference(handle);
+        return reader.GetString(reference.Name);
+    }
+
+    public string GetTypeFromSpecification(
+        MetadataReader reader,
+        object? genericContext,
+        TypeSpecificationHandle handle,
+        byte rawTypeKind) =>
+        reader.GetTypeSpecification(handle).DecodeSignature(this, genericContext);
+}

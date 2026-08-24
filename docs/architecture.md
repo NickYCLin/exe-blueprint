@@ -22,22 +22,23 @@ Blueprint 中介資料
 
 ## 目前完成
 
-`ExeBlueprint.Core` 已包含輸入盤點、ZIP 安全解壓、檔案分類、PE／.NET 讀取、技術辨識、相依關係和報告產生。
+`ExeBlueprint.Core` 已包含輸入盤點、ZIP 安全解壓、檔案分類、PE／.NET 讀取、.NET 型別與方法抽取、方法層級呼叫圖、技術辨識、相依關係和報告產生。
 
 `ExeBlueprint.Cli` 提供命令列入口，後續桌面版也會呼叫同一套核心。
 
 ## Blueprint 資料
 
-目前 schema 版本是 `0.1`，主要欄位包括：
+目前 schema 版本是 `0.2`，主要欄位包括：
 
 - `input`：輸入類型、檔案數與總大小
-- `summary`：PE、assembly、資源和相依關係數量
-- `files`：每個檔案的格式、雜湊和分析資料
+- `summary`：PE、assembly、型別、方法、資源和相依關係數量
+- `files`：每個檔案的格式、雜湊和分析資料，受管組件另含 `code`
+- `files[].code`：.NET 型別、方法、簽章、入口點與方法層級呼叫圖
 - `dependencies`：PE imports 與 assembly references
 - `technologies`：語言、runtime、框架和工具鏈判斷
 - `warnings`：略過或無法分析的項目
 
-後續加入函式、型別、UI 和控制流程時會提升 schema 版本，舊欄位維持相容。
+後續加入 UI、資源和更細的控制流程時會再提升 schema 版本，舊欄位維持相容。
 
 ## 分析器分層
 

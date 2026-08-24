@@ -44,6 +44,8 @@ public static class MarkdownReportWriter
         builder.AppendLine($"| 資源檔 | {document.Summary.ResourceCount} |");
         builder.AppendLine($"| 套件內相依 | {document.Summary.InternalDependencyCount} |");
         builder.AppendLine($"| 外部相依 | {document.Summary.ExternalDependencyCount} |");
+        builder.AppendLine($"| 型別（.NET） | {document.Summary.TypeCount} |");
+        builder.AppendLine($"| 方法（.NET） | {document.Summary.MethodCount} |");
         builder.AppendLine();
 
         builder.AppendLine("## 辨識結果");
@@ -79,6 +81,8 @@ public static class MarkdownReportWriter
                 builder.AppendLine($"| `{EscapeInline(file.RelativePath)}` | {EscapeCell(file.Format)} | {EscapeCell(file.Architecture ?? "-")} | {EscapeCell(file.Subsystem ?? "-")} | {(file.HasAuthenticodeSignature ? "有" : "無")} |");
             }
         }
+
+        AppendCodeStructure(builder, document);
 
         builder.AppendLine();
         builder.AppendLine("## 檔案清單");
@@ -126,6 +130,89 @@ public static class MarkdownReportWriter
         builder.AppendLine("這份報告來自靜態分析，沒有執行輸入程式。語言與框架辨識是依據檔案結構、相依套件和特徵資料推斷，不等同原始碼證明。加殼、混淆、動態載入或自訂封裝都可能讓結果不完整。");
         return builder.ToString();
     }
+
+    private const int MaxTypesPerFile = 20;
+    private const int MaxCallEdgesPerFile = 30;
+
+    private static void AppendCodeStructure(StringBuilder builder, BlueprintDocument document)
+    {
+        var codeFiles = document.Files
+            .Where(file => file.Code is not null && file.Code.TypeCount > 0)
+            .ToArray();
+
+        builder.AppendLine();
+        builder.AppendLine("## 程式碼結構（.NET）");
+        builder.AppendLine();
+        if (codeFiles.Length == 0)
+        {
+            builder.AppendLine("沒有可讀取的 .NET 受管組件，或組件內沒有可列出的型別。原生程式的函式還原需要另接反組譯後端。");
+            return;
+        }
+
+        foreach (var file in codeFiles)
+        {
+            var code = file.Code!;
+            builder.AppendLine($"### `{EscapeInline(file.RelativePath)}`");
+            builder.AppendLine();
+            builder.AppendLine($"- 程式入口：{(string.IsNullOrEmpty(code.EntryPointMethod) ? "無（程式庫或找不到入口）" : $"`{EscapeInline(code.EntryPointMethod)}`")}");
+            builder.AppendLine($"- 命名空間：{code.NamespaceCount}；型別：{code.TypeCount}；方法：{code.MethodCount}；呼叫關係：{code.CallEdgeCount}");
+            if (code.Truncated)
+            {
+                builder.AppendLine("- 內容過大，型別或呼叫關係已截斷，完整資料請看 blueprint.json。");
+            }
+
+            builder.AppendLine();
+
+            var topTypes = code.Types
+                .OrderByDescending(type => type.Methods.Count)
+                .ThenBy(type => type.FullName, StringComparer.Ordinal)
+                .Take(MaxTypesPerFile)
+                .ToArray();
+            builder.AppendLine("| 型別 | 種類 | 存取 | 方法數 |");
+            builder.AppendLine("| --- | --- | --- | ---: |");
+            foreach (var type in topTypes)
+            {
+                builder.AppendLine($"| `{EscapeInline(type.FullName)}` | {EscapeCell(type.Kind)} | {EscapeCell(type.Accessibility)} | {type.Methods.Count} |");
+            }
+
+            if (code.Types.Count > topTypes.Length)
+            {
+                builder.AppendLine();
+                builder.AppendLine($"（僅列出方法數最多的 {topTypes.Length} 個型別，其餘 {code.Types.Count - topTypes.Length} 個請看 blueprint.json）");
+            }
+
+            builder.AppendLine();
+            if (code.CallGraph.Count == 0)
+            {
+                builder.AppendLine("沒有解析到方法呼叫關係。");
+            }
+            else
+            {
+                builder.AppendLine("呼叫流程範例：");
+                builder.AppendLine();
+                builder.AppendLine("| 來源方法 | 關係 | 目標方法 |");
+                builder.AppendLine("| --- | --- | --- |");
+                var sampleEdges = code.CallGraph
+                    .OrderBy(edge => IsCompilerGenerated(edge.Caller) ? 1 : 0)
+                    .Take(MaxCallEdgesPerFile);
+                foreach (var edge in sampleEdges)
+                {
+                    builder.AppendLine($"| `{EscapeInline(edge.Caller)}` | {edge.Kind} | `{EscapeInline(edge.Callee)}` |");
+                }
+
+                if (code.CallGraph.Count > MaxCallEdgesPerFile)
+                {
+                    builder.AppendLine();
+                    builder.AppendLine($"（僅列出前 {MaxCallEdgesPerFile} 筆，共 {code.CallGraph.Count} 筆呼叫關係，完整內容請看 blueprint.json）");
+                }
+            }
+
+            builder.AppendLine();
+        }
+    }
+
+    private static bool IsCompilerGenerated(string methodFullName) =>
+        methodFullName.Contains('<', StringComparison.Ordinal) || methodFullName.Contains('>', StringComparison.Ordinal);
 
     private static string EscapeCell(string value) => value.Replace("|", "\\|", StringComparison.Ordinal).ReplaceLineEndings(" ");
 

@@ -81,7 +81,9 @@ public sealed class BlueprintAnalyzer
             ResourceCount = files.Count(file => file.Category == "resource"),
             UnknownCount = files.Count(file => file.Category == "unknown"),
             InternalDependencyCount = dependencies.Count(edge => edge.ResolvedInsidePackage),
-            ExternalDependencyCount = dependencies.Count(edge => !edge.ResolvedInsidePackage)
+            ExternalDependencyCount = dependencies.Count(edge => !edge.ResolvedInsidePackage),
+            TypeCount = files.Sum(file => file.Code?.TypeCount ?? 0),
+            MethodCount = files.Sum(file => file.Code?.MethodCount ?? 0)
         };
 
     private static void ValidateOptions(AnalysisOptions options)

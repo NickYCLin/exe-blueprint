@@ -11,6 +11,8 @@ ExeBlueprint 用來整理 Windows 應用程式套件。它會掃描 EXE、DLL、
 - 讀取 PE 架構、子系統、section 與簽章資料
 - 分辨 .NET assembly 與原生 PE
 - 讀取 PE imports 與 .NET assembly references
+- 讀出 .NET assembly 的命名空間、型別、方法與方法簽章
+- 掃描 IL 建立方法層級呼叫圖，看得出程式流程怎麼串
 - 找出套件內可以對上的 EXE／DLL 相依關係
 - 依檔案內容辨識常見語言、runtime、框架與安裝器
 - 輸出 JSON 與繁體中文 Markdown 報告
@@ -72,17 +74,18 @@ src/ExeBlueprint.Cli/bin/Release/net10.0/win-x64/publish/exe-blueprint.exe
 - 輸入套件摘要
 - 每個檔案的格式與雜湊
 - PE 與 .NET metadata
+- .NET 型別、方法、簽章與方法層級呼叫圖
 - 語言、框架和工具鏈判斷
 - 套件內與外部相依關係
 - 分析警告
 
-`REPORT.md` 適合直接閱讀，用來快速確認入口程式、架構、相依套件和辨識結果。
+`REPORT.md` 適合直接閱讀，用來快速確認入口程式、架構、相依套件、程式碼結構和辨識結果。
 
 ## 接下來要做的功能
 
 - 解開 Inno Setup、NSIS、MSI、PyInstaller 與 Electron 套件
-- 串接 ILSpy、Ghidra 等分析後端
-- 建立函式、類別、UI、資源和設定的中介模型
+- 串接 ILSpy、Ghidra 等分析後端（讓原生 PE 也能還原函式與流程）
+- 擴充中介模型，補上欄位、屬性、UI、資源和設定（函式、型別、呼叫圖已完成 .NET 部分）
 - 重建可編譯的多專案 solution
 - 優先支援易語言、VB6、Delphi 到 C# 的轉換
 - 加入 C#、C++、Rust、Go 和易語言程式碼產生器

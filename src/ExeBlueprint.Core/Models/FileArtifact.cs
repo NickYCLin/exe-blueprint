@@ -44,6 +44,8 @@ public sealed record FileArtifact
 
     public IReadOnlyList<TechnologyDetection> Technologies { get; init; } = [];
 
+    public CodeModel? Code { get; init; }
+
     public string? AnalysisError { get; init; }
 }
 

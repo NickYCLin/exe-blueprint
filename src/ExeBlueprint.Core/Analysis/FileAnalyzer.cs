@@ -36,6 +36,9 @@ internal sealed class FileAnalyzer
                 ? FileClassifier.Classify(fullPath, signals.Header)
                 : (pe.IsLibrary ? "library" : "executable", pe.IsManaged ? ".NET Portable Executable" : "Native Portable Executable");
             var technologies = TechnologyDetector.DetectFile(relativePath, pe, signals);
+            var code = pe?.IsManaged == true
+                ? await ManagedSymbolReader.TryReadAsync(fullPath, cancellationToken).ConfigureAwait(false)
+                : null;
 
             return new FileArtifact
             {
@@ -59,7 +62,8 @@ internal sealed class FileAnalyzer
                 Sections = pe?.Sections ?? [],
                 ImportedModules = pe?.ImportedModules ?? [],
                 ManagedReferences = pe?.ManagedReferences ?? [],
-                Technologies = technologies
+                Technologies = technologies,
+                Code = code
             };
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or BadImageFormatException or InvalidDataException)
