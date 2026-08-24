@@ -80,9 +80,9 @@ public sealed class CSharpSkeletonGeneratorTests
             file => file.RelativePath.EndsWith("ExeBlueprint.Core.Tests.cs", StringComparison.Ordinal)).Content;
 
         Assert.Contains("public const string Label = \"blueprint\";", source);
-        Assert.Contains("protected internal static readonly int Counter;", source);
-        Assert.Contains("public virtual string Name { get; protected set; }", source);
-        Assert.Contains("public System.Text.StringBuilder Builder { get; }", source);
+        Assert.Contains("protected internal static readonly int Counter = default!;", source);
+        Assert.Contains("public virtual string Name { get; protected set; } = default!;", source);
+        Assert.Contains("public System.Text.StringBuilder Builder { get; } = default!;", source);
         Assert.Contains("internal static event System.EventHandler Changed;", source);
         Assert.Contains("protected virtual event System.EventHandler Updated;", source);
         Assert.Equal(1, source.Split(" Changed;", StringSplitOptions.None).Length - 1);
@@ -127,6 +127,22 @@ public sealed class CSharpSkeletonGeneratorTests
         Assert.Contains("        public enum State : byte", source);
         Assert.Contains("            Ready = 2,", source);
         Assert.Contains("        public struct Leaf", source);
+        Assert.Contains("        public int Number { get; set; }", source);
+        Assert.DoesNotContain("        public int Number { get; set; } = default!;", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task InitializesStructMembersWhenInstanceConstructorExists()
+    {
+        var assemblyPath = typeof(StructInitializerFixture).Assembly.Location;
+        var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
+        var source = Assert.Single(
+            CSharpSkeletonGenerator.Generate(document),
+            file => file.RelativePath.EndsWith("ExeBlueprint.Core.Tests.cs", StringComparison.Ordinal)).Content;
+
+        Assert.Contains("internal struct StructInitializerFixture", source);
+        Assert.Contains("public string Value { get; set; } = default!;", source);
+        Assert.Contains("public StructInitializerFixture(string Value)", source);
     }
 
     [Fact]

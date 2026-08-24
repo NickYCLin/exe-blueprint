@@ -172,7 +172,11 @@ public static class CSharpSkeletonGenerator
                 }
             }
 
-            var initializer = field.IsConstant ? $" = {FormatConstant(field.ConstantValue)}" : "";
+            var initializer = field.IsConstant
+                ? $" = {FormatConstant(field.ConstantValue)}"
+                : ShouldInitializeSkeletonMember(type)
+                    ? " = default!"
+                    : "";
             builder.AppendLine($"{body}{string.Join(" ", modifiers)} {Humanize(field.Type, type.GenericParameters, [])} {SafeName(field.Name)}{initializer};");
             wroteMember = true;
         }
@@ -239,7 +243,10 @@ public static class CSharpSkeletonGenerator
             }
             else
             {
-                builder.AppendLine($"{body}{modifiers}{propertyType} {SafeName(property.Name)} {accessors}");
+                var initializer = ShouldInitializeSkeletonMember(type) && !property.IsAbstract
+                    ? " = default!;"
+                    : "";
+                builder.AppendLine($"{body}{modifiers}{propertyType} {SafeName(property.Name)} {accessors}{initializer}");
             }
 
             wroteMember = true;
@@ -300,6 +307,12 @@ public static class CSharpSkeletonGenerator
 
         builder.AppendLine($"{indent}}}");
     }
+
+    // 方法重建不了時 constructor 會留空；class 與原本就有 instance constructor 的 struct
+    // 先用 default! 明確表達 skeleton 佔位值。沒有 constructor 的 struct 不能帶 instance initializer。
+    private static bool ShouldInitializeSkeletonMember(TypeModel type) =>
+        type.Kind == "class" ||
+        (type.Kind == "struct" && type.Methods.Any(method => method.IsConstructor && !method.IsStatic));
 
     private static void AppendEnumMembers(StringBuilder builder, TypeModel type, string body)
     {

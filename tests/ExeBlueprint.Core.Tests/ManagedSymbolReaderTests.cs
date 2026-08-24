@@ -753,6 +753,8 @@ internal class NestedTypeFixture<T>
     }
 }
 
+internal readonly record struct StructInitializerFixture(string Value);
+
 internal sealed class RefLikePropertyFixture
 {
     private readonly byte[] _buffer = [];
