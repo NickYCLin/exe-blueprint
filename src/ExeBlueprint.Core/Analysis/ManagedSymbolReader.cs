@@ -399,9 +399,20 @@ internal static class ManagedSymbolReader
 
     private sealed record CallInfo(string DeclaringType, string Name, int ParamCount, bool HasThis, bool ReturnsVoid);
 
-    // 直線 IL 堆疊模擬：只還原沒有分支、沒有例外處理的方法。
-    // 採全有或全無：遇到任何分支、不支援的指令或堆疊不平衡就回傳 null，退回 IL 註解，
-    // 寧可不還原也不要產出語意錯誤的程式碼。輸出的 C# 不保證能編譯，但語意會貼近原程式。
+    private const int MaxStructureDepth = 32;
+
+    private readonly record struct Instr(int Offset, string Name, int OperandOffset, bool IsBranch, int Target);
+
+    private sealed record ReconContext(
+        MetadataReader Metadata,
+        byte[] Il,
+        Dictionary<int, string> ParameterNames,
+        bool IsInstance,
+        string ReturnType);
+
+    // 把方法的 IL 還原成 C#。先解碼成指令陣列，再用區間遞迴結構化還原 if／if-else（可巢狀）。
+    // 採全有或全無：遇到迴圈（回跳）、switch、例外處理或任何無法結構化的跳轉就整個方法放棄，
+    // 退回 IL 註解，寧可不還原也不要產出語意錯誤的程式碼。輸出的 C# 不保證能編譯，但語意貼近原程式。
     private static IReadOnlyList<string>? TryReconstructLinearBody(
         MetadataReader metadata,
         byte[] il,
@@ -409,344 +420,475 @@ internal static class ManagedSymbolReader
         Dictionary<int, string> parameterNames,
         string returnType)
     {
-        var stack = new Stack<string>();
-        var statements = new List<string>();
-        var declaredLocals = new HashSet<int>();
-        var terminated = false;
-
-        string ArgName(int slot)
+        var instructions = new List<Instr>();
+        var offsetToIndex = new Dictionary<int, int>();
+        foreach (var instruction in EnumerateInstructions(il))
         {
-            if (isInstance)
+            if (!OpCodesByValue.TryGetValue(instruction.OpValue, out var opCode))
             {
-                if (slot == 0)
-                {
-                    return "this";
-                }
-
-                return parameterNames.TryGetValue(slot, out var name) && !string.IsNullOrEmpty(name) ? name : $"arg{slot - 1}";
+                return null;
             }
 
-            return parameterNames.TryGetValue(slot + 1, out var value) && !string.IsNullOrEmpty(value) ? value : $"arg{slot}";
+            var operandType = opCode.OperandType;
+            if (operandType == OperandType.InlineSwitch)
+            {
+                return null;
+            }
+
+            var target = -1;
+            if (operandType == OperandType.ShortInlineBrTarget)
+            {
+                target = instruction.OperandOffset + 1 + (sbyte)il[instruction.OperandOffset];
+            }
+            else if (operandType == OperandType.InlineBrTarget)
+            {
+                target = instruction.OperandOffset + 4 + BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(instruction.OperandOffset, 4));
+            }
+
+            offsetToIndex[instruction.Offset] = instructions.Count;
+            instructions.Add(new Instr(instruction.Offset, opCode.Name!, instruction.OperandOffset, target >= 0, target));
         }
 
-        foreach (var instruction in EnumerateInstructions(il))
+        offsetToIndex[il.Length] = instructions.Count;
+        var context = new ReconContext(metadata, il, parameterNames, isInstance, returnType);
+        return TryStructure(context, [.. instructions], offsetToIndex, 0, instructions.Count, new HashSet<int>(), 0);
+    }
+
+    private static List<string>? TryStructure(
+        ReconContext context,
+        Instr[] instructions,
+        Dictionary<int, int> offsetToIndex,
+        int start,
+        int end,
+        HashSet<int> declaredLocals,
+        int depth)
+    {
+        if (depth > MaxStructureDepth)
+        {
+            return null;
+        }
+
+        var stack = new Stack<string>();
+        var statements = new List<string>();
+        var index = start;
+        var terminated = false;
+
+        while (index < end)
         {
             if (terminated || statements.Count > MaxBodyStatements)
             {
                 return null;
             }
 
-            if (!OpCodesByValue.TryGetValue(instruction.OpValue, out var opCode))
+            var instr = instructions[index];
+            if (!instr.IsBranch)
+            {
+                if (!ApplySimpleInstruction(context, instr, stack, statements, declaredLocals, out var terminal))
+                {
+                    return null;
+                }
+
+                terminated = terminal;
+                index++;
+                continue;
+            }
+
+            if (instr.Name is "br" or "br.s")
+            {
+                // 只允許往前跳到本區間結尾（等同順順落下）；其餘無條件跳轉無法結構化。
+                if (offsetToIndex.TryGetValue(instr.Target, out var branchIndex) && branchIndex == end)
+                {
+                    index++;
+                    continue;
+                }
+
+                return null;
+            }
+
+            // 條件分支：往前跳才可能是 if。回跳代表迴圈，直接放棄。
+            if (instr.Target <= instr.Offset ||
+                !offsetToIndex.TryGetValue(instr.Target, out var targetIndex) ||
+                targetIndex > end ||
+                targetIndex <= index)
             {
                 return null;
             }
 
-            var offset = instruction.OperandOffset;
-            var name = opCode.Name!;
-            switch (name)
+            if (!TryBuildCondition(instr.Name, stack, out var condition) || stack.Count != 0)
             {
-                case "nop":
-                    break;
-
-                case "dup":
-                    return null;
-
-                case "ldarg.0":
-                    stack.Push(ArgName(0));
-                    break;
-                case "ldarg.1":
-                    stack.Push(ArgName(1));
-                    break;
-                case "ldarg.2":
-                    stack.Push(ArgName(2));
-                    break;
-                case "ldarg.3":
-                    stack.Push(ArgName(3));
-                    break;
-                case "ldarg.s":
-                    stack.Push(ArgName(il[offset]));
-                    break;
-                case "ldarg":
-                    stack.Push(ArgName(BinaryPrimitives.ReadUInt16LittleEndian(il.AsSpan(offset, 2))));
-                    break;
-                case "starg.s":
-                    if (!TryPop(stack, out var stargValue))
-                    {
-                        return null;
-                    }
-
-                    statements.Add($"{ArgName(il[offset])} = {stargValue};");
-                    break;
-
-                case "ldnull":
-                    stack.Push("null");
-                    break;
-                case "ldstr":
-                    stack.Push(EscapeCSharpString(ReadUserString(metadata, BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)))));
-                    break;
-                case "ldc.i4.m1":
-                    stack.Push("-1");
-                    break;
-                case "ldc.i4.0":
-                case "ldc.i4.1":
-                case "ldc.i4.2":
-                case "ldc.i4.3":
-                case "ldc.i4.4":
-                case "ldc.i4.5":
-                case "ldc.i4.6":
-                case "ldc.i4.7":
-                case "ldc.i4.8":
-                    stack.Push(name["ldc.i4.".Length..]);
-                    break;
-                case "ldc.i4.s":
-                    stack.Push(((sbyte)il[offset]).ToString());
-                    break;
-                case "ldc.i4":
-                    stack.Push(BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)).ToString());
-                    break;
-                case "ldc.i8":
-                    stack.Push($"{BinaryPrimitives.ReadInt64LittleEndian(il.AsSpan(offset, 8))}L");
-                    break;
-                case "ldc.r4":
-                    stack.Push($"{BitConverter.Int32BitsToSingle(BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)))}f");
-                    break;
-                case "ldc.r8":
-                    stack.Push($"{BitConverter.Int64BitsToDouble(BinaryPrimitives.ReadInt64LittleEndian(il.AsSpan(offset, 8)))}");
-                    break;
-
-                case "ldloc.0":
-                case "ldloc.1":
-                case "ldloc.2":
-                case "ldloc.3":
-                    stack.Push($"v{name["ldloc.".Length..]}");
-                    break;
-                case "ldloc.s":
-                    stack.Push($"v{il[offset]}");
-                    break;
-                case "ldloc":
-                    stack.Push($"v{BinaryPrimitives.ReadUInt16LittleEndian(il.AsSpan(offset, 2))}");
-                    break;
-                case "stloc.0":
-                case "stloc.1":
-                case "stloc.2":
-                case "stloc.3":
-                    if (!TryStoreLocal(stack, statements, declaredLocals, int.Parse(name["stloc.".Length..])))
-                    {
-                        return null;
-                    }
-
-                    break;
-                case "stloc.s":
-                    if (!TryStoreLocal(stack, statements, declaredLocals, il[offset]))
-                    {
-                        return null;
-                    }
-
-                    break;
-                case "stloc":
-                    if (!TryStoreLocal(stack, statements, declaredLocals, BinaryPrimitives.ReadUInt16LittleEndian(il.AsSpan(offset, 2))))
-                    {
-                        return null;
-                    }
-
-                    break;
-
-                case "ldsfld":
-                    var loadStatic = ResolveField(metadata, BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)));
-                    if (loadStatic is null)
-                    {
-                        return null;
-                    }
-
-                    stack.Push($"{loadStatic.Value.DeclaringType}.{loadStatic.Value.Name}");
-                    break;
-                case "ldfld":
-                    var loadField = ResolveField(metadata, BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)));
-                    if (loadField is null || !TryPop(stack, out var fieldTarget))
-                    {
-                        return null;
-                    }
-
-                    stack.Push($"{fieldTarget}.{loadField.Value.Name}");
-                    break;
-                case "stsfld":
-                    var storeStatic = ResolveField(metadata, BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)));
-                    if (storeStatic is null || !TryPop(stack, out var storeStaticValue))
-                    {
-                        return null;
-                    }
-
-                    statements.Add($"{storeStatic.Value.DeclaringType}.{storeStatic.Value.Name} = {storeStaticValue};");
-                    break;
-                case "stfld":
-                    var storeField = ResolveField(metadata, BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)));
-                    if (storeField is null || !TryPop(stack, out var storeFieldValue) || !TryPop(stack, out var storeFieldTarget))
-                    {
-                        return null;
-                    }
-
-                    statements.Add($"{storeFieldTarget}.{storeField.Value.Name} = {storeFieldValue};");
-                    break;
-
-                case "add":
-                case "sub":
-                case "mul":
-                case "div":
-                case "div.un":
-                case "rem":
-                case "rem.un":
-                case "and":
-                case "or":
-                case "xor":
-                case "shl":
-                case "shr":
-                case "shr.un":
-                    if (!TryBinary(stack, BinaryOperator(name)))
-                    {
-                        return null;
-                    }
-
-                    break;
-                case "ceq":
-                    if (!TryBinary(stack, "=="))
-                    {
-                        return null;
-                    }
-
-                    break;
-                case "cgt":
-                case "cgt.un":
-                    if (!TryBinary(stack, ">"))
-                    {
-                        return null;
-                    }
-
-                    break;
-                case "clt":
-                case "clt.un":
-                    if (!TryBinary(stack, "<"))
-                    {
-                        return null;
-                    }
-
-                    break;
-                case "neg":
-                    if (!TryUnary(stack, "-"))
-                    {
-                        return null;
-                    }
-
-                    break;
-                case "not":
-                    if (!TryUnary(stack, "~"))
-                    {
-                        return null;
-                    }
-
-                    break;
-
-                case "conv.i1":
-                case "conv.i2":
-                case "conv.i4":
-                case "conv.i8":
-                case "conv.u1":
-                case "conv.u2":
-                case "conv.u4":
-                case "conv.u8":
-                case "conv.r4":
-                case "conv.r8":
-                    if (!TryUnaryCast(stack, ConversionType(name)))
-                    {
-                        return null;
-                    }
-
-                    break;
-
-                case "castclass":
-                    var castType = GetTypeName(metadata, MetadataTokens.EntityHandle(BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4))));
-                    if (castType is null || !TryPop(stack, out var castValue))
-                    {
-                        return null;
-                    }
-
-                    stack.Push($"(({castType}){castValue})");
-                    break;
-                case "isinst":
-                    var instType = GetTypeName(metadata, MetadataTokens.EntityHandle(BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4))));
-                    if (instType is null || !TryPop(stack, out var instValue))
-                    {
-                        return null;
-                    }
-
-                    stack.Push($"({instValue} as {instType})");
-                    break;
-
-                case "call":
-                case "callvirt":
-                    if (!TryEmitCall(metadata, BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)), stack, statements))
-                    {
-                        return null;
-                    }
-
-                    break;
-                case "newobj":
-                    if (!TryEmitNewObject(metadata, BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)), stack))
-                    {
-                        return null;
-                    }
-
-                    break;
-
-                case "pop":
-                    if (!TryPop(stack, out var discarded))
-                    {
-                        return null;
-                    }
-
-                    statements.Add($"{discarded};");
-                    break;
-                case "throw":
-                    if (!TryPop(stack, out var thrown))
-                    {
-                        return null;
-                    }
-
-                    statements.Add($"throw {thrown};");
-                    terminated = true;
-                    break;
-                case "ret":
-                    if (returnType == "void")
-                    {
-                        if (stack.Count != 0)
-                        {
-                            return null;
-                        }
-                    }
-                    else
-                    {
-                        if (stack.Count != 1)
-                        {
-                            return null;
-                        }
-
-                        var value = stack.Pop();
-                        if (returnType == "bool" && value is "0" or "1")
-                        {
-                            value = value == "1" ? "true" : "false";
-                        }
-
-                        statements.Add($"return {value};");
-                    }
-
-                    terminated = true;
-                    break;
-
-                default:
-                    return null;
+                return null;
             }
+
+            var thenEnd = targetIndex;
+            var joinIndex = targetIndex;
+            var elseStart = -1;
+            var elseEnd = -1;
+            var beforeTarget = instructions[targetIndex - 1];
+            if (beforeTarget.Name is "br" or "br.s" &&
+                beforeTarget.Target > beforeTarget.Offset &&
+                offsetToIndex.TryGetValue(beforeTarget.Target, out var elseJoin) &&
+                elseJoin >= targetIndex &&
+                elseJoin <= end)
+            {
+                thenEnd = targetIndex - 1;
+                elseStart = targetIndex;
+                elseEnd = elseJoin;
+                joinIndex = elseJoin;
+            }
+
+            if (thenEnd < index + 1)
+            {
+                return null;
+            }
+
+            var thenStatements = TryStructure(context, instructions, offsetToIndex, index + 1, thenEnd, declaredLocals, depth + 1);
+            if (thenStatements is null)
+            {
+                return null;
+            }
+
+            List<string>? elseStatements = null;
+            if (elseStart >= 0)
+            {
+                elseStatements = TryStructure(context, instructions, offsetToIndex, elseStart, elseEnd, declaredLocals, depth + 1);
+                if (elseStatements is null)
+                {
+                    return null;
+                }
+            }
+
+            statements.Add($"if ({condition})");
+            statements.Add("{");
+            statements.AddRange(thenStatements.Select(line => $"    {line}"));
+            statements.Add("}");
+            if (elseStatements is not null)
+            {
+                statements.Add("else");
+                statements.Add("{");
+                statements.AddRange(elseStatements.Select(line => $"    {line}"));
+                statements.Add("}");
+            }
+
+            index = joinIndex;
         }
 
-        return terminated && stack.Count == 0 ? statements : null;
+        return stack.Count == 0 ? statements : null;
+    }
+
+    // 依分支指令算出「順順落下（fall-through）」時的 C# 條件，也就是不跳轉時該執行 then 區塊的條件。
+    private static bool TryBuildCondition(string name, Stack<string> stack, out string condition)
+    {
+        condition = string.Empty;
+        switch (name)
+        {
+            case "brtrue":
+            case "brtrue.s":
+                if (!TryPop(stack, out var truthy))
+                {
+                    return false;
+                }
+
+                condition = $"!({truthy})";
+                return true;
+            case "brfalse":
+            case "brfalse.s":
+                if (!TryPop(stack, out var falsy))
+                {
+                    return false;
+                }
+
+                condition = falsy;
+                return true;
+        }
+
+        if (!TryPop(stack, out var right) || !TryPop(stack, out var left))
+        {
+            return false;
+        }
+
+        condition = name switch
+        {
+            "beq" or "beq.s" => $"{left} != {right}",
+            "bne.un" or "bne.un.s" => $"{left} == {right}",
+            "bge" or "bge.s" or "bge.un" or "bge.un.s" => $"{left} < {right}",
+            "bgt" or "bgt.s" or "bgt.un" or "bgt.un.s" => $"{left} <= {right}",
+            "ble" or "ble.s" or "ble.un" or "ble.un.s" => $"{left} > {right}",
+            "blt" or "blt.s" or "blt.un" or "blt.un.s" => $"{left} >= {right}",
+            _ => string.Empty
+        };
+
+        return condition.Length > 0;
+    }
+
+    private static string ArgName(ReconContext context, int slot)
+    {
+        if (context.IsInstance)
+        {
+            if (slot == 0)
+            {
+                return "this";
+            }
+
+            return context.ParameterNames.TryGetValue(slot, out var name) && !string.IsNullOrEmpty(name) ? name : $"arg{slot - 1}";
+        }
+
+        return context.ParameterNames.TryGetValue(slot + 1, out var value) && !string.IsNullOrEmpty(value) ? value : $"arg{slot}";
+    }
+
+    private static bool ApplySimpleInstruction(
+        ReconContext context,
+        Instr instr,
+        Stack<string> stack,
+        List<string> statements,
+        HashSet<int> declaredLocals,
+        out bool terminal)
+    {
+        terminal = false;
+        var metadata = context.Metadata;
+        var il = context.Il;
+        var offset = instr.OperandOffset;
+        var name = instr.Name;
+        switch (name)
+        {
+            case "nop":
+                return true;
+
+            case "dup":
+                return false;
+
+            case "ldarg.0":
+                stack.Push(ArgName(context, 0));
+                return true;
+            case "ldarg.1":
+                stack.Push(ArgName(context, 1));
+                return true;
+            case "ldarg.2":
+                stack.Push(ArgName(context, 2));
+                return true;
+            case "ldarg.3":
+                stack.Push(ArgName(context, 3));
+                return true;
+            case "ldarg.s":
+                stack.Push(ArgName(context, il[offset]));
+                return true;
+            case "ldarg":
+                stack.Push(ArgName(context, BinaryPrimitives.ReadUInt16LittleEndian(il.AsSpan(offset, 2))));
+                return true;
+            case "starg.s":
+                if (!TryPop(stack, out var stargValue))
+                {
+                    return false;
+                }
+
+                statements.Add($"{ArgName(context, il[offset])} = {stargValue};");
+                return true;
+
+            case "ldnull":
+                stack.Push("null");
+                return true;
+            case "ldstr":
+                stack.Push(EscapeCSharpString(ReadUserString(metadata, BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)))));
+                return true;
+            case "ldc.i4.m1":
+                stack.Push("-1");
+                return true;
+            case "ldc.i4.0":
+            case "ldc.i4.1":
+            case "ldc.i4.2":
+            case "ldc.i4.3":
+            case "ldc.i4.4":
+            case "ldc.i4.5":
+            case "ldc.i4.6":
+            case "ldc.i4.7":
+            case "ldc.i4.8":
+                stack.Push(name["ldc.i4.".Length..]);
+                return true;
+            case "ldc.i4.s":
+                stack.Push(((sbyte)il[offset]).ToString());
+                return true;
+            case "ldc.i4":
+                stack.Push(BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)).ToString());
+                return true;
+            case "ldc.i8":
+                stack.Push($"{BinaryPrimitives.ReadInt64LittleEndian(il.AsSpan(offset, 8))}L");
+                return true;
+            case "ldc.r4":
+                stack.Push($"{BitConverter.Int32BitsToSingle(BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)))}f");
+                return true;
+            case "ldc.r8":
+                stack.Push($"{BitConverter.Int64BitsToDouble(BinaryPrimitives.ReadInt64LittleEndian(il.AsSpan(offset, 8)))}");
+                return true;
+
+            case "ldloc.0":
+            case "ldloc.1":
+            case "ldloc.2":
+            case "ldloc.3":
+                stack.Push($"v{name["ldloc.".Length..]}");
+                return true;
+            case "ldloc.s":
+                stack.Push($"v{il[offset]}");
+                return true;
+            case "ldloc":
+                stack.Push($"v{BinaryPrimitives.ReadUInt16LittleEndian(il.AsSpan(offset, 2))}");
+                return true;
+            case "stloc.0":
+            case "stloc.1":
+            case "stloc.2":
+            case "stloc.3":
+                return TryStoreLocal(stack, statements, declaredLocals, int.Parse(name["stloc.".Length..]));
+            case "stloc.s":
+                return TryStoreLocal(stack, statements, declaredLocals, il[offset]);
+            case "stloc":
+                return TryStoreLocal(stack, statements, declaredLocals, BinaryPrimitives.ReadUInt16LittleEndian(il.AsSpan(offset, 2)));
+
+            case "ldsfld":
+                var loadStatic = ResolveField(metadata, BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)));
+                if (loadStatic is null || IsGeneratedName(loadStatic.Value.DeclaringType) || IsGeneratedName(loadStatic.Value.Name))
+                {
+                    return false;
+                }
+
+                stack.Push($"{loadStatic.Value.DeclaringType}.{loadStatic.Value.Name}");
+                return true;
+            case "ldfld":
+                var loadField = ResolveField(metadata, BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)));
+                if (loadField is null || IsGeneratedName(loadField.Value.Name) || !TryPop(stack, out var fieldTarget))
+                {
+                    return false;
+                }
+
+                stack.Push($"{fieldTarget}.{loadField.Value.Name}");
+                return true;
+            case "stsfld":
+                var storeStatic = ResolveField(metadata, BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)));
+                if (storeStatic is null || IsGeneratedName(storeStatic.Value.DeclaringType) || IsGeneratedName(storeStatic.Value.Name) || !TryPop(stack, out var storeStaticValue))
+                {
+                    return false;
+                }
+
+                statements.Add($"{storeStatic.Value.DeclaringType}.{storeStatic.Value.Name} = {storeStaticValue};");
+                return true;
+            case "stfld":
+                var storeField = ResolveField(metadata, BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)));
+                if (storeField is null || IsGeneratedName(storeField.Value.Name) || !TryPop(stack, out var storeFieldValue) || !TryPop(stack, out var storeFieldTarget))
+                {
+                    return false;
+                }
+
+                statements.Add($"{storeFieldTarget}.{storeField.Value.Name} = {storeFieldValue};");
+                return true;
+
+            case "add":
+            case "sub":
+            case "mul":
+            case "div":
+            case "div.un":
+            case "rem":
+            case "rem.un":
+            case "and":
+            case "or":
+            case "xor":
+            case "shl":
+            case "shr":
+            case "shr.un":
+                return TryBinary(stack, BinaryOperator(name));
+            case "ceq":
+                return TryBinary(stack, "==");
+            case "cgt":
+            case "cgt.un":
+                return TryBinary(stack, ">");
+            case "clt":
+            case "clt.un":
+                return TryBinary(stack, "<");
+            case "neg":
+                return TryUnary(stack, "-");
+            case "not":
+                return TryUnary(stack, "~");
+
+            case "conv.i1":
+            case "conv.i2":
+            case "conv.i4":
+            case "conv.i8":
+            case "conv.u1":
+            case "conv.u2":
+            case "conv.u4":
+            case "conv.u8":
+            case "conv.r4":
+            case "conv.r8":
+                return TryUnaryCast(stack, ConversionType(name));
+
+            case "castclass":
+                var castType = GetTypeName(metadata, MetadataTokens.EntityHandle(BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4))));
+                if (castType is null || IsGeneratedName(castType) || !TryPop(stack, out var castValue))
+                {
+                    return false;
+                }
+
+                stack.Push($"(({castType}){castValue})");
+                return true;
+            case "isinst":
+                var instType = GetTypeName(metadata, MetadataTokens.EntityHandle(BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4))));
+                if (instType is null || IsGeneratedName(instType) || !TryPop(stack, out var instValue))
+                {
+                    return false;
+                }
+
+                stack.Push($"({instValue} as {instType})");
+                return true;
+
+            case "call":
+            case "callvirt":
+                return TryEmitCall(metadata, BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)), stack, statements);
+            case "newobj":
+                return TryEmitNewObject(metadata, BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)), stack);
+
+            case "pop":
+                if (!TryPop(stack, out var discarded))
+                {
+                    return false;
+                }
+
+                statements.Add($"{discarded};");
+                return true;
+            case "throw":
+                if (!TryPop(stack, out var thrown))
+                {
+                    return false;
+                }
+
+                statements.Add($"throw {thrown};");
+                terminal = true;
+                return true;
+            case "ret":
+                if (context.ReturnType == "void")
+                {
+                    if (stack.Count != 0)
+                    {
+                        return false;
+                    }
+                }
+                else
+                {
+                    if (stack.Count != 1)
+                    {
+                        return false;
+                    }
+
+                    var value = stack.Pop();
+                    if (context.ReturnType == "bool" && value is "0" or "1")
+                    {
+                        value = value == "1" ? "true" : "false";
+                    }
+
+                    statements.Add($"return {value};");
+                }
+
+                terminal = true;
+                return true;
+
+            default:
+                return false;
+        }
     }
 
     private static bool TryPop(Stack<string> stack, out string value)
@@ -807,10 +949,19 @@ internal static class ManagedSymbolReader
         return true;
     }
 
+    // 編譯器產生的名稱（狀態機、lambda、匿名型別）沒辦法在 C# 直接寫出來，碰到就放棄整個方法。
+    private static bool IsGeneratedName(string name) =>
+        name.StartsWith('<') || name.Contains(".<", StringComparison.Ordinal) || name.Contains("<>", StringComparison.Ordinal);
+
     private static bool TryEmitCall(MetadataReader metadata, int token, Stack<string> stack, List<string> statements)
     {
         var info = ResolveCall(metadata, token);
-        if (info is null || info.Name is ".ctor" or ".cctor")
+        if (info is null || info.Name is ".ctor" or ".cctor" || IsGeneratedName(info.Name))
+        {
+            return false;
+        }
+
+        if (!info.HasThis && IsGeneratedName(info.DeclaringType))
         {
             return false;
         }
@@ -914,7 +1065,7 @@ internal static class ManagedSymbolReader
     private static bool TryEmitNewObject(MetadataReader metadata, int token, Stack<string> stack)
     {
         var info = ResolveCall(metadata, token);
-        if (info is null)
+        if (info is null || IsGeneratedName(info.DeclaringType))
         {
             return false;
         }

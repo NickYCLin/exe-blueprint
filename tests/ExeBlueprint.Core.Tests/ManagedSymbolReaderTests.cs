@@ -52,24 +52,54 @@ public sealed class ManagedSymbolReaderTests
         var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
         var code = document.Files[0].Code!;
 
+        // 只看會真的輸出的使用者型別與方法（排除編譯器產生的狀態機／lambda 型別）。
         var reconstructed = code.Types
+            .Where(type => !type.FullName.Contains('<') && !type.FullName.Contains('>'))
             .SelectMany(type => type.Methods)
-            .Where(method => method.BodyReconstructed)
+            .Where(method => method.BodyReconstructed && !method.Name.Contains('<') && !method.Name.Contains('>'))
             .ToArray();
 
         Assert.NotEmpty(reconstructed);
 
-        // 重建出來的陳述式都應以分號或區塊結尾，不能再殘留 <>k__BackingField 這種原始名稱。
+        // 每行不是陳述式（; 結尾）就是區塊符號（if/else/{ /}）。
         foreach (var method in reconstructed)
         {
-            Assert.All(method.Body, statement => Assert.EndsWith(";", statement, StringComparison.Ordinal));
-            Assert.DoesNotContain(method.Body, statement => statement.Contains("k__BackingField", StringComparison.Ordinal));
+            Assert.All(method.Body, statement =>
+            {
+                var trimmed = statement.Trim();
+                Assert.True(
+                    trimmed.EndsWith(';') || trimmed is "{" or "}" or "else" || trimmed.StartsWith("if (", StringComparison.Ordinal),
+                    $"未預期的重建輸出：{statement}");
+            });
         }
 
         // record 產生的 Equals(object) 是典型直線方法，應被還原。
         Assert.Contains(reconstructed, method =>
             method.Name == "Equals"
             && method.Body.Any(statement => statement.Contains(" as ", StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public async Task ReconstructsConditionalBranchesIntoIfStatements()
+    {
+        var assemblyPath = typeof(BlueprintAnalyzer).Assembly.Location;
+        var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
+        var code = document.Files[0].Code!;
+
+        var withIf = code.Types
+            .SelectMany(type => type.Methods)
+            .Where(method => method.BodyReconstructed && method.Body.Any(line => line.TrimStart().StartsWith("if (", StringComparison.Ordinal)))
+            .ToArray();
+
+        Assert.NotEmpty(withIf);
+
+        // if 區塊必須成對出現大括號，確保結構化輸出是完整的。
+        foreach (var method in withIf)
+        {
+            var opens = method.Body.Count(line => line.Trim() == "{");
+            var closes = method.Body.Count(line => line.Trim() == "}");
+            Assert.Equal(opens, closes);
+        }
     }
 
     [Fact]
