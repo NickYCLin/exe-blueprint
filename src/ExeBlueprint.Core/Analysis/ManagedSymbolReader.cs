@@ -2176,13 +2176,14 @@ internal static class ManagedSymbolReader
 
     private static bool IsKnownReferenceType(MetadataReader metadata, string type)
     {
-        if (type is "string" or "object" || type.EndsWith(']'))
+        var normalizedType = type.EndsWith("?", StringComparison.Ordinal) ? type[..^1] : type;
+        if (normalizedType is "string" or "object" || normalizedType.EndsWith(']'))
         {
             return true;
         }
 
-        var genericStart = type.IndexOf('<');
-        var definitionName = genericStart >= 0 ? type[..genericStart] : type;
+        var genericStart = normalizedType.IndexOf('<');
+        var definitionName = genericStart >= 0 ? normalizedType[..genericStart] : normalizedType;
         foreach (var handle in metadata.TypeDefinitions)
         {
             if (GetTypeDefinitionFullName(metadata, handle) != definitionName)
@@ -3084,16 +3085,7 @@ internal static class ManagedSymbolReader
             try
             {
                 var attribute = metadata.GetCustomAttribute(handle);
-                string? attributeType = attribute.Constructor.Kind switch
-                {
-                    HandleKind.MethodDefinition => GetTypeName(
-                        metadata,
-                        metadata.GetMethodDefinition((MethodDefinitionHandle)attribute.Constructor).GetDeclaringType()),
-                    HandleKind.MemberReference => GetTypeName(
-                        metadata,
-                        metadata.GetMemberReference((MemberReferenceHandle)attribute.Constructor).Parent),
-                    _ => null
-                };
+                var attributeType = GetCustomAttributeTypeName(metadata, attribute);
                 if (attributeType == fullName)
                 {
                     return true;
@@ -3107,6 +3099,18 @@ internal static class ManagedSymbolReader
 
         return false;
     }
+
+    private static string? GetCustomAttributeTypeName(MetadataReader metadata, CustomAttribute attribute) =>
+        attribute.Constructor.Kind switch
+        {
+            HandleKind.MethodDefinition => GetTypeName(
+                metadata,
+                metadata.GetMethodDefinition((MethodDefinitionHandle)attribute.Constructor).GetDeclaringType()),
+            HandleKind.MemberReference => GetTypeName(
+                metadata,
+                metadata.GetMemberReference((MemberReferenceHandle)attribute.Constructor).Parent),
+            _ => null
+        };
 
     private static string StripArity(string name)
     {
@@ -3160,14 +3164,37 @@ internal static class ManagedSymbolReader
         try
         {
             var signature = method.DecodeSignature(SignatureTypeNameProvider.Instance, null);
-            returnType = signature.ReturnType;
+            var parameterHandles = ReadParameterHandles(metadata, method);
+            var nullableContext = ReadNullableContextFlag(metadata, method);
+            returnType = ApplyTopLevelNullableAnnotation(
+                metadata,
+                signature.ReturnType,
+                parameterHandles.TryGetValue(0, out var returnHandle) ? returnHandle : default,
+                nullableContext);
             var parameterNames = ReadParameterNames(metadata, method);
             for (var index = 0; index < signature.ParameterTypes.Length; index++)
             {
                 var name = parameterNames.TryGetValue(index + 1, out var value) && !string.IsNullOrEmpty(value)
                     ? value
                     : $"arg{index}";
-                parameters.Add(new ParameterModel { Name = name, Type = signature.ParameterTypes[index] });
+                var parameterType = ApplyTopLevelNullableAnnotation(
+                    metadata,
+                    signature.ParameterTypes[index],
+                    parameterHandles.TryGetValue(index + 1, out var parameterHandle) ? parameterHandle : default,
+                    nullableContext);
+                parameters.Add(new ParameterModel { Name = name, Type = parameterType });
+            }
+
+            // 舊式或 compiler-generated metadata 可能把 override Equals 的參數標成 oblivious；
+            // 產生 nullable-enabled C# 時仍須符合 System.Object.Equals(object?) 的 contract。
+            if (methodName == nameof(object.Equals) &&
+                returnType == "bool" &&
+                parameters.Count == 1 &&
+                parameters[0].Type == "object" &&
+                method.Attributes.HasFlag(MethodAttributes.Virtual) &&
+                !method.Attributes.HasFlag(MethodAttributes.NewSlot))
+            {
+                parameters[0] = parameters[0] with { Type = "object?" };
             }
 
             signatureText = $"{returnType} {methodName}({string.Join(", ", parameters.Select(p => $"{p.Type} {p.Name}"))})";
@@ -3193,6 +3220,139 @@ internal static class ManagedSymbolReader
             GenericParameters = ReadMethodGenericParameters(metadata, method),
             Parameters = parameters
         };
+    }
+
+    private static Dictionary<int, ParameterHandle> ReadParameterHandles(
+        MetadataReader metadata,
+        MethodDefinition method)
+    {
+        var handles = new Dictionary<int, ParameterHandle>();
+        foreach (var handle in method.GetParameters())
+        {
+            handles[metadata.GetParameter(handle).SequenceNumber] = handle;
+        }
+
+        return handles;
+    }
+
+    private static string ApplyTopLevelNullableAnnotation(
+        MetadataReader metadata,
+        string type,
+        ParameterHandle parameterHandle,
+        byte? nullableContext)
+    {
+        if (type.EndsWith("?", StringComparison.Ordinal))
+        {
+            return type;
+        }
+
+        var directFlag = parameterHandle.IsNil
+            ? null
+            : ReadTopLevelNullableFlag(metadata, metadata.GetParameter(parameterHandle).GetCustomAttributes());
+        var nullableFlag = directFlag ?? nullableContext;
+        return nullableFlag == 2 && (directFlag.HasValue || IsKnownReferenceType(metadata, type) || type.StartsWith('!'))
+            ? $"{type}?"
+            : type;
+    }
+
+    private static byte? ReadNullableContextFlag(MetadataReader metadata, MethodDefinition method)
+    {
+        var methodContext = ReadSingleByteCustomAttribute(
+            metadata,
+            method.GetCustomAttributes(),
+            "System.Runtime.CompilerServices.NullableContextAttribute");
+        if (methodContext.HasValue)
+        {
+            return methodContext;
+        }
+
+        var declaringType = method.GetDeclaringType();
+        while (!declaringType.IsNil)
+        {
+            var definition = metadata.GetTypeDefinition(declaringType);
+            var typeContext = ReadSingleByteCustomAttribute(
+                metadata,
+                definition.GetCustomAttributes(),
+                "System.Runtime.CompilerServices.NullableContextAttribute");
+            if (typeContext.HasValue)
+            {
+                return typeContext;
+            }
+
+            declaringType = definition.GetDeclaringType();
+        }
+
+        return null;
+    }
+
+    private static byte? ReadSingleByteCustomAttribute(
+        MetadataReader metadata,
+        CustomAttributeHandleCollection attributes,
+        string fullName)
+    {
+        foreach (var handle in attributes)
+        {
+            try
+            {
+                var attribute = metadata.GetCustomAttribute(handle);
+                if (GetCustomAttributeTypeName(metadata, attribute) != fullName)
+                {
+                    continue;
+                }
+
+                var reader = metadata.GetBlobReader(attribute.Value);
+                return reader.ReadUInt16() == 1 && reader.RemainingBytes == 3
+                    ? reader.ReadByte()
+                    : null;
+            }
+            catch (BadImageFormatException)
+            {
+                return null;
+            }
+        }
+
+        return null;
+    }
+
+    private static byte? ReadTopLevelNullableFlag(
+        MetadataReader metadata,
+        CustomAttributeHandleCollection attributes)
+    {
+        foreach (var handle in attributes)
+        {
+            try
+            {
+                var attribute = metadata.GetCustomAttribute(handle);
+                if (GetCustomAttributeTypeName(metadata, attribute) !=
+                    "System.Runtime.CompilerServices.NullableAttribute")
+                {
+                    continue;
+                }
+
+                var reader = metadata.GetBlobReader(attribute.Value);
+                if (reader.ReadUInt16() != 1)
+                {
+                    return null;
+                }
+
+                // NullableAttribute 有 byte 與 byte[] 兩種 constructor；第一個 flag 代表最外層型別。
+                if (reader.RemainingBytes == 3)
+                {
+                    return reader.ReadByte();
+                }
+
+                var flagCount = reader.ReadInt32();
+                return flagCount > 0 && reader.RemainingBytes >= flagCount + 2
+                    ? reader.ReadByte()
+                    : null;
+            }
+            catch (BadImageFormatException)
+            {
+                return null;
+            }
+        }
+
+        return null;
     }
 
     private static Dictionary<int, string> ReadParameterNames(MetadataReader metadata, MethodDefinition method)

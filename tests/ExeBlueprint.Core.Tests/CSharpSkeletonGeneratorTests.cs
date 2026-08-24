@@ -22,6 +22,8 @@ public sealed class CSharpSkeletonGeneratorTests
             file => file.RelativePath.EndsWith("ExeBlueprint.Models.cs", StringComparison.Ordinal));
         Assert.Contains("namespace ExeBlueprint.Models;", modelsFile.Content);
         Assert.Contains("class FileArtifact", modelsFile.Content);
+        Assert.Contains("public override bool Equals(object? obj)", modelsFile.Content);
+        Assert.Contains("public bool Equals(ExeBlueprint.Models.BlueprintDocument? other)", modelsFile.Content);
         Assert.Contains("throw new global::System.NotImplementedException();", modelsFile.Content);
     }
 

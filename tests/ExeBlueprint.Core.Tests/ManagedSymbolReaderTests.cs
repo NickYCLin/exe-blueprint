@@ -86,6 +86,53 @@ public sealed class ManagedSymbolReaderTests
     }
 
     [Fact]
+    public async Task ReadsTopLevelNullableMethodAnnotations()
+    {
+        var assemblyPath = typeof(BlueprintAnalyzer).Assembly.Location;
+        var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
+        var blueprintDocument = Assert.Single(
+            document.Files[0].Code!.Types,
+            type => type.FullName == "ExeBlueprint.Models.BlueprintDocument");
+
+        var equalsObject = Assert.Single(
+            blueprintDocument.Methods,
+            method => method.Name == "Equals" && method.Parameters[0].Type == "object?");
+        Assert.Equal("bool", equalsObject.ReturnType);
+
+        Assert.Contains(
+            blueprintDocument.Methods,
+            method => method.Name == "Equals"
+                && method.Parameters.Count == 1
+                && method.Parameters[0].Type == "ExeBlueprint.Models.BlueprintDocument?");
+
+        var recordStruct = Assert.Single(
+            document.Files[0].Code!.Types,
+            type => type.FullName == "ExeBlueprint.Analysis.ManagedSymbolReader.AccessorShape");
+        Assert.Contains(
+            recordStruct.Methods,
+            method => method.Name == "Equals"
+                && method.Parameters.Count == 1
+                && method.Parameters[0].Type == "object?");
+
+        var nativeAnalyzer = Assert.Single(
+            document.Files[0].Code!.Types,
+            type => type.FullName == "ExeBlueprint.Analysis.NativeAnalyzer");
+        Assert.Equal(
+            "string?",
+            Assert.Single(nativeAnalyzer.Methods, method => method.Name == "LocateHeadless").ReturnType);
+
+        var fixtureDocument = await new BlueprintAnalyzer().AnalyzeAsync(typeof(ReferenceConditionFixture).Assembly.Location);
+        var referenceFixture = Assert.Single(
+            fixtureDocument.Files[0].Code!.Types,
+            type => type.FullName == typeof(ReferenceConditionFixture).FullName);
+        Assert.Equal(
+            "ExeBlueprint.Core.Tests.ReferenceConditionFixture?",
+            Assert.Single(referenceFixture.Methods, method => method.Name == nameof(ReferenceConditionFixture.HasParameter))
+                .Parameters[0]
+                .Type);
+    }
+
+    [Fact]
     public async Task ReconstructsCharLiteralsAndTypedLocals()
     {
         var assemblyPath = typeof(BlueprintAnalyzer).Assembly.Location;
