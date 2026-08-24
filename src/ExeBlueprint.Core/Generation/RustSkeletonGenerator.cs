@@ -52,10 +52,12 @@ public static class RustSkeletonGenerator
         switch (type.Kind)
         {
             case "enum":
+                builder.AppendLine($"#[repr({LanguageTypeMap.ToRust(SkeletonSupport.EnumUnderlyingType(type))})]");
                 builder.AppendLine($"pub enum {name} {{");
                 foreach (var member in SkeletonSupport.EnumMembers(type))
                 {
-                    builder.AppendLine($"    {member},");
+                    var assignment = member.ConstantValue?.Value is string value ? $" = {value}" : "";
+                    builder.AppendLine($"    {SkeletonSupport.Sanitize(member.Name)}{assignment},");
                 }
 
                 builder.AppendLine("}");

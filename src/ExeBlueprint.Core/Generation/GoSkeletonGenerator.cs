@@ -51,16 +51,15 @@ public static class GoSkeletonGenerator
         switch (type.Kind)
         {
             case "enum":
-                builder.AppendLine($"type {name} int");
+                builder.AppendLine($"type {name} {LanguageTypeMap.ToGo(SkeletonSupport.EnumUnderlyingType(type))}");
                 var members = SkeletonSupport.EnumMembers(type);
                 if (members.Count > 0)
                 {
                     builder.AppendLine("const (");
-                    for (var index = 0; index < members.Count; index++)
+                    foreach (var member in members)
                     {
-                        builder.AppendLine(index == 0
-                            ? $"    {name}{members[index]} {name} = iota"
-                            : $"    {name}{members[index]}");
+                        var value = member.ConstantValue?.Value ?? "iota";
+                        builder.AppendLine($"    {name}{SkeletonSupport.Sanitize(member.Name)} {name} = {value}");
                     }
 
                     builder.AppendLine(")");

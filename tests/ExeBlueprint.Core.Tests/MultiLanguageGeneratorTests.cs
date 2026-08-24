@@ -56,6 +56,31 @@ public sealed class MultiLanguageGeneratorTests
         Assert.Empty(CppSkeletonGenerator.Generate(document));
     }
 
+    [Fact]
+    public async Task AllGeneratorsPreserveEnumValuesAndUnderlyingType()
+    {
+        var document = await new BlueprintAnalyzer().AnalyzeAsync(typeof(LongBackedTestEnum).Assembly.Location);
+
+        var csharp = Assert.Single(
+            CSharpSkeletonGenerator.Generate(document),
+            file => file.Content.Contains("enum LongBackedTestEnum", StringComparison.Ordinal)).Content;
+        Assert.Contains("internal enum LongBackedTestEnum : long", csharp);
+        Assert.Contains("Negative = -4,", csharp);
+        Assert.Contains("Sparse = 42,", csharp);
+
+        var cpp = SingleSource(CppSkeletonGenerator.Generate(document), ".hpp");
+        Assert.Contains("enum class LongBackedTestEnum : int64_t", cpp);
+        Assert.Contains("Negative = -4", cpp);
+
+        var rust = SingleSource(RustSkeletonGenerator.Generate(document), ".rs");
+        Assert.Contains("#[repr(i64)]", rust);
+        Assert.Contains("Negative = -4,", rust);
+
+        var go = SingleSource(GoSkeletonGenerator.Generate(document), ".go");
+        Assert.Contains("type LongBackedTestEnum int64", go);
+        Assert.Contains("LongBackedTestEnumSparse LongBackedTestEnum = 42", go);
+    }
+
     private static async Task<BlueprintDocument> AnalyzeSelf() =>
         await new BlueprintAnalyzer().AnalyzeAsync(typeof(BlueprintAnalyzer).Assembly.Location);
 

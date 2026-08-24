@@ -160,7 +160,8 @@ public static class CSharpSkeletonGenerator
             .ToArray();
         foreach (var member in members)
         {
-            builder.AppendLine($"{body}{SafeName(member.Name)},");
+            var assignment = member.ConstantValue?.Value is string value ? $" = {value}" : "";
+            builder.AppendLine($"{body}{SafeName(member.Name)}{assignment},");
         }
     }
 
@@ -299,6 +300,12 @@ public static class CSharpSkeletonGenerator
             .Select(name => Humanize(name, type.GenericParameters, [])));
 
         var declaration = string.Join(" ", parts);
+        if (type.Kind == "enum")
+        {
+            var underlyingType = SkeletonSupport.EnumUnderlyingType(type);
+            return underlyingType == "int" ? declaration : $"{declaration} : {underlyingType}";
+        }
+
         return bases.Count == 0 ? declaration : $"{declaration} : {string.Join(", ", bases)}";
     }
 

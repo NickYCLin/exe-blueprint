@@ -22,7 +22,7 @@ Blueprint 中介資料
 
 ## 目前完成
 
-`ExeBlueprint.Core` 已包含輸入盤點、ZIP 安全解壓、檔案分類、PE／.NET 讀取、.NET 型別／欄位／屬性／方法抽取、方法層級呼叫圖、技術辨識、相依關係、報告產生，以及 .NET 型別的 C# 骨架產生。
+`ExeBlueprint.Core` 已包含輸入盤點、ZIP 安全解壓、檔案分類、PE／.NET 讀取、.NET 型別／欄位／屬性／方法與 enum 常值抽取、方法層級呼叫圖、技術辨識、相依關係、報告產生，以及 .NET 型別的 C# 骨架產生。
 
 `ExeBlueprint.Cli` 提供命令列入口，後續桌面版也會呼叫同一套核心。
 
@@ -81,7 +81,7 @@ auto-property 的隱藏欄位會還原成屬性名稱，運算子方法還原成
 呼叫時若參數型別是 char，整數常值會還原成 char 常值；區域變數會依方法的 local signature 用實際型別宣告。
 帶 switch、例外處理或非標準流程的方法目前還原不了，會退回反組譯 IL 註解加 `NotImplementedException`。
 重建採全有或全無：遇到無法結構化的跳轉、參照編譯器產生的名稱或任何不支援的指令，就整個方法放棄，
-寧可不還原也不產出語意錯誤的程式碼。enum 常值目前仍以整數呈現，型別名稱未加命名空間 using，所以不保證可直接編譯。
+寧可不還原也不產出語意錯誤的程式碼。enum 會保留底層整數型別與各成員原始數值；型別名稱未加命名空間 using，所以不保證可直接編譯。
 
 另外也有 `CppSkeletonGenerator`、`RustSkeletonGenerator`、`GoSkeletonGenerator`，
 共用 `SkeletonSupport` 挑型別與 `LanguageTypeMap` 做基本型別對應，各自輸出該語言的型別與方法簽章骨架

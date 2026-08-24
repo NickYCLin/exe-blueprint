@@ -54,8 +54,13 @@ public static class CppSkeletonGenerator
         var name = SkeletonSupport.SimpleName(type.Name);
         if (type.Kind == "enum")
         {
-            builder.AppendLine($"enum class {name} {{");
-            builder.AppendLine(string.Join(",\n", SkeletonSupport.EnumMembers(type).Select(member => $"    {member}")));
+            var underlyingType = LanguageTypeMap.ToCpp(SkeletonSupport.EnumUnderlyingType(type));
+            builder.AppendLine($"enum class {name} : {underlyingType} {{");
+            builder.AppendLine(string.Join(",\n", SkeletonSupport.EnumMembers(type).Select(member =>
+            {
+                var assignment = member.ConstantValue?.Value is string value ? $" = {value}" : "";
+                return $"    {SkeletonSupport.Sanitize(member.Name)}{assignment}";
+            })));
             builder.AppendLine("};");
             return;
         }

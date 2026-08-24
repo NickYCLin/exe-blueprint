@@ -11,7 +11,7 @@ ExeBlueprint 用來整理 Windows 應用程式套件。它會掃描 EXE、DLL、
 - 讀取 PE 架構、子系統、section 與簽章資料
 - 分辨 .NET assembly 與原生 PE
 - 讀取 PE imports 與 .NET assembly references
-- 讀出 .NET assembly 的命名空間、型別、欄位、屬性、方法簽章與繼承關係
+- 讀出 .NET assembly 的命名空間、型別、欄位、屬性、方法簽章、enum 常值與繼承關係
 - 掃描 IL 建立方法層級呼叫圖，看得出程式流程怎麼串
 - 把每個方法的 IL 反組譯成可讀指令（呼叫、字串、分支目標都解析出來）
 - 用堆疊模擬把方法 IL 還原成 C# 陳述式，把條件分支還原成 if／if-else，迴圈還原成 while／do-while（可巢狀）
@@ -113,7 +113,7 @@ src/ExeBlueprint.Cli/bin/Release/net10.0/win-x64/publish/exe-blueprint.exe
 - 解開 Inno Setup、NSIS、MSI、PyInstaller 與 Electron 套件
 - 深化原生 PE 分析：把 Ghidra 的函式進一步還原成呼叫圖與程式碼（目前先列出函式清單）
 - 擴充中介模型，補上 UI、資源和設定（函式、型別、欄位、屬性、呼叫圖已完成 .NET 部分）
-- 還原 switch 與 enum 常值，讓骨架能直接編譯成多專案 solution（目前已能還原 if／if-else、while／do-while、char 常值與區域變數型別）
+- 還原 switch，讓骨架能直接編譯成多專案 solution（目前已能還原 if／if-else、while／do-while、char 常值、enum 常值與區域變數型別）
 - 優先支援易語言、VB6、Delphi 到 C# 的轉換
 - 讓 C++／Rust／Go 產生器也還原方法體、支援易語言（目前這三個語言只還原結構）
 - 比較原程式與重建版本的輸入、輸出和副作用

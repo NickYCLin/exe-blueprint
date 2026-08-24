@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.Collections.Immutable;
+using System.Globalization;
 using System.Reflection;
 using System.Reflection.Emit;
 using System.Reflection.Metadata;
@@ -1729,11 +1730,96 @@ internal static class ManagedSymbolReader
                 Type = fieldType,
                 Accessibility = GetFieldAccessibility(field.Attributes),
                 IsStatic = field.Attributes.HasFlag(FieldAttributes.Static),
-                IsConstant = field.Attributes.HasFlag(FieldAttributes.Literal)
+                IsConstant = field.Attributes.HasFlag(FieldAttributes.Literal),
+                ConstantValue = ReadConstantValue(metadata, field)
             });
         }
 
         return fields;
+    }
+
+    private static ConstantValueModel? ReadConstantValue(MetadataReader metadata, FieldDefinition field)
+    {
+        var handle = field.GetDefaultValue();
+        if (handle.IsNil)
+        {
+            return null;
+        }
+
+        try
+        {
+            var constant = metadata.GetConstant(handle);
+            var reader = metadata.GetBlobReader(constant.Value);
+            string type;
+            string? value;
+            switch (constant.TypeCode)
+            {
+                case ConstantTypeCode.Boolean:
+                    type = "bool";
+                    value = reader.ReadBoolean() ? "true" : "false";
+                    break;
+                case ConstantTypeCode.Char:
+                    type = "char";
+                    value = reader.ReadChar().ToString();
+                    break;
+                case ConstantTypeCode.SByte:
+                    type = "sbyte";
+                    value = reader.ReadSByte().ToString(CultureInfo.InvariantCulture);
+                    break;
+                case ConstantTypeCode.Byte:
+                    type = "byte";
+                    value = reader.ReadByte().ToString(CultureInfo.InvariantCulture);
+                    break;
+                case ConstantTypeCode.Int16:
+                    type = "short";
+                    value = reader.ReadInt16().ToString(CultureInfo.InvariantCulture);
+                    break;
+                case ConstantTypeCode.UInt16:
+                    type = "ushort";
+                    value = reader.ReadUInt16().ToString(CultureInfo.InvariantCulture);
+                    break;
+                case ConstantTypeCode.Int32:
+                    type = "int";
+                    value = reader.ReadInt32().ToString(CultureInfo.InvariantCulture);
+                    break;
+                case ConstantTypeCode.UInt32:
+                    type = "uint";
+                    value = reader.ReadUInt32().ToString(CultureInfo.InvariantCulture);
+                    break;
+                case ConstantTypeCode.Int64:
+                    type = "long";
+                    value = reader.ReadInt64().ToString(CultureInfo.InvariantCulture);
+                    break;
+                case ConstantTypeCode.UInt64:
+                    type = "ulong";
+                    value = reader.ReadUInt64().ToString(CultureInfo.InvariantCulture);
+                    break;
+                case ConstantTypeCode.Single:
+                    type = "float";
+                    value = reader.ReadSingle().ToString("R", CultureInfo.InvariantCulture);
+                    break;
+                case ConstantTypeCode.Double:
+                    type = "double";
+                    value = reader.ReadDouble().ToString("R", CultureInfo.InvariantCulture);
+                    break;
+                case ConstantTypeCode.String:
+                    type = "string";
+                    value = reader.ReadUTF16(reader.RemainingBytes);
+                    break;
+                case ConstantTypeCode.NullReference:
+                    type = "object";
+                    value = null;
+                    break;
+                default:
+                    return null;
+            }
+
+            return new ConstantValueModel { Type = type, Value = value };
+        }
+        catch (Exception exception) when (exception is BadImageFormatException or ArgumentOutOfRangeException)
+        {
+            return null;
+        }
     }
 
     private static IReadOnlyList<PropertyModel> ReadProperties(MetadataReader metadata, TypeDefinition definition)

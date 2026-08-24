@@ -65,6 +65,16 @@ public sealed record FieldModel
     public bool IsStatic { get; init; }
 
     public bool IsConstant { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public ConstantValueModel? ConstantValue { get; init; }
+}
+
+public sealed record ConstantValueModel
+{
+    public required string Type { get; init; }
+
+    public string? Value { get; init; }
 }
 
 public sealed record PropertyModel

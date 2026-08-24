@@ -121,6 +121,27 @@ public sealed class ManagedSymbolReaderTests
     }
 
     [Fact]
+    public async Task ExtractsEnumUnderlyingTypeAndConstantValues()
+    {
+        var assemblyPath = typeof(LongBackedTestEnum).Assembly.Location;
+        var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
+        var enumType = Assert.Single(
+            document.Files[0].Code!.Types,
+            type => type.FullName == "ExeBlueprint.Core.Tests.LongBackedTestEnum");
+
+        Assert.Equal("enum", enumType.Kind);
+        Assert.Equal("long", Assert.Single(enumType.Fields, field => field.Name == "value__").Type);
+
+        var negative = Assert.Single(enumType.Fields, field => field.Name == nameof(LongBackedTestEnum.Negative));
+        Assert.True(negative.IsConstant);
+        Assert.Equal("long", negative.ConstantValue?.Type);
+        Assert.Equal("-4", negative.ConstantValue?.Value);
+
+        var sparse = Assert.Single(enumType.Fields, field => field.Name == nameof(LongBackedTestEnum.Sparse));
+        Assert.Equal("42", sparse.ConstantValue?.Value);
+    }
+
+    [Fact]
     public async Task SummaryAggregatesManagedTypeAndMethodCounts()
     {
         var assemblyPath = typeof(BlueprintAnalyzer).Assembly.Location;
@@ -164,4 +185,11 @@ public sealed class ManagedSymbolReaderTests
             return ValueTask.CompletedTask;
         }
     }
+}
+
+internal enum LongBackedTestEnum : long
+{
+    Negative = -4,
+    Zero = 0,
+    Sparse = 42
 }

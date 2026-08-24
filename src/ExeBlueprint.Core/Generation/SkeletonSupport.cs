@@ -84,9 +84,12 @@ internal static class SkeletonSupport
         return members;
     }
 
-    public static IReadOnlyList<string> EnumMembers(TypeModel type) =>
+    public static string EnumUnderlyingType(TypeModel type) =>
+        type.Fields.FirstOrDefault(field => field.Name == "value__")?.Type ?? "int";
+
+    public static IReadOnlyList<(string Name, ConstantValueModel? ConstantValue)> EnumMembers(TypeModel type) =>
         type.Fields
             .Where(field => field.IsConstant && field.Name != "value__" && !IsGenerated(field.Name))
-            .Select(field => field.Name)
+            .Select(field => (field.Name, field.ConstantValue))
             .ToArray();
 }
