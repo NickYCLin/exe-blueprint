@@ -45,7 +45,21 @@ ExeBlueprint 用來整理 Windows 應用程式套件。它會掃描 EXE、DLL、
 
 辨識結果會附上依據與可信度。看到某個語言名稱，不代表已經證明原始碼就是用該語言撰寫。
 
-## 使用方式
+## 下載現成版本（不用裝 SDK）
+
+到 [Releases](https://github.com/NickYCLin/exe-blueprint/releases) 下載 `...-win-x64.zip`，
+全部解壓縮到同一個資料夾後，**雙擊 `run.bat`**，或把要分析的 EXE／DLL／資料夾／ZIP **拖到 `run.bat` 上**。
+
+這是命令列工具、不是安裝程式，**不要直接雙擊 exe**（會閃一下就關）。想自己打指令就用 PowerShell：
+
+```powershell
+.\exe-blueprint.exe analyze .\你的程式.exe -o .\report
+```
+
+從網路下載的未簽章 exe 若被 Windows 擋（SmartScreen／封鎖／防毒隔離），
+解法都寫在 zip 內的 `README.txt`。
+
+## 從原始碼執行
 
 需要 [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)。
 

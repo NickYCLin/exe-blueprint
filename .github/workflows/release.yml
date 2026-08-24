@@ -73,12 +73,23 @@ jobs:
               -p:DebugType=None `
               -o $publishDir
 
+          $publishedExe = Join-Path $publishDir 'exe-blueprint.exe'
           $exeName = "exe-blueprint-$env:RELEASE_TAG-win-x64.exe"
           $zipName = "exe-blueprint-$env:RELEASE_TAG-win-x64.zip"
           $exePath = Join-Path $assetDir $exeName
           $zipPath = Join-Path $assetDir $zipName
-          Copy-Item -LiteralPath (Join-Path $publishDir 'exe-blueprint.exe') -Destination $exePath
-          Compress-Archive -LiteralPath $exePath -DestinationPath $zipPath -CompressionLevel Optimal
+
+          # 單獨的 exe 資產（給會用命令列的人直接下載）。
+          Copy-Item -LiteralPath $publishedExe -Destination $exePath
+
+          # 好用的 zip 包：穩定檔名的 exe + 雙擊/拖放啟動器 + 白話說明。
+          $stageDir = Join-Path $env:RUNNER_TEMP 'exe-blueprint-stage'
+          if (Test-Path -LiteralPath $stageDir) { Remove-Item -LiteralPath $stageDir -Recurse -Force }
+          New-Item -ItemType Directory -Path $stageDir -Force | Out-Null
+          Copy-Item -LiteralPath $publishedExe -Destination (Join-Path $stageDir 'exe-blueprint.exe')
+          Copy-Item -LiteralPath .\packaging\run.bat -Destination (Join-Path $stageDir 'run.bat')
+          Copy-Item -LiteralPath .\packaging\README.txt -Destination (Join-Path $stageDir 'README.txt')
+          Compress-Archive -Path (Join-Path $stageDir '*') -DestinationPath $zipPath -CompressionLevel Optimal
 
           $checksumPath = Join-Path $assetDir 'SHA256SUMS.txt'
           $checksumLines = foreach ($path in @($exePath, $zipPath)) {
