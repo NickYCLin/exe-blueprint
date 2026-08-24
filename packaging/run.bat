@@ -1,35 +1,40 @@
 @echo off
-rem ExeBlueprint 雙擊／拖放啟動器。
-rem 直接雙擊會出現提示；也可以把 EXE／DLL／資料夾／ZIP 拖到這個檔案上分析。
-setlocal enabledelayedexpansion
-chcp 65001 >nul
-cd /d "%~dp0"
+rem ExeBlueprint launcher. Double-click to get a prompt, or drag an
+rem EXE / DLL / folder / ZIP onto this file to analyze it.
+rem (Kept ASCII-only so it works on every Windows locale. Chinese help is in README.txt.)
+setlocal
+pushd "%~dp0"
+set "EXE=%~dp0exe-blueprint.exe"
 
-set "EXE=exe-blueprint.exe"
 if not exist "%EXE%" (
-    echo 找不到 %EXE%，請確認它和這個 run.bat 放在同一個資料夾。
+    echo Cannot find exe-blueprint.exe next to this run.bat. Extract the whole zip first.
     echo.
     pause
+    popd
     exit /b 1
 )
 
 if not "%~1"=="" (
-    echo 正在分析：%~1
+    echo Analyzing: %~1
+    echo.
     "%EXE%" analyze "%~1"
     echo.
-    echo 分析完成。輸出在上面顯示的資料夾裡。
+    echo Done. The output folder is shown above.
     pause
+    popd
     exit /b
 )
 
 echo ============================================================
-echo  ExeBlueprint - Windows 應用程式分析工具（命令列）
+echo   ExeBlueprint - Windows app analyzer ^(command-line tool^)
 echo ============================================================
 echo.
-echo  用法一：把要分析的 EXE / DLL / 資料夾 / ZIP 拖到 run.bat 上。
-echo  用法二：在下面直接貼上路徑後按 Enter。
+echo   Option 1: drag an EXE / DLL / folder / ZIP onto run.bat
+echo   Option 2: paste a path below and press Enter
 echo.
-set /p "TARGET=要分析的路徑（留空按 Enter 只看說明）: "
+echo   Full instructions (Chinese) are in README.txt.
+echo.
+set /p "TARGET=Path to analyze (leave blank for --help): "
 echo.
 if "%TARGET%"=="" (
     "%EXE%" --help
@@ -38,3 +43,4 @@ if "%TARGET%"=="" (
 )
 echo.
 pause
+popd
