@@ -45,7 +45,12 @@ static async Task<int> RunAsync(string[] args, CancellationToken cancellationTok
         Console.WriteLine($"正在分析：{Path.GetFullPath(parsed.InputPath)}");
 
         var analyzer = new BlueprintAnalyzer();
-        var document = await analyzer.AnalyzeAsync(parsed.InputPath, cancellationToken: cancellationToken);
+        var analysisOptions = new AnalysisOptions
+        {
+            EnableNativeAnalysis = parsed.Native,
+            GhidraInstallDir = parsed.GhidraDir
+        };
+        var document = await analyzer.AnalyzeAsync(parsed.InputPath, analysisOptions, cancellationToken);
         await BlueprintJsonWriter.WriteAsync(document, jsonPath, cancellationToken);
         if (!parsed.JsonOnly)
         {
@@ -116,12 +121,26 @@ static ParsedArguments ParseArguments(string[] args)
     var emitCpp = false;
     var emitRust = false;
     var emitGo = false;
+    var native = false;
+    string? ghidraDir = null;
 
     while (index < args.Length)
     {
         var option = args[index++];
         switch (option)
         {
+            case "--native":
+                native = true;
+                break;
+            case "--ghidra":
+                if (index >= args.Length)
+                {
+                    throw new ArgumentException("--ghidra 後面需要 Ghidra 安裝目錄。");
+                }
+
+                ghidraDir = args[index++];
+                native = true;
+                break;
             case "-o":
             case "--output":
                 if (index >= args.Length)
@@ -154,7 +173,7 @@ static ParsedArguments ParseArguments(string[] args)
         }
     }
 
-    return new ParsedArguments(inputPath, outputDirectory, force, jsonOnly, emitCSharp, emitCpp, emitRust, emitGo);
+    return new ParsedArguments(inputPath, outputDirectory, force, jsonOnly, emitCSharp, emitCpp, emitRust, emitGo, native, ghidraDir);
 }
 
 static string CreateDefaultOutputDirectory(string inputPath)
@@ -195,6 +214,8 @@ static void PrintHelp()
     Console.WriteLine("  --emit-cpp           另外產生 C++ 型別骨架");
     Console.WriteLine("  --emit-rust          另外產生 Rust 型別骨架");
     Console.WriteLine("  --emit-go            另外產生 Go 型別骨架");
+    Console.WriteLine("  --native             對原生 PE 用 Ghidra 抽函式（需 GHIDRA_INSTALL_DIR）");
+    Console.WriteLine("  --ghidra <目錄>      指定 Ghidra 安裝目錄並開啟原生分析");
     Console.WriteLine("  --force              覆寫既有 blueprint.json 與 REPORT.md");
     Console.WriteLine("  -v, --version        顯示版本");
     Console.WriteLine("  -h, --help           顯示說明");
@@ -210,4 +231,6 @@ internal sealed record ParsedArguments(
     bool EmitCSharp,
     bool EmitCpp,
     bool EmitRust,
-    bool EmitGo);
+    bool EmitGo,
+    bool Native,
+    string? GhidraDir);

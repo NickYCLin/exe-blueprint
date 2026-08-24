@@ -51,6 +51,14 @@ Blueprint 中介資料
 
 不認得的 EXE 仍會保留通用 PE 結果，不會因缺少專用分析器而完全失敗。
 
+## 原生 PE 分析（Ghidra）
+
+開啟 `--native` 時，`NativeAnalyzer` 會對原生 PE 呼叫 Ghidra headless（`analyzeHeadless`），
+用內建的 `ExportFunctions.py` 後置腳本把函式匯出成 JSON，再由 `GhidraOutputParser` 解析進 `FileArtifact.NativeCode`。
+Ghidra 安裝目錄來自 `--ghidra` 或環境變數 `GHIDRA_INSTALL_DIR`。找不到 Ghidra、逾時或執行失敗時不會讓整體分析失敗，
+只會把 `Backend` 記成 `none` 並附上註記，同時列入報告警告。原生函式與受管 `code` 分開存放，
+所以 C#／C++／Rust／Go 產生器不會誤把原生函式當成 .NET 型別輸出。
+
 ## 易語言
 
 易語言分析預計分成動態編譯和靜態編譯兩條路徑：

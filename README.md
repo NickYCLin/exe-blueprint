@@ -18,6 +18,7 @@ ExeBlueprint 用來整理 Windows 應用程式套件。它會掃描 EXE、DLL、
 - 帶 switch 或非標準流程的方法還原不了，會保留反組譯 IL 當註解
 - 把 .NET 型別轉出一份 C# 骨架，能還原的方法直接給程式碼，其餘附上原始 IL
 - 另外可轉出 C++／Rust／Go 的型別與方法簽章骨架（結構為主，方法體留空）
+- 選配用 Ghidra headless 分析原生 PE，列出函式（沒裝 Ghidra 會自動略過並加註記）
 - 找出套件內可以對上的 EXE／DLL 相依關係
 - 依檔案內容辨識常見語言、runtime、框架與安裝器
 - 輸出 JSON 與繁體中文 Markdown 報告
@@ -69,6 +70,16 @@ C# 會還原方法體：能結構化的方法用堆疊模擬還原成 C# 陳述�
 還原不了的把原始 IL 放進註解、方法體先用 `NotImplementedException`。
 C++／Rust／Go 目前只還原型別與方法簽章（結構），方法體留空。全部僅供對照或轉語言起點，不保證能直接編譯。
 
+要分析原生 PE（C/C++、Delphi、Go、Rust 等沒有 .NET metadata 的程式）的函式，加上 `--native`
+（需先安裝 [Ghidra](https://ghidra-sre.org/) 並設定 `GHIDRA_INSTALL_DIR`，或用 `--ghidra <目錄>` 指定）：
+
+```powershell
+$env:GHIDRA_INSTALL_DIR = "C:\ghidra_11.0"
+dotnet run --project .\src\ExeBlueprint.Cli -- analyze .\Native.exe --native
+```
+
+沒偵測到 Ghidra 時不會失敗，只會在報告與警告裡註記略過了原生分析。
+
 輸出目錄已有報告時，程式預設不會覆寫。確定要覆寫可加上 `--force`。
 
 ## 編譯成 Windows EXE
@@ -100,7 +111,7 @@ src/ExeBlueprint.Cli/bin/Release/net10.0/win-x64/publish/exe-blueprint.exe
 ## 接下來要做的功能
 
 - 解開 Inno Setup、NSIS、MSI、PyInstaller 與 Electron 套件
-- 串接 ILSpy、Ghidra 等分析後端（讓原生 PE 也能還原函式與流程）
+- 深化原生 PE 分析：把 Ghidra 的函式進一步還原成呼叫圖與程式碼（目前先列出函式清單）
 - 擴充中介模型，補上 UI、資源和設定（函式、型別、欄位、屬性、呼叫圖已完成 .NET 部分）
 - 還原 switch、do-while 與 enum 常值，讓骨架能直接編譯成多專案 solution（目前已能還原 if／if-else、while、char 常值與區域變數型別）
 - 優先支援易語言、VB6、Delphi 到 C# 的轉換

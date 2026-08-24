@@ -46,6 +46,8 @@ public sealed record FileArtifact
 
     public CodeModel? Code { get; init; }
 
+    public NativeCodeModel? NativeCode { get; init; }
+
     public string? AnalysisError { get; init; }
 }
 

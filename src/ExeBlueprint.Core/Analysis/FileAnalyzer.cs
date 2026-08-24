@@ -39,6 +39,9 @@ internal sealed class FileAnalyzer
             var code = pe?.IsManaged == true
                 ? await ManagedSymbolReader.TryReadAsync(fullPath, cancellationToken).ConfigureAwait(false)
                 : null;
+            var nativeCode = _options.EnableNativeAnalysis && pe is not null && !pe.IsManaged
+                ? await NativeAnalyzer.AnalyzeAsync(fullPath, _options, cancellationToken).ConfigureAwait(false)
+                : null;
 
             return new FileArtifact
             {
@@ -63,7 +66,8 @@ internal sealed class FileAnalyzer
                 ImportedModules = pe?.ImportedModules ?? [],
                 ManagedReferences = pe?.ManagedReferences ?? [],
                 Technologies = technologies,
-                Code = code
+                Code = code,
+                NativeCode = nativeCode
             };
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or BadImageFormatException or InvalidDataException)

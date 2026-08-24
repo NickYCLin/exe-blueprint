@@ -83,6 +83,7 @@ public static class MarkdownReportWriter
         }
 
         AppendCodeStructure(builder, document);
+        AppendNativeFunctions(builder, document);
 
         builder.AppendLine();
         builder.AppendLine("## 檔案清單");
@@ -133,6 +134,50 @@ public static class MarkdownReportWriter
 
     private const int MaxTypesPerFile = 20;
     private const int MaxCallEdgesPerFile = 30;
+    private const int MaxNativeFunctionsPerFile = 100;
+
+    private static void AppendNativeFunctions(StringBuilder builder, BlueprintDocument document)
+    {
+        var nativeFiles = document.Files.Where(file => file.NativeCode is not null).ToArray();
+        if (nativeFiles.Length == 0)
+        {
+            return;
+        }
+
+        builder.AppendLine();
+        builder.AppendLine("## 原生函式（Ghidra）");
+        builder.AppendLine();
+
+        foreach (var file in nativeFiles)
+        {
+            var native = file.NativeCode!;
+            builder.AppendLine($"### `{EscapeInline(file.RelativePath)}`");
+            builder.AppendLine();
+            if (native.Backend != "ghidra")
+            {
+                builder.AppendLine(native.Note ?? "沒有可用的原生分析後端。");
+                builder.AppendLine();
+                continue;
+            }
+
+            builder.AppendLine($"- 後端：Ghidra；函式數：{native.FunctionCount}");
+            builder.AppendLine();
+            builder.AppendLine("| 函式 | 位址 | 簽章 |");
+            builder.AppendLine("| --- | --- | --- |");
+            foreach (var function in native.Functions.Take(MaxNativeFunctionsPerFile))
+            {
+                builder.AppendLine($"| {EscapeCell(function.Name)} | {EscapeCell(function.Address ?? "-")} | {EscapeCell(function.Signature ?? "-")} |");
+            }
+
+            if (native.Functions.Count > MaxNativeFunctionsPerFile)
+            {
+                builder.AppendLine();
+                builder.AppendLine($"（僅列出前 {MaxNativeFunctionsPerFile} 個，共 {native.Functions.Count} 個函式，完整內容請看 blueprint.json）");
+            }
+
+            builder.AppendLine();
+        }
+    }
 
     private static void AppendCodeStructure(StringBuilder builder, BlueprintDocument document)
     {
