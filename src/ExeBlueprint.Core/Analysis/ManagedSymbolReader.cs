@@ -143,6 +143,7 @@ internal static class ManagedSymbolReader
                 GenericParameters = ReadTypeGenericParameters(metadata, definition),
                 Fields = ReadFields(metadata, definition),
                 Properties = ReadProperties(metadata, definition),
+                Events = ReadEvents(metadata, definition),
                 Methods = methods
             });
         }
@@ -2023,6 +2024,7 @@ internal static class ManagedSymbolReader
                 Accessibility = GetFieldAccessibility(field.Attributes),
                 IsStatic = field.Attributes.HasFlag(FieldAttributes.Static),
                 IsConstant = field.Attributes.HasFlag(FieldAttributes.Literal),
+                IsReadOnly = field.Attributes.HasFlag(FieldAttributes.InitOnly),
                 ConstantValue = ReadConstantValue(metadata, field)
             });
         }
@@ -2131,17 +2133,90 @@ internal static class ManagedSymbolReader
             }
 
             var accessors = property.GetAccessors();
+            var getter = ReadAccessor(metadata, accessors.Getter);
+            var setter = ReadAccessor(metadata, accessors.Setter);
+            var accessorShapes = new[] { getter, setter }.OfType<AccessorShape>().ToArray();
             properties.Add(new PropertyModel
             {
                 Name = metadata.GetString(property.Name),
                 Type = propertyType,
+                Accessibility = MostVisibleAccessibility(accessorShapes),
+                GetterAccessibility = getter?.Accessibility,
+                SetterAccessibility = setter?.Accessibility,
                 HasGetter = !accessors.Getter.IsNil,
-                HasSetter = !accessors.Setter.IsNil
+                HasSetter = !accessors.Setter.IsNil,
+                IsStatic = accessorShapes.Any(accessor => accessor.IsStatic),
+                IsAbstract = accessorShapes.Any(accessor => accessor.IsAbstract),
+                IsVirtual = accessorShapes.Any(accessor => accessor.IsVirtual)
             });
         }
 
         return properties;
     }
+
+    private static IReadOnlyList<EventModel> ReadEvents(MetadataReader metadata, TypeDefinition definition)
+    {
+        var events = new List<EventModel>();
+        foreach (var handle in definition.GetEvents())
+        {
+            var eventDefinition = metadata.GetEventDefinition(handle);
+            var accessors = eventDefinition.GetAccessors();
+            var accessorShapes = new[]
+            {
+                ReadAccessor(metadata, accessors.Adder),
+                ReadAccessor(metadata, accessors.Remover),
+                ReadAccessor(metadata, accessors.Raiser)
+            }.OfType<AccessorShape>().ToArray();
+
+            events.Add(new EventModel
+            {
+                Name = metadata.GetString(eventDefinition.Name),
+                Type = GetTypeName(metadata, eventDefinition.Type) ?? "object",
+                Accessibility = MostVisibleAccessibility(accessorShapes),
+                IsStatic = accessorShapes.Any(accessor => accessor.IsStatic),
+                IsAbstract = accessorShapes.Any(accessor => accessor.IsAbstract),
+                IsVirtual = accessorShapes.Any(accessor => accessor.IsVirtual)
+            });
+        }
+
+        return events;
+    }
+
+    private readonly record struct AccessorShape(
+        string Accessibility,
+        bool IsStatic,
+        bool IsAbstract,
+        bool IsVirtual);
+
+    private static AccessorShape? ReadAccessor(MetadataReader metadata, MethodDefinitionHandle handle)
+    {
+        if (handle.IsNil)
+        {
+            return null;
+        }
+
+        var method = metadata.GetMethodDefinition(handle);
+        return new AccessorShape(
+            GetMethodAccessibility(method.Attributes),
+            method.Attributes.HasFlag(MethodAttributes.Static),
+            method.Attributes.HasFlag(MethodAttributes.Abstract),
+            method.Attributes.HasFlag(MethodAttributes.Virtual));
+    }
+
+    private static string MostVisibleAccessibility(IReadOnlyList<AccessorShape> accessors) =>
+        accessors.Count == 0
+            ? "private"
+            : accessors.MaxBy(accessor => AccessibilityRank(accessor.Accessibility)).Accessibility;
+
+    private static int AccessibilityRank(string accessibility) => accessibility switch
+    {
+        "public" => 5,
+        "protected internal" => 4,
+        "protected" => 3,
+        "internal" => 2,
+        "private protected" => 1,
+        _ => 0
+    };
 
     private static string GetFieldAccessibility(FieldAttributes attributes) =>
         (attributes & FieldAttributes.FieldAccessMask) switch
@@ -2278,13 +2353,28 @@ internal sealed class SignatureTypeNameProvider : ISignatureTypeProvider<string,
     public string GetTypeFromDefinition(MetadataReader reader, TypeDefinitionHandle handle, byte rawTypeKind)
     {
         var definition = reader.GetTypeDefinition(handle);
-        return StripArity(reader.GetString(definition.Name));
+        var name = StripArity(reader.GetString(definition.Name));
+        var declaringType = definition.GetDeclaringType();
+        if (!declaringType.IsNil)
+        {
+            return $"{GetTypeFromDefinition(reader, declaringType, rawTypeKind)}.{name}";
+        }
+
+        var namespaceName = reader.GetString(definition.Namespace);
+        return string.IsNullOrEmpty(namespaceName) ? name : $"{namespaceName}.{name}";
     }
 
     public string GetTypeFromReference(MetadataReader reader, TypeReferenceHandle handle, byte rawTypeKind)
     {
         var reference = reader.GetTypeReference(handle);
-        return StripArity(reader.GetString(reference.Name));
+        var name = StripArity(reader.GetString(reference.Name));
+        if (reference.ResolutionScope.Kind == HandleKind.TypeReference)
+        {
+            return $"{GetTypeFromReference(reader, (TypeReferenceHandle)reference.ResolutionScope, rawTypeKind)}.{name}";
+        }
+
+        var namespaceName = reader.GetString(reference.Namespace);
+        return string.IsNullOrEmpty(namespaceName) ? name : $"{namespaceName}.{name}";
     }
 
     private static string StripArity(string name)

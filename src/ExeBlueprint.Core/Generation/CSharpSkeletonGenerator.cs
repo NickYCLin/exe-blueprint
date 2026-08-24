@@ -4,8 +4,8 @@ using ExeBlueprint.Models;
 namespace ExeBlueprint.Generation;
 
 // 把 CodeModel 轉成可閱讀的 C# 骨架。
-// 這是「轉語言」鏈路的第一步：還原型別與成員的形狀，方法體先放 NotImplementedException。
-// 產出的程式碼用來對照與接手改寫，不保證能直接編譯（泛型、巢狀型別、事件等尚未完整還原）。
+// 這是「轉語言」鏈路的第一步：還原型別與成員的形狀，能安全結構化的方法也帶回方法體。
+// 產出的程式碼用來對照與接手改寫，不保證能直接編譯（泛型限制、巢狀型別等尚未完整還原）。
 public static class CSharpSkeletonGenerator
 {
     private const int MaxIlLinesInBody = 40;
@@ -24,12 +24,15 @@ public static class CSharpSkeletonGenerator
             return files;
         }
 
-        foreach (var artifact in assemblies)
+        var projectDirectories = CreateProjectDescriptors(assemblies);
+        var projectsByAssembly = projectDirectories
+            .GroupBy(project => project.AssemblyName, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.First().ProjectDirectory, StringComparer.OrdinalIgnoreCase);
+
+        foreach (var project in projectDirectories)
         {
-            var assemblyName = string.IsNullOrWhiteSpace(artifact.AssemblyName)
-                ? Path.GetFileNameWithoutExtension(artifact.FileName)
-                : artifact.AssemblyName!;
-            var projectDirectory = Sanitize(assemblyName);
+            var artifact = project.Artifact;
+            var projectDirectory = project.ProjectDirectory;
 
             var emittableTypes = artifact.Code!.Types
                 .Where(type => !type.IsNested && !IsCompilerGenerated(type.Name) && type.Kind != "delegate")
@@ -48,9 +51,25 @@ public static class CSharpSkeletonGenerator
             files.Add(new GeneratedFile
             {
                 RelativePath = $"{projectDirectory}/{projectDirectory}.csproj",
-                Content = BuildProjectFile()
+                Content = BuildProjectFile(
+                    artifact.ManagedReferences
+                        .Where(reference => projectsByAssembly.ContainsKey(reference))
+                        .Select(reference => projectsByAssembly[reference])
+                        .Where(reference => reference != projectDirectory)
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .OrderBy(reference => reference, StringComparer.OrdinalIgnoreCase))
             });
         }
+
+        files.Add(new GeneratedFile
+        {
+            RelativePath = "Reconstructed.slnx",
+            Content = BuildSolution(
+                projectDirectories
+                    .Select(project => project.ProjectDirectory)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(directory => directory, StringComparer.OrdinalIgnoreCase))
+        });
 
         files.Add(new GeneratedFile
         {
@@ -102,11 +121,32 @@ public static class CSharpSkeletonGenerator
         }
 
         var wroteMember = false;
-        foreach (var field in type.Fields.Where(field => !IsCompilerGenerated(field.Name) && field.Name != "value__"))
+        var eventNames = type.Events.Select(@event => @event.Name).ToHashSet(StringComparer.Ordinal);
+        foreach (var field in type.Fields.Where(field =>
+                     !IsCompilerGenerated(field.Name) &&
+                     field.Name != "value__" &&
+                     !eventNames.Contains(field.Name)))
         {
-            var modifiers = field.IsConstant ? "const" : field.IsStatic ? "static" : null;
-            var prefix = modifiers is null ? "" : $"{modifiers} ";
-            builder.AppendLine($"{body}{field.Accessibility} {prefix}{Humanize(field.Type, type.GenericParameters, [])} {SafeName(field.Name)};");
+            var modifiers = new List<string> { field.Accessibility };
+            if (field.IsConstant)
+            {
+                modifiers.Add("const");
+            }
+            else
+            {
+                if (field.IsStatic)
+                {
+                    modifiers.Add("static");
+                }
+
+                if (field.IsReadOnly)
+                {
+                    modifiers.Add("readonly");
+                }
+            }
+
+            var initializer = field.IsConstant ? $" = {FormatConstant(field.ConstantValue)}" : "";
+            builder.AppendLine($"{body}{string.Join(" ", modifiers)} {Humanize(field.Type, type.GenericParameters, [])} {SafeName(field.Name)}{initializer};");
             wroteMember = true;
         }
 
@@ -120,16 +160,31 @@ public static class CSharpSkeletonGenerator
             var accessors = new StringBuilder("{ ");
             if (property.HasGetter)
             {
+                AppendAccessorAccessibility(accessors, property.GetterAccessibility, property.Accessibility, property.HasSetter);
                 accessors.Append("get; ");
             }
 
             if (property.HasSetter)
             {
+                AppendAccessorAccessibility(accessors, property.SetterAccessibility, property.Accessibility, property.HasGetter);
                 accessors.Append("set; ");
             }
 
             accessors.Append('}');
-            builder.AppendLine($"{body}public {Humanize(property.Type, type.GenericParameters, [])} {SafeName(property.Name)} {accessors}");
+            var modifiers = BuildMemberModifiers(type, property.Accessibility, property.IsStatic, property.IsAbstract, property.IsVirtual);
+            builder.AppendLine($"{body}{modifiers}{Humanize(property.Type, type.GenericParameters, [])} {SafeName(property.Name)} {accessors}");
+            wroteMember = true;
+        }
+
+        if (wroteMember && type.Events.Count > 0)
+        {
+            builder.AppendLine();
+        }
+
+        foreach (var @event in type.Events.Where(@event => !IsCompilerGenerated(@event.Name)))
+        {
+            var modifiers = BuildMemberModifiers(type, @event.Accessibility, @event.IsStatic, @event.IsAbstract, @event.IsVirtual);
+            builder.AppendLine($"{body}{modifiers}event {Humanize(@event.Type, type.GenericParameters, [])} {SafeName(@event.Name)};");
             wroteMember = true;
         }
 
@@ -260,6 +315,82 @@ public static class CSharpSkeletonGenerator
         return string.Join(" ", parts) + " ";
     }
 
+    private static string BuildMemberModifiers(
+        TypeModel type,
+        string accessibility,
+        bool isStatic,
+        bool isAbstract,
+        bool isVirtual)
+    {
+        if (type.Kind == "interface")
+        {
+            return "";
+        }
+
+        var parts = new List<string> { accessibility };
+        if (isStatic)
+        {
+            parts.Add("static");
+        }
+        else if (isAbstract)
+        {
+            parts.Add("abstract");
+        }
+        else if (isVirtual)
+        {
+            parts.Add("virtual");
+        }
+
+        return string.Join(" ", parts) + " ";
+    }
+
+    private static void AppendAccessorAccessibility(
+        StringBuilder builder,
+        string? accessorAccessibility,
+        string propertyAccessibility,
+        bool hasOtherAccessor)
+    {
+        if (hasOtherAccessor &&
+            accessorAccessibility is not null &&
+            accessorAccessibility != propertyAccessibility)
+        {
+            builder.Append(accessorAccessibility).Append(' ');
+        }
+    }
+
+    private static string FormatConstant(ConstantValueModel? constant)
+    {
+        if (constant?.Value is null)
+        {
+            return "null";
+        }
+
+        return constant.Type switch
+        {
+            "string" => $"\"{EscapeString(constant.Value)}\"",
+            "char" => $"'{EscapeChar(constant.Value[0])}'",
+            "float" => constant.Value + "F",
+            _ => constant.Value
+        };
+    }
+
+    private static string EscapeString(string value) => value
+        .Replace("\\", "\\\\", StringComparison.Ordinal)
+        .Replace("\"", "\\\"", StringComparison.Ordinal)
+        .Replace("\r", "\\r", StringComparison.Ordinal)
+        .Replace("\n", "\\n", StringComparison.Ordinal)
+        .Replace("\t", "\\t", StringComparison.Ordinal);
+
+    private static string EscapeChar(char value) => value switch
+    {
+        '\\' => "\\\\",
+        '\'' => "\\'",
+        '\r' => "\\r",
+        '\n' => "\\n",
+        '\t' => "\\t",
+        _ => value.ToString()
+    };
+
     private static string BuildTypeDeclaration(TypeModel type)
     {
         var parts = new List<string> { type.Accessibility };
@@ -358,17 +489,74 @@ public static class CSharpSkeletonGenerator
         return new string(characters.ToArray());
     }
 
-    private static string BuildProjectFile() =>
-        """
-        <Project Sdk="Microsoft.NET.Sdk">
-          <PropertyGroup>
-            <TargetFramework>net10.0</TargetFramework>
-            <Nullable>enable</Nullable>
-            <ImplicitUsings>enable</ImplicitUsings>
-          </PropertyGroup>
-        </Project>
+    private static string AssemblyName(FileArtifact artifact) =>
+        string.IsNullOrWhiteSpace(artifact.AssemblyName)
+            ? Path.GetFileNameWithoutExtension(artifact.FileName)
+            : artifact.AssemblyName!;
 
-        """;
+    private static IReadOnlyList<ProjectDescriptor> CreateProjectDescriptors(IEnumerable<FileArtifact> assemblies)
+    {
+        var descriptors = new List<ProjectDescriptor>();
+        var usedDirectories = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var artifact in assemblies)
+        {
+            var assemblyName = AssemblyName(artifact);
+            var baseDirectory = Sanitize(assemblyName);
+            if (string.IsNullOrWhiteSpace(baseDirectory))
+            {
+                baseDirectory = "ReconstructedProject";
+            }
+
+            var projectDirectory = baseDirectory;
+            var suffix = 2;
+            while (!usedDirectories.Add(projectDirectory))
+            {
+                projectDirectory = $"{baseDirectory}_{suffix++}";
+            }
+
+            descriptors.Add(new ProjectDescriptor(artifact, assemblyName, projectDirectory));
+        }
+
+        return descriptors;
+    }
+
+    private static string BuildProjectFile(IEnumerable<string> projectReferences)
+    {
+        var references = projectReferences.ToArray();
+        var builder = new StringBuilder();
+        builder.AppendLine("<Project Sdk=\"Microsoft.NET.Sdk\">");
+        builder.AppendLine("  <PropertyGroup>");
+        builder.AppendLine("    <TargetFramework>net10.0</TargetFramework>");
+        builder.AppendLine("    <Nullable>enable</Nullable>");
+        builder.AppendLine("    <ImplicitUsings>enable</ImplicitUsings>");
+        builder.AppendLine("  </PropertyGroup>");
+        if (references.Length > 0)
+        {
+            builder.AppendLine("  <ItemGroup>");
+            foreach (var reference in references)
+            {
+                builder.AppendLine($"    <ProjectReference Include=\"../{reference}/{reference}.csproj\" />");
+            }
+
+            builder.AppendLine("  </ItemGroup>");
+        }
+
+        builder.AppendLine("</Project>");
+        return builder.ToString();
+    }
+
+    private static string BuildSolution(IEnumerable<string> projectDirectories)
+    {
+        var builder = new StringBuilder();
+        builder.AppendLine("<Solution>");
+        foreach (var directory in projectDirectories)
+        {
+            builder.AppendLine($"  <Project Path=\"{directory}/{directory}.csproj\" />");
+        }
+
+        builder.AppendLine("</Solution>");
+        return builder.ToString();
+    }
 
     private static string BuildReadme(int assemblyCount) =>
         $"""
@@ -376,11 +564,20 @@ public static class CSharpSkeletonGenerator
 
         這份程式碼由 ExeBlueprint 從 {assemblyCount} 個 .NET 組件的中介模型自動產生。
 
-        目前只還原型別、欄位、屬性、方法簽章與繼承關係。方法體是 `NotImplementedException`，
+        `Reconstructed.slnx` 會收錄所有產生的專案；輸入套件內可對上的 assembly reference
+        會轉成專案間的 `ProjectReference`。
+
+        目前會還原型別、欄位、屬性、事件、方法簽章與繼承關係；可安全結構化的方法也會帶回方法體，
+        其餘方法會保留 IL 並使用 `NotImplementedException`，
         需要對照原程式的 IL 或反組譯結果補回實作。
 
         用途是拿來對照結構、接手改寫或轉成其他語言的起點，不保證能直接編譯：
-        泛型限制、巢狀型別、事件、運算子多載與 P/Invoke 等尚未完整處理。
+        泛型限制、巢狀型別、運算子多載與 P/Invoke 等尚未完整處理。
 
         """;
+
+    private sealed record ProjectDescriptor(
+        FileArtifact Artifact,
+        string AssemblyName,
+        string ProjectDirectory);
 }

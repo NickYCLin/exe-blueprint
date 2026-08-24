@@ -51,6 +51,8 @@ public sealed record TypeModel
 
     public IReadOnlyList<PropertyModel> Properties { get; init; } = [];
 
+    public IReadOnlyList<EventModel> Events { get; init; } = [];
+
     public IReadOnlyList<MethodModel> Methods { get; init; } = [];
 }
 
@@ -65,6 +67,8 @@ public sealed record FieldModel
     public bool IsStatic { get; init; }
 
     public bool IsConstant { get; init; }
+
+    public bool IsReadOnly { get; init; }
 
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     public ConstantValueModel? ConstantValue { get; init; }
@@ -83,9 +87,36 @@ public sealed record PropertyModel
 
     public required string Type { get; init; }
 
+    public required string Accessibility { get; init; }
+
+    public string? GetterAccessibility { get; init; }
+
+    public string? SetterAccessibility { get; init; }
+
     public bool HasGetter { get; init; }
 
     public bool HasSetter { get; init; }
+
+    public bool IsStatic { get; init; }
+
+    public bool IsAbstract { get; init; }
+
+    public bool IsVirtual { get; init; }
+}
+
+public sealed record EventModel
+{
+    public required string Name { get; init; }
+
+    public required string Type { get; init; }
+
+    public required string Accessibility { get; init; }
+
+    public bool IsStatic { get; init; }
+
+    public bool IsAbstract { get; init; }
+
+    public bool IsVirtual { get; init; }
 }
 
 public sealed record MethodModel

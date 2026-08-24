@@ -69,4 +69,114 @@ public sealed class CSharpSkeletonGeneratorTests
 
         Assert.Empty(CSharpSkeletonGenerator.Generate(document));
     }
+
+    [Fact]
+    public async Task PreservesMemberShapesInGeneratedCSharp()
+    {
+        var assemblyPath = typeof(MemberShapeFixture).Assembly.Location;
+        var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
+        var source = Assert.Single(
+            CSharpSkeletonGenerator.Generate(document),
+            file => file.RelativePath.EndsWith("ExeBlueprint.Core.Tests.cs", StringComparison.Ordinal)).Content;
+
+        Assert.Contains("public const string Label = \"blueprint\";", source);
+        Assert.Contains("protected internal static readonly int Counter;", source);
+        Assert.Contains("public virtual string Name { get; protected set; }", source);
+        Assert.Contains("public System.Text.StringBuilder Builder { get; }", source);
+        Assert.Contains("internal static event System.EventHandler Changed;", source);
+        Assert.Contains("protected virtual event System.EventHandler Updated;", source);
+        Assert.Equal(1, source.Split(" Changed;", StringSplitOptions.None).Length - 1);
+        Assert.Equal(1, source.Split(" Updated;", StringSplitOptions.None).Length - 1);
+        Assert.DoesNotContain("add_Changed", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("remove_Changed", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void GeneratesSolutionAndReferencesForRelatedAssemblies()
+    {
+        var document = new BlueprintDocument
+        {
+            Input = new InputDescriptor
+            {
+                Name = "package",
+                Kind = "directory",
+                SourcePath = "package",
+                FileCount = 2,
+                TotalBytes = 0
+            },
+            Summary = new BlueprintSummary(),
+            Files =
+            [
+                CreateManagedArtifact("Demo.Core", []),
+                CreateManagedArtifact("Demo.App", ["Demo.Core"])
+            ]
+        };
+
+        var files = CSharpSkeletonGenerator.Generate(document);
+        var solution = Assert.Single(files, file => file.RelativePath == "Reconstructed.slnx").Content;
+        var appProject = Assert.Single(files, file => file.RelativePath == "Demo.App/Demo.App.csproj").Content;
+
+        Assert.Contains("<Project Path=\"Demo.App/Demo.App.csproj\" />", solution);
+        Assert.Contains("<Project Path=\"Demo.Core/Demo.Core.csproj\" />", solution);
+        Assert.Contains("<ProjectReference Include=\"../Demo.Core/Demo.Core.csproj\" />", appProject);
+    }
+
+    [Fact]
+    public void KeepsSanitizedProjectDirectoryNamesUnique()
+    {
+        var document = new BlueprintDocument
+        {
+            Input = new InputDescriptor
+            {
+                Name = "package",
+                Kind = "directory",
+                SourcePath = "package",
+                FileCount = 2,
+                TotalBytes = 0
+            },
+            Summary = new BlueprintSummary(),
+            Files =
+            [
+                CreateManagedArtifact("Demo/App", []),
+                CreateManagedArtifact("Demo:App", [])
+            ]
+        };
+
+        var files = CSharpSkeletonGenerator.Generate(document);
+
+        Assert.Contains(files, file => file.RelativePath == "Demo_App/Demo_App.csproj");
+        Assert.Contains(files, file => file.RelativePath == "Demo_App_2/Demo_App_2.csproj");
+        Assert.Equal(files.Count, files.Select(file => file.RelativePath).Distinct(StringComparer.OrdinalIgnoreCase).Count());
+    }
+
+    private static FileArtifact CreateManagedArtifact(string assemblyName, IReadOnlyList<string> references) =>
+        new()
+        {
+            Id = assemblyName,
+            RelativePath = assemblyName + ".dll",
+            FileName = assemblyName + ".dll",
+            Size = 0,
+            Sha256 = "",
+            Category = "library",
+            Format = "pe",
+            IsManaged = true,
+            AssemblyName = assemblyName,
+            ManagedReferences = references,
+            Code = new CodeModel
+            {
+                Kind = "managed",
+                TypeCount = 1,
+                Types =
+                [
+                    new TypeModel
+                    {
+                        FullName = assemblyName + ".Placeholder",
+                        Namespace = assemblyName,
+                        Name = "Placeholder",
+                        Kind = "class",
+                        Accessibility = "public"
+                    }
+                ]
+            }
+        };
 }

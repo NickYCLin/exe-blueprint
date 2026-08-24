@@ -99,7 +99,7 @@ public sealed class ManagedSymbolReaderTests
         // 讀得到區域變數型別時，宣告應用實際型別而非 var。
         Assert.Contains(
             methods,
-            method => method.Body.Any(line => line.TrimStart().StartsWith("StringBuilder v", StringComparison.Ordinal)));
+            method => method.Body.Any(line => line.TrimStart().StartsWith("System.Text.StringBuilder v", StringComparison.Ordinal)));
     }
 
     [Fact]
@@ -144,6 +144,45 @@ public sealed class ManagedSymbolReaderTests
 
         var sparse = Assert.Single(enumType.Fields, field => field.Name == nameof(LongBackedTestEnum.Sparse));
         Assert.Equal("42", sparse.ConstantValue?.Value);
+    }
+
+    [Fact]
+    public async Task ExtractsPropertyEventAndFieldModifiers()
+    {
+        var assemblyPath = typeof(MemberShapeFixture).Assembly.Location;
+        var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
+        var fixture = Assert.Single(
+            document.Files[0].Code!.Types,
+            type => type.FullName == "ExeBlueprint.Core.Tests.MemberShapeFixture");
+
+        var label = Assert.Single(fixture.Fields, field => field.Name == nameof(MemberShapeFixture.Label));
+        Assert.True(label.IsConstant);
+        Assert.Equal("string", label.ConstantValue?.Type);
+        Assert.Equal("blueprint", label.ConstantValue?.Value);
+
+        var counter = Assert.Single(fixture.Fields, field => field.Name == "Counter");
+        Assert.Equal("protected internal", counter.Accessibility);
+        Assert.True(counter.IsStatic);
+        Assert.True(counter.IsReadOnly);
+
+        var name = Assert.Single(fixture.Properties, property => property.Name == nameof(MemberShapeFixture.Name));
+        Assert.Equal("public", name.Accessibility);
+        Assert.Equal("public", name.GetterAccessibility);
+        Assert.Equal("protected", name.SetterAccessibility);
+        Assert.True(name.IsVirtual);
+        Assert.False(name.IsStatic);
+
+        var builder = Assert.Single(fixture.Properties, property => property.Name == nameof(MemberShapeFixture.Builder));
+        Assert.Equal("System.Text.StringBuilder", builder.Type);
+
+        var changed = Assert.Single(fixture.Events, @event => @event.Name == "Changed");
+        Assert.Equal("System.EventHandler", changed.Type);
+        Assert.Equal("internal", changed.Accessibility);
+        Assert.True(changed.IsStatic);
+
+        var updated = Assert.Single(fixture.Events, @event => @event.Name == "Updated");
+        Assert.Equal("protected", updated.Accessibility);
+        Assert.True(updated.IsVirtual);
     }
 
     [Fact]
@@ -231,4 +270,28 @@ internal enum LongBackedTestEnum : long
     Negative = -4,
     Zero = 0,
     Sparse = 42
+}
+
+internal class MemberShapeFixture
+{
+    public const string Label = "blueprint";
+
+    protected internal static readonly int Counter = 1;
+
+    public virtual string Name { get; protected set; } = string.Empty;
+
+    public System.Text.StringBuilder Builder { get; } = new();
+
+    internal static event EventHandler? Changed;
+
+    protected virtual event EventHandler? Updated;
+
+    private event EventHandler? Hidden;
+
+    public void Touch()
+    {
+        Changed?.Invoke(null, EventArgs.Empty);
+        Updated?.Invoke(this, EventArgs.Empty);
+        Hidden?.Invoke(this, EventArgs.Empty);
+    }
 }
