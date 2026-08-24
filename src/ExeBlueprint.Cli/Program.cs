@@ -1,6 +1,7 @@
 using System.Reflection;
 using System.Text;
 using ExeBlueprint.Analysis;
+using ExeBlueprint.Generation;
 using ExeBlueprint.Reporting;
 
 Console.OutputEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
@@ -51,10 +52,26 @@ static async Task<int> RunAsync(string[] args, CancellationToken cancellationTok
             await MarkdownReportWriter.WriteAsync(document, reportPath, cancellationToken);
         }
 
+        if (parsed.EmitCSharp)
+        {
+            var generated = CSharpSkeletonGenerator.Generate(document);
+            if (generated.Count == 0)
+            {
+                Console.WriteLine("沒有可轉出的 .NET 型別，略過 C# 骨架。");
+            }
+            else
+            {
+                var csharpDirectory = Path.Combine(outputDirectory, "reconstructed-csharp");
+                await GeneratedProjectWriter.WriteAsync(generated, csharpDirectory, cancellationToken);
+                Console.WriteLine($"C# 骨架：{generated.Count:N0} 個檔案 → {Path.GetFullPath(csharpDirectory)}");
+            }
+        }
+
         Console.WriteLine($"完成：{Path.GetFullPath(outputDirectory)}");
         Console.WriteLine($"檔案：{document.Input.FileCount:N0}");
         Console.WriteLine($"PE 執行檔：{document.Summary.ExecutableCount:N0}");
         Console.WriteLine($"程式庫：{document.Summary.LibraryCount:N0}");
+        Console.WriteLine($"型別／方法：{document.Summary.TypeCount:N0}／{document.Summary.MethodCount:N0}");
         Console.WriteLine($"辨識結果：{FormatTechnologies(document.Technologies.Select(item => item.Name))}");
         if (document.Warnings.Count > 0)
         {
@@ -87,6 +104,7 @@ static ParsedArguments ParseArguments(string[] args)
     string? outputDirectory = null;
     var force = false;
     var jsonOnly = false;
+    var emitCSharp = false;
 
     while (index < args.Length)
     {
@@ -108,12 +126,15 @@ static ParsedArguments ParseArguments(string[] args)
             case "--json-only":
                 jsonOnly = true;
                 break;
+            case "--emit-csharp":
+                emitCSharp = true;
+                break;
             default:
                 throw new ArgumentException($"不支援的選項：{option}");
         }
     }
 
-    return new ParsedArguments(inputPath, outputDirectory, force, jsonOnly);
+    return new ParsedArguments(inputPath, outputDirectory, force, jsonOnly, emitCSharp);
 }
 
 static string CreateDefaultOutputDirectory(string inputPath)
@@ -150,6 +171,7 @@ static void PrintHelp()
     Console.WriteLine("選項：");
     Console.WriteLine("  -o, --output <目錄>  指定輸出目錄");
     Console.WriteLine("  --json-only          只輸出 blueprint.json");
+    Console.WriteLine("  --emit-csharp        另外產生 .NET 型別的 C# 骨架");
     Console.WriteLine("  --force              覆寫既有 blueprint.json 與 REPORT.md");
     Console.WriteLine("  -v, --version        顯示版本");
     Console.WriteLine("  -h, --help           顯示說明");
@@ -161,4 +183,5 @@ internal sealed record ParsedArguments(
     string InputPath,
     string? OutputDirectory,
     bool Force,
-    bool JsonOnly);
+    bool JsonOnly,
+    bool EmitCSharp);

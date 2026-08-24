@@ -80,17 +80,7 @@ internal static class ManagedSymbolReader
                 var methodName = metadata.GetString(method.Name);
                 var hasBody = method.RelativeVirtualAddress != 0;
                 var declaringName = BuildTypeFullName(namespaceName, name);
-                methods.Add(new MethodModel
-                {
-                    Name = methodName,
-                    Signature = BuildMethodSignature(metadata, method, methodName),
-                    Accessibility = GetMethodAccessibility(method.Attributes),
-                    IsStatic = method.Attributes.HasFlag(MethodAttributes.Static),
-                    IsAbstract = method.Attributes.HasFlag(MethodAttributes.Abstract),
-                    IsVirtual = method.Attributes.HasFlag(MethodAttributes.Virtual),
-                    IsEntryPoint = methodHandle == entryPointMethod.Handle,
-                    HasBody = hasBody
-                });
+                methods.Add(BuildMethod(metadata, methodHandle, method, methodName, hasBody, entryPointMethod.Handle));
                 methodCount++;
 
                 if (hasBody && edges.Count < MaxCallEdges)
@@ -103,14 +93,26 @@ internal static class ManagedSymbolReader
                 }
             }
 
+            var attributes = definition.Attributes;
+            var kind = GetTypeKind(attributes, baseTypeName);
+            var isAbstract = attributes.HasFlag(TypeAttributes.Abstract);
+            var isSealed = attributes.HasFlag(TypeAttributes.Sealed);
             types.Add(new TypeModel
             {
                 FullName = BuildTypeFullName(namespaceName, name),
                 Namespace = namespaceName,
                 Name = name,
-                Kind = GetTypeKind(definition.Attributes, baseTypeName),
-                Accessibility = GetTypeAccessibility(definition.Attributes),
+                Kind = kind,
+                Accessibility = GetTypeAccessibility(attributes),
+                IsStatic = kind == "class" && isAbstract && isSealed,
+                IsAbstract = isAbstract,
+                IsSealed = isSealed,
+                IsNested = !definition.GetDeclaringType().IsNil,
                 BaseType = baseTypeName,
+                Interfaces = ReadInterfaces(metadata, definition),
+                GenericParameters = ReadTypeGenericParameters(metadata, definition),
+                Fields = ReadFields(metadata, definition),
+                Properties = ReadProperties(metadata, definition),
                 Methods = methods
             });
         }
@@ -335,19 +337,180 @@ internal static class ManagedSymbolReader
     private static string BuildTypeFullName(string namespaceName, string name) =>
         string.IsNullOrEmpty(namespaceName) ? name : $"{namespaceName}.{name}";
 
-    private static string BuildMethodSignature(MetadataReader metadata, MethodDefinition method, string methodName)
+    private static MethodModel BuildMethod(
+        MetadataReader metadata,
+        MethodDefinitionHandle methodHandle,
+        MethodDefinition method,
+        string methodName,
+        bool hasBody,
+        MethodDefinitionHandle entryPointHandle)
     {
+        var returnType = "void";
+        var parameters = new List<ParameterModel>();
+        var signatureText = $"{methodName}(...)";
+
         try
         {
             var signature = method.DecodeSignature(SignatureTypeNameProvider.Instance, null);
-            var parameters = string.Join(", ", signature.ParameterTypes);
-            return $"{signature.ReturnType} {methodName}({parameters})";
+            returnType = signature.ReturnType;
+            var parameterNames = ReadParameterNames(metadata, method);
+            for (var index = 0; index < signature.ParameterTypes.Length; index++)
+            {
+                var name = parameterNames.TryGetValue(index + 1, out var value) && !string.IsNullOrEmpty(value)
+                    ? value
+                    : $"arg{index}";
+                parameters.Add(new ParameterModel { Name = name, Type = signature.ParameterTypes[index] });
+            }
+
+            signatureText = $"{returnType} {methodName}({string.Join(", ", parameters.Select(p => $"{p.Type} {p.Name}"))})";
         }
         catch (BadImageFormatException)
         {
-            return $"{methodName}(...)";
         }
+
+        return new MethodModel
+        {
+            Name = methodName,
+            Signature = signatureText,
+            ReturnType = returnType,
+            Accessibility = GetMethodAccessibility(method.Attributes),
+            IsStatic = method.Attributes.HasFlag(MethodAttributes.Static),
+            IsAbstract = method.Attributes.HasFlag(MethodAttributes.Abstract),
+            IsVirtual = method.Attributes.HasFlag(MethodAttributes.Virtual),
+            IsConstructor = methodName is ".ctor" or ".cctor",
+            IsEntryPoint = methodHandle == entryPointHandle,
+            HasBody = hasBody,
+            GenericParameters = ReadMethodGenericParameters(metadata, method),
+            Parameters = parameters
+        };
     }
+
+    private static Dictionary<int, string> ReadParameterNames(MetadataReader metadata, MethodDefinition method)
+    {
+        var names = new Dictionary<int, string>();
+        foreach (var handle in method.GetParameters())
+        {
+            var parameter = metadata.GetParameter(handle);
+            if (parameter.SequenceNumber > 0)
+            {
+                names[parameter.SequenceNumber] = metadata.GetString(parameter.Name);
+            }
+        }
+
+        return names;
+    }
+
+    private static IReadOnlyList<string> ReadMethodGenericParameters(MetadataReader metadata, MethodDefinition method)
+    {
+        var handles = method.GetGenericParameters();
+        if (handles.Count == 0)
+        {
+            return [];
+        }
+
+        return handles
+            .Select(handle => metadata.GetString(metadata.GetGenericParameter(handle).Name))
+            .ToArray();
+    }
+
+    private static IReadOnlyList<string> ReadTypeGenericParameters(MetadataReader metadata, TypeDefinition definition)
+    {
+        var handles = definition.GetGenericParameters();
+        if (handles.Count == 0)
+        {
+            return [];
+        }
+
+        return handles
+            .Select(handle => metadata.GetString(metadata.GetGenericParameter(handle).Name))
+            .ToArray();
+    }
+
+    private static IReadOnlyList<string> ReadInterfaces(MetadataReader metadata, TypeDefinition definition)
+    {
+        var interfaces = new List<string>();
+        foreach (var handle in definition.GetInterfaceImplementations())
+        {
+            var implementation = metadata.GetInterfaceImplementation(handle);
+            var name = GetTypeName(metadata, implementation.Interface);
+            if (!string.IsNullOrEmpty(name))
+            {
+                interfaces.Add(name);
+            }
+        }
+
+        return interfaces;
+    }
+
+    private static IReadOnlyList<FieldModel> ReadFields(MetadataReader metadata, TypeDefinition definition)
+    {
+        var fields = new List<FieldModel>();
+        foreach (var handle in definition.GetFields())
+        {
+            var field = metadata.GetFieldDefinition(handle);
+            string fieldType;
+            try
+            {
+                fieldType = field.DecodeSignature(SignatureTypeNameProvider.Instance, null);
+            }
+            catch (BadImageFormatException)
+            {
+                fieldType = "object";
+            }
+
+            fields.Add(new FieldModel
+            {
+                Name = metadata.GetString(field.Name),
+                Type = fieldType,
+                Accessibility = GetFieldAccessibility(field.Attributes),
+                IsStatic = field.Attributes.HasFlag(FieldAttributes.Static),
+                IsConstant = field.Attributes.HasFlag(FieldAttributes.Literal)
+            });
+        }
+
+        return fields;
+    }
+
+    private static IReadOnlyList<PropertyModel> ReadProperties(MetadataReader metadata, TypeDefinition definition)
+    {
+        var properties = new List<PropertyModel>();
+        foreach (var handle in definition.GetProperties())
+        {
+            var property = metadata.GetPropertyDefinition(handle);
+            string propertyType;
+            try
+            {
+                propertyType = property.DecodeSignature(SignatureTypeNameProvider.Instance, null).ReturnType;
+            }
+            catch (BadImageFormatException)
+            {
+                propertyType = "object";
+            }
+
+            var accessors = property.GetAccessors();
+            properties.Add(new PropertyModel
+            {
+                Name = metadata.GetString(property.Name),
+                Type = propertyType,
+                HasGetter = !accessors.Getter.IsNil,
+                HasSetter = !accessors.Setter.IsNil
+            });
+        }
+
+        return properties;
+    }
+
+    private static string GetFieldAccessibility(FieldAttributes attributes) =>
+        (attributes & FieldAttributes.FieldAccessMask) switch
+        {
+            FieldAttributes.Public => "public",
+            FieldAttributes.Family => "protected",
+            FieldAttributes.FamORAssem => "protected internal",
+            FieldAttributes.FamANDAssem => "private protected",
+            FieldAttributes.Assembly => "internal",
+            FieldAttributes.Private => "private",
+            _ => "private"
+        };
 
     private static string GetTypeKind(TypeAttributes attributes, string? baseTypeName)
     {
@@ -471,13 +634,19 @@ internal sealed class SignatureTypeNameProvider : ISignatureTypeProvider<string,
     public string GetTypeFromDefinition(MetadataReader reader, TypeDefinitionHandle handle, byte rawTypeKind)
     {
         var definition = reader.GetTypeDefinition(handle);
-        return reader.GetString(definition.Name);
+        return StripArity(reader.GetString(definition.Name));
     }
 
     public string GetTypeFromReference(MetadataReader reader, TypeReferenceHandle handle, byte rawTypeKind)
     {
         var reference = reader.GetTypeReference(handle);
-        return reader.GetString(reference.Name);
+        return StripArity(reader.GetString(reference.Name));
+    }
+
+    private static string StripArity(string name)
+    {
+        var backtick = name.IndexOf('`', StringComparison.Ordinal);
+        return backtick < 0 ? name : name[..backtick];
     }
 
     public string GetTypeFromSpecification(

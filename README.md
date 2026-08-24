@@ -11,8 +11,9 @@ ExeBlueprint 用來整理 Windows 應用程式套件。它會掃描 EXE、DLL、
 - 讀取 PE 架構、子系統、section 與簽章資料
 - 分辨 .NET assembly 與原生 PE
 - 讀取 PE imports 與 .NET assembly references
-- 讀出 .NET assembly 的命名空間、型別、方法與方法簽章
+- 讀出 .NET assembly 的命名空間、型別、欄位、屬性、方法簽章與繼承關係
 - 掃描 IL 建立方法層級呼叫圖，看得出程式流程怎麼串
+- 把 .NET 型別轉出一份 C# 骨架，當接手改寫或轉語言的起點
 - 找出套件內可以對上的 EXE／DLL 相依關係
 - 依檔案內容辨識常見語言、runtime、框架與安裝器
 - 輸出 JSON 與繁體中文 Markdown 報告
@@ -53,6 +54,15 @@ exe-blueprint-output/<輸入名稱>-<時間>/
 dotnet run --project .\src\ExeBlueprint.Cli -- analyze .\App.exe --json-only
 ```
 
+要順便把 .NET 型別轉出一份 C# 骨架，加上 `--emit-csharp`：
+
+```powershell
+dotnet run --project .\src\ExeBlueprint.Cli -- analyze .\App.exe --emit-csharp
+```
+
+骨架會放在輸出目錄的 `reconstructed-csharp/`，方法體是 `NotImplementedException`，
+用來對照結構或當轉語言的起點，不保證能直接編譯。
+
 輸出目錄已有報告時，程式預設不會覆寫。確定要覆寫可加上 `--force`。
 
 ## 編譯成 Windows EXE
@@ -85,10 +95,10 @@ src/ExeBlueprint.Cli/bin/Release/net10.0/win-x64/publish/exe-blueprint.exe
 
 - 解開 Inno Setup、NSIS、MSI、PyInstaller 與 Electron 套件
 - 串接 ILSpy、Ghidra 等分析後端（讓原生 PE 也能還原函式與流程）
-- 擴充中介模型，補上欄位、屬性、UI、資源和設定（函式、型別、呼叫圖已完成 .NET 部分）
-- 重建可編譯的多專案 solution
+- 擴充中介模型，補上 UI、資源和設定（函式、型別、欄位、屬性、呼叫圖已完成 .NET 部分）
+- 讓產出的 C# 骨架能還原方法體、直接編譯成多專案 solution
 - 優先支援易語言、VB6、Delphi 到 C# 的轉換
-- 加入 C#、C++、Rust、Go 和易語言程式碼產生器
+- 加入 C++、Rust、Go 和易語言程式碼產生器（C# 骨架已有第一版）
 - 比較原程式與重建版本的輸入、輸出和副作用
 - 製作可拖放檔案與資料夾的 Windows 桌面介面
 
