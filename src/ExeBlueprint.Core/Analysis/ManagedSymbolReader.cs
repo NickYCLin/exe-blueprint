@@ -1205,30 +1205,128 @@ internal static class ManagedSymbolReader
         {
             prologue.ExceptionLocalIndex
         };
-        var predicate = TryProcessStraightLine(
+        var condition = TryBuildCatchFilterCondition(
             filterContext,
             instructions,
             prologue.PredicateStartIndex,
             prologue.PredicateEndIndex,
             filterLocals);
-        if (predicate is null || predicate.Value.Statements.Count != 0 || predicate.Value.Stack.Count != 1)
+        if (condition is null)
         {
             return null;
         }
 
-        var condition = predicate.Value.Stack.Pop();
-        condition = condition switch
-        {
-            "0" => "false",
-            "1" => "true",
-            _ => condition
-        };
         return new CatchFilterShape(
             prologue.CatchType,
             prologue.ExceptionLocalIndex,
             variableName,
             condition);
     }
+
+    private static string? TryBuildCatchFilterCondition(
+        ReconContext context,
+        Instr[] instructions,
+        int start,
+        int end,
+        HashSet<int> declaredLocals)
+    {
+        var straightLine = TryProcessStraightLine(
+            context,
+            instructions,
+            start,
+            end,
+            new HashSet<int>(declaredLocals));
+        if (straightLine is not null &&
+            straightLine.Value.Statements.Count == 0 &&
+            straightLine.Value.Stack.Count == 1)
+        {
+            return NormalizeFilterCondition(straightLine.Value.Stack.Pop());
+        }
+
+        var branchIndices = Enumerable.Range(start, end - start)
+            .Where(index => instructions[index].IsBranch)
+            .ToArray();
+        if (branchIndices.Length < 2)
+        {
+            return null;
+        }
+
+        var conditionBranchIndices = branchIndices[..^1];
+        var joinBranchIndex = branchIndices[^1];
+        var joinBranch = instructions[joinBranchIndex];
+        var constantIndex = joinBranchIndex + 1;
+        if (joinBranch.Name is not ("br" or "br.s") ||
+            constantIndex + 1 != end ||
+            joinBranch.Target != instructions[end].Offset ||
+            conditionBranchIndices.Any(index =>
+                instructions[index].Name is "br" or "br.s" ||
+                instructions[index].Target != instructions[constantIndex].Offset))
+        {
+            return null;
+        }
+
+        var constant = instructions[constantIndex].Name switch
+        {
+            "ldc.i4.0" => false,
+            "ldc.i4.1" => true,
+            _ => (bool?)null
+        };
+        if (constant is null)
+        {
+            return null;
+        }
+
+        var conditions = new List<string>();
+        var segmentStart = start;
+        foreach (var conditionBranchIndex in conditionBranchIndices)
+        {
+            var segment = TryProcessStraightLine(
+                context,
+                instructions,
+                segmentStart,
+                conditionBranchIndex,
+                new HashSet<int>(declaredLocals));
+            if (segment is null || segment.Value.Statements.Count != 0)
+            {
+                return null;
+            }
+
+            var conditionBranch = instructions[conditionBranchIndex];
+            string segmentCondition;
+            var conditionBuilt = constant.Value
+                ? TryBuildTakenCondition(conditionBranch.Name, segment.Value.Stack, out segmentCondition)
+                : TryBuildCondition(conditionBranch.Name, segment.Value.Stack, out segmentCondition);
+            if (!conditionBuilt || segment.Value.Stack.Count != 0)
+            {
+                return null;
+            }
+
+            conditions.Add(segmentCondition);
+            segmentStart = conditionBranchIndex + 1;
+        }
+
+        var right = TryProcessStraightLine(
+            context,
+            instructions,
+            segmentStart,
+            joinBranchIndex,
+            new HashSet<int>(declaredLocals));
+        if (right is null || right.Value.Statements.Count != 0 || right.Value.Stack.Count != 1)
+        {
+            return null;
+        }
+
+        conditions.Add(NormalizeFilterCondition(right.Value.Stack.Pop()));
+        var op = constant.Value ? "||" : "&&";
+        return $"({string.Join($" {op} ", conditions)})";
+    }
+
+    private static string NormalizeFilterCondition(string condition) => condition switch
+    {
+        "0" => "false",
+        "1" => "true",
+        _ => condition
+    };
 
     private static CatchFilterPrologue? TryReadCatchFilterPrologue(
         ReconContext context,
