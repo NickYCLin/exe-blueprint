@@ -171,7 +171,14 @@ public static class CSharpSkeletonGenerator
             }
 
             accessors.Append('}');
-            var modifiers = BuildMemberModifiers(type, property.Accessibility, property.IsStatic, property.IsAbstract, property.IsVirtual);
+            var modifiers = BuildMemberModifiers(
+                type,
+                property.Accessibility,
+                property.IsStatic,
+                property.IsAbstract,
+                property.IsVirtual,
+                property.IsFinal,
+                property.IsNewSlot);
             builder.AppendLine($"{body}{modifiers}{Humanize(property.Type, type.GenericParameters, [])} {SafeName(property.Name)} {accessors}");
             wroteMember = true;
         }
@@ -183,7 +190,14 @@ public static class CSharpSkeletonGenerator
 
         foreach (var @event in type.Events.Where(@event => !IsCompilerGenerated(@event.Name)))
         {
-            var modifiers = BuildMemberModifiers(type, @event.Accessibility, @event.IsStatic, @event.IsAbstract, @event.IsVirtual);
+            var modifiers = BuildMemberModifiers(
+                type,
+                @event.Accessibility,
+                @event.IsStatic,
+                @event.IsAbstract,
+                @event.IsVirtual,
+                @event.IsFinal,
+                @event.IsNewSlot);
             builder.AppendLine($"{body}{modifiers}event {Humanize(@event.Type, type.GenericParameters, [])} {SafeName(@event.Name)};");
             wroteMember = true;
         }
@@ -303,13 +317,14 @@ public static class CSharpSkeletonGenerator
         {
             parts.Add("static");
         }
-        else if (method.IsAbstract)
+        else
         {
-            parts.Add("abstract");
-        }
-        else if (method.IsVirtual)
-        {
-            parts.Add("virtual");
+            AppendDispatchModifiers(
+                parts,
+                method.IsAbstract,
+                method.IsVirtual,
+                method.IsFinal,
+                method.IsNewSlot);
         }
 
         return string.Join(" ", parts) + " ";
@@ -320,7 +335,9 @@ public static class CSharpSkeletonGenerator
         string accessibility,
         bool isStatic,
         bool isAbstract,
-        bool isVirtual)
+        bool isVirtual,
+        bool isFinal,
+        bool isNewSlot)
     {
         if (type.Kind == "interface")
         {
@@ -332,16 +349,50 @@ public static class CSharpSkeletonGenerator
         {
             parts.Add("static");
         }
-        else if (isAbstract)
+        else
         {
-            parts.Add("abstract");
-        }
-        else if (isVirtual)
-        {
-            parts.Add("virtual");
+            AppendDispatchModifiers(parts, isAbstract, isVirtual, isFinal, isNewSlot);
         }
 
         return string.Join(" ", parts) + " ";
+    }
+
+    private static void AppendDispatchModifiers(
+        List<string> parts,
+        bool isAbstract,
+        bool isVirtual,
+        bool isFinal,
+        bool isNewSlot)
+    {
+        if (!isVirtual)
+        {
+            return;
+        }
+
+        if (!isNewSlot)
+        {
+            if (isFinal)
+            {
+                parts.Add("sealed");
+            }
+
+            if (isAbstract)
+            {
+                parts.Add("abstract");
+            }
+
+            parts.Add("override");
+            return;
+        }
+
+        if (isAbstract)
+        {
+            parts.Add("abstract");
+        }
+        else if (!isFinal)
+        {
+            parts.Add("virtual");
+        }
     }
 
     private static void AppendAccessorAccessibility(

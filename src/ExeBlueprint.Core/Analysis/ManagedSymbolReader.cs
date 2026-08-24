@@ -2910,6 +2910,8 @@ internal static class ManagedSymbolReader
             IsStatic = method.Attributes.HasFlag(MethodAttributes.Static),
             IsAbstract = method.Attributes.HasFlag(MethodAttributes.Abstract),
             IsVirtual = method.Attributes.HasFlag(MethodAttributes.Virtual),
+            IsFinal = method.Attributes.HasFlag(MethodAttributes.Final),
+            IsNewSlot = method.Attributes.HasFlag(MethodAttributes.NewSlot),
             IsConstructor = methodName is ".ctor" or ".cctor",
             IsEntryPoint = methodHandle == entryPointHandle,
             HasBody = hasBody,
@@ -3121,7 +3123,9 @@ internal static class ManagedSymbolReader
                 HasSetter = !accessors.Setter.IsNil,
                 IsStatic = accessorShapes.Any(accessor => accessor.IsStatic),
                 IsAbstract = accessorShapes.Any(accessor => accessor.IsAbstract),
-                IsVirtual = accessorShapes.Any(accessor => accessor.IsVirtual)
+                IsVirtual = accessorShapes.Any(accessor => accessor.IsVirtual),
+                IsFinal = AreAllVirtualAccessors(accessorShapes, accessor => accessor.IsFinal),
+                IsNewSlot = AreAllVirtualAccessors(accessorShapes, accessor => accessor.IsNewSlot)
             });
         }
 
@@ -3149,7 +3153,9 @@ internal static class ManagedSymbolReader
                 Accessibility = MostVisibleAccessibility(accessorShapes),
                 IsStatic = accessorShapes.Any(accessor => accessor.IsStatic),
                 IsAbstract = accessorShapes.Any(accessor => accessor.IsAbstract),
-                IsVirtual = accessorShapes.Any(accessor => accessor.IsVirtual)
+                IsVirtual = accessorShapes.Any(accessor => accessor.IsVirtual),
+                IsFinal = AreAllVirtualAccessors(accessorShapes, accessor => accessor.IsFinal),
+                IsNewSlot = AreAllVirtualAccessors(accessorShapes, accessor => accessor.IsNewSlot)
             });
         }
 
@@ -3160,7 +3166,9 @@ internal static class ManagedSymbolReader
         string Accessibility,
         bool IsStatic,
         bool IsAbstract,
-        bool IsVirtual);
+        bool IsVirtual,
+        bool IsFinal,
+        bool IsNewSlot);
 
     private static AccessorShape? ReadAccessor(MetadataReader metadata, MethodDefinitionHandle handle)
     {
@@ -3174,7 +3182,17 @@ internal static class ManagedSymbolReader
             GetMethodAccessibility(method.Attributes),
             method.Attributes.HasFlag(MethodAttributes.Static),
             method.Attributes.HasFlag(MethodAttributes.Abstract),
-            method.Attributes.HasFlag(MethodAttributes.Virtual));
+            method.Attributes.HasFlag(MethodAttributes.Virtual),
+            method.Attributes.HasFlag(MethodAttributes.Final),
+            method.Attributes.HasFlag(MethodAttributes.NewSlot));
+    }
+
+    private static bool AreAllVirtualAccessors(
+        IReadOnlyList<AccessorShape> accessors,
+        Func<AccessorShape, bool> predicate)
+    {
+        var virtualAccessors = accessors.Where(accessor => accessor.IsVirtual).ToArray();
+        return virtualAccessors.Length > 0 && virtualAccessors.All(predicate);
     }
 
     private static string MostVisibleAccessibility(IReadOnlyList<AccessorShape> accessors) =>

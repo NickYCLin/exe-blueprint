@@ -102,6 +102,10 @@ public sealed record PropertyModel
     public bool IsAbstract { get; init; }
 
     public bool IsVirtual { get; init; }
+
+    public bool IsFinal { get; init; }
+
+    public bool IsNewSlot { get; init; }
 }
 
 public sealed record EventModel
@@ -117,6 +121,10 @@ public sealed record EventModel
     public bool IsAbstract { get; init; }
 
     public bool IsVirtual { get; init; }
+
+    public bool IsFinal { get; init; }
+
+    public bool IsNewSlot { get; init; }
 }
 
 public sealed record MethodModel
@@ -134,6 +142,10 @@ public sealed record MethodModel
     public bool IsAbstract { get; init; }
 
     public bool IsVirtual { get; init; }
+
+    public bool IsFinal { get; init; }
+
+    public bool IsNewSlot { get; init; }
 
     public bool IsConstructor { get; init; }
 

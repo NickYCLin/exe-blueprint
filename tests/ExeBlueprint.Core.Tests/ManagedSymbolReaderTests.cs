@@ -171,6 +171,8 @@ public sealed class ManagedSymbolReaderTests
         Assert.Equal("public", name.GetterAccessibility);
         Assert.Equal("protected", name.SetterAccessibility);
         Assert.True(name.IsVirtual);
+        Assert.True(name.IsNewSlot);
+        Assert.False(name.IsFinal);
         Assert.False(name.IsStatic);
 
         var builder = Assert.Single(fixture.Properties, property => property.Name == nameof(MemberShapeFixture.Builder));
@@ -184,6 +186,43 @@ public sealed class ManagedSymbolReaderTests
         var updated = Assert.Single(fixture.Events, @event => @event.Name == "Updated");
         Assert.Equal("protected", updated.Accessibility);
         Assert.True(updated.IsVirtual);
+        Assert.True(updated.IsNewSlot);
+        Assert.False(updated.IsFinal);
+    }
+
+    [Fact]
+    public async Task ExtractsOverrideAndFinalDispatchFlags()
+    {
+        var assemblyPath = typeof(DispatchDerivedFixture).Assembly.Location;
+        var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
+        var fixture = Assert.Single(
+            document.Files[0].Code!.Types,
+            type => type.FullName == "ExeBlueprint.Core.Tests.DispatchDerivedFixture");
+
+        var describe = Assert.Single(fixture.Methods, method => method.Name == nameof(DispatchDerivedFixture.Describe));
+        Assert.True(describe.IsVirtual);
+        Assert.False(describe.IsNewSlot);
+        Assert.False(describe.IsFinal);
+
+        var transform = Assert.Single(fixture.Methods, method => method.Name == nameof(DispatchDerivedFixture.Transform));
+        Assert.True(transform.IsVirtual);
+        Assert.False(transform.IsNewSlot);
+        Assert.True(transform.IsFinal);
+
+        var dispose = Assert.Single(fixture.Methods, method => method.Name == nameof(DispatchDerivedFixture.Dispose));
+        Assert.True(dispose.IsVirtual);
+        Assert.True(dispose.IsNewSlot);
+        Assert.True(dispose.IsFinal);
+
+        var value = Assert.Single(fixture.Properties, property => property.Name == nameof(DispatchDerivedFixture.Value));
+        Assert.True(value.IsVirtual);
+        Assert.False(value.IsNewSlot);
+        Assert.False(value.IsFinal);
+
+        var dispatched = Assert.Single(fixture.Events, @event => @event.Name == nameof(DispatchDerivedFixture.Dispatched));
+        Assert.True(dispatched.IsVirtual);
+        Assert.False(dispatched.IsNewSlot);
+        Assert.True(dispatched.IsFinal);
     }
 
     [Fact]
@@ -544,6 +583,35 @@ internal class MemberShapeFixture
         Changed?.Invoke(null, EventArgs.Empty);
         Updated?.Invoke(this, EventArgs.Empty);
         Hidden?.Invoke(this, EventArgs.Empty);
+    }
+}
+
+internal abstract class DispatchBaseFixture
+{
+    public abstract string Describe();
+
+    public virtual int Transform(int value) => value + 1;
+
+    public virtual int Value => 1;
+
+    public virtual event EventHandler? Dispatched;
+
+    protected void RaiseDispatched() => Dispatched?.Invoke(this, EventArgs.Empty);
+}
+
+internal sealed class DispatchDerivedFixture : DispatchBaseFixture, IDisposable
+{
+    public override string Describe() => "derived";
+
+    public sealed override int Transform(int value) => value + 2;
+
+    public override int Value => 2;
+
+    public sealed override event EventHandler? Dispatched;
+
+    public void Dispose()
+    {
+        Dispatched = null;
     }
 }
 

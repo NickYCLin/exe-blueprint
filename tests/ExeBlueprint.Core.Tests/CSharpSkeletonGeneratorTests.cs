@@ -92,6 +92,25 @@ public sealed class CSharpSkeletonGeneratorTests
     }
 
     [Fact]
+    public async Task EmitsOverrideSealedAndFinalInterfaceMethodModifiers()
+    {
+        var assemblyPath = typeof(DispatchDerivedFixture).Assembly.Location;
+        var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
+        var source = Assert.Single(
+            CSharpSkeletonGenerator.Generate(document),
+            file => file.RelativePath.EndsWith("ExeBlueprint.Core.Tests.cs", StringComparison.Ordinal)).Content;
+
+        Assert.Contains("public abstract string Describe();", source);
+        Assert.Contains("public virtual int Transform(int value)", source);
+        Assert.Contains("public override string Describe()", source);
+        Assert.Contains("public sealed override int Transform(int value)", source);
+        Assert.Contains("public override int Value { get; }", source);
+        Assert.Contains("public sealed override event System.EventHandler Dispatched;", source);
+        Assert.Contains("public void Dispose()", source);
+        Assert.DoesNotContain("virtual void Dispose()", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void GeneratesSolutionAndReferencesForRelatedAssemblies()
     {
         var document = new BlueprintDocument

@@ -33,7 +33,7 @@ Blueprint 中介資料
 - `input`：輸入類型、檔案數與總大小
 - `summary`：PE、assembly、型別、方法、資源和相依關係數量
 - `files`：每個檔案的格式、雜湊和分析資料，受管組件另含 `code`
-- `files[].code`：.NET 型別、欄位、屬性、事件、方法簽章、入口點、方法層級呼叫圖與各方法反組譯出的 IL
+- `files[].code`：.NET 型別、欄位、屬性、事件、方法簽章與 dispatch 旗標、入口點、方法層級呼叫圖與各方法反組譯出的 IL
 - `dependencies`：PE imports 與 assembly references
 - `technologies`：語言、runtime、框架和工具鏈判斷
 - `warnings`：略過或無法分析的項目
@@ -73,7 +73,7 @@ Ghidra 安裝目錄來自 `--ghidra` 或環境變數 `GHIDRA_INSTALL_DIR`。找�
 重建器不會直接翻譯零碎的反編譯文字。它會先把函式、型別、呼叫、UI、資源和外部副作用整理成中介資料，再由目標語言產生器輸出專案。
 
 目前已有第一個產生器 `CSharpSkeletonGenerator`，吃 `CodeModel` 輸出 C# 骨架：
-還原命名空間、型別、欄位、屬性、事件、方法簽章與繼承，並保留完整型別名稱及成員的可見性、static／virtual 與 readonly 修飾詞。
+還原命名空間、型別、欄位、屬性、事件、方法簽章與繼承，並保留完整型別名稱及成員的可見性、static／abstract／virtual／override／sealed override 與 readonly 修飾詞；metadata 中標為 final new-slot 的隱含介面實作會輸出成一般非 virtual 成員，避免 sealed 類別產生無效 C#。
 多個輸入 assembly 會輸出 `Reconstructed.slnx`，套件內可對上的 assembly reference 會轉成 `ProjectReference`。方法體由 `ManagedSymbolReader` 的 IL 還原器重建：
 先把 IL 解碼成指令陣列，用區間遞迴結構化把條件分支還原成 if／if-else，比對 Roslyn 的
 while／for 形狀（先跳條件、主體、條件、往回跳）還原成 while，並把底測式（往回跳收尾）還原成 do-while（皆可巢狀）；
