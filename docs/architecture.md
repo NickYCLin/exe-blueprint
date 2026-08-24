@@ -81,7 +81,7 @@ while／for 形狀（先跳條件、主體、條件、往回跳）還原成 whil
 auto-property 的隱藏欄位會還原成屬性名稱，運算子方法還原成運算子語法。
 呼叫時若參數型別是 char，整數常值會還原成 char 常值；區域變數會依方法的 local signature 用實際型別宣告。
 IL `switch` 跳表可還原直接 return／throw 的分支，也能處理各 case 指派區域變數後回到共同 join 的形狀；這類區域變數會提升到 switch 外並依 IL locals init 語意先設成 default。
-標準 `try/catch`、`try/finally` 與複合 `try/catch/finally` 會依 exception region metadata 的保護區域與 handler 邊界還原，不靠跳轉位置猜測；
+標準 `try/catch`、`try/finally` 與複合 `try/catch/finally` 會依 exception region metadata 的保護區域與 handler 邊界還原，不靠跳轉位置猜測；保護區可用 `leave` 正常離開，也可由 `throw` 或合法巢狀 `rethrow` 直接終止。
 `catch` 支援多個 handler、未命名 catch-all、具名例外變數、重新拋出，以及 Roslyn 產生的直線運算式與可混合巢狀的 `&&`／`||` 短路 `when` filter；filter 後接一般 catch 或與 finally 複合也能還原。跨區塊的區域變數會提升到 `try` 外並依 IL locals init 語意先設成 default。
 含回跳、會產生陳述式或不規則控制分支的 filter、fault 或非標準例外區域目前仍會退回反組譯 IL 註解加 `NotImplementedException`。
 重建採全有或全無：遇到無法結構化的跳轉、參照編譯器產生的名稱或任何不支援的指令，就整個方法放棄，

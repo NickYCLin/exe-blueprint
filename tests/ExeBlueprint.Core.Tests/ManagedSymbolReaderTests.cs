@@ -435,6 +435,42 @@ public sealed class ManagedSymbolReaderTests
     }
 
     [Fact]
+    public async Task ReconstructsTerminalProtectedTryRegions()
+    {
+        var assemblyPath = typeof(ExceptionHandlingFixture).Assembly.Location;
+        var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
+        var fixture = Assert.Single(
+            document.Files[0].Code!.Types,
+            type => type.FullName == "ExeBlueprint.Core.Tests.ExceptionHandlingFixture");
+
+        var catchMethod = Assert.Single(
+            fixture.Methods,
+            method => method.Name == nameof(ExceptionHandlingFixture.CatchTerminalTry));
+        Assert.True(catchMethod.BodyReconstructed);
+        Assert.Contains(catchMethod.Body, line =>
+            line.Trim() == "throw new System.InvalidOperationException();");
+        Assert.Contains("catch (System.InvalidOperationException)", catchMethod.Body);
+        Assert.Equal("return v0;", catchMethod.Body[^1]);
+
+        var filterMethod = Assert.Single(
+            fixture.Methods,
+            method => method.Name == nameof(ExceptionHandlingFixture.CatchFilterTerminalTry));
+        Assert.True(filterMethod.BodyReconstructed);
+        Assert.Contains(filterMethod.Body, line =>
+            line.StartsWith("catch (System.InvalidOperationException caughtException0) when (", StringComparison.Ordinal));
+
+        var finallyMethod = Assert.Single(
+            fixture.Methods,
+            method => method.Name == nameof(ExceptionHandlingFixture.FinallyTerminalTry));
+        Assert.True(finallyMethod.BodyReconstructed);
+        Assert.Contains(finallyMethod.Body, line =>
+            line.Trim() == "throw new System.InvalidOperationException();");
+        Assert.Contains("finally", finallyMethod.Body);
+        Assert.Contains(finallyMethod.Body, line => line.Contains("+ 10", StringComparison.Ordinal));
+        Assert.Equal("}", finallyMethod.Body[^1]);
+    }
+
+    [Fact]
     public async Task SummaryAggregatesManagedTypeAndMethodCounts()
     {
         var assemblyPath = typeof(BlueprintAnalyzer).Assembly.Location;
@@ -734,6 +770,47 @@ internal static class ExceptionHandlingFixture
             when (exception.HResult == value || (value > 0 && value < 10))
         {
             return -1;
+        }
+    }
+
+    public static int CatchTerminalTry()
+    {
+        try
+        {
+            throw new InvalidOperationException();
+        }
+        catch (InvalidOperationException)
+        {
+            return -1;
+        }
+    }
+
+    public static int FinallyTerminalTry(int value)
+    {
+        var result = value;
+        try
+        {
+            throw new InvalidOperationException();
+        }
+        finally
+        {
+            result += 10;
+        }
+    }
+
+    public static int CatchFilterTerminalTry(int value)
+    {
+        try
+        {
+            throw new InvalidOperationException();
+        }
+        catch (InvalidOperationException exception) when (exception.HResult == value)
+        {
+            return -1;
+        }
+        catch (InvalidOperationException)
+        {
+            return -2;
         }
     }
 }

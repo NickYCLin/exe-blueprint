@@ -919,7 +919,8 @@ internal static class ManagedSymbolReader
     private static int ExceptionClauseStartOffset(ExceptionRegionInfo region) =>
         region.Kind == ExceptionRegionKind.Filter ? region.FilterOffset : region.HandlerOffset;
 
-    // 同一個 try 的 catch handlers 會在 metadata 中共用保護區間，並依序排列到共同 join。
+    // 同一個 try 的 catch handlers 會在 metadata 中共用保護區間，並依序排列到共同 join；
+    // 保護區尾端可用 leave 正常離開，或以 throw／合法 rethrow 直接終止。
     // handler 入口的例外物件只接受 pop（未命名）或 stloc（具名）兩種標準形狀。
     private static StructuredException? TryStructureCatch(
         ReconContext context,
@@ -966,8 +967,22 @@ internal static class ManagedSymbolReader
             return null;
         }
 
-        var tryLeave = instructions[tryEndIndex - 1];
-        if (tryLeave.Name is not ("leave" or "leave.s") || tryLeave.Target != leaveTarget)
+        var tryTerminator = instructions[tryEndIndex - 1];
+        int tryBodyEnd;
+        if (tryTerminator.Name is "leave" or "leave.s")
+        {
+            if (tryTerminator.Target != leaveTarget)
+            {
+                return null;
+            }
+
+            tryBodyEnd = tryEndIndex - 1;
+        }
+        else if (tryTerminator.Name is "throw" or "rethrow")
+        {
+            tryBodyEnd = tryEndIndex;
+        }
+        else
         {
             return null;
         }
@@ -1065,7 +1080,6 @@ internal static class ManagedSymbolReader
                 filterCondition));
         }
 
-        var tryBodyEnd = tryEndIndex - 1;
         var tryStoredLocals = instructions[tryStartIndex..tryBodyEnd]
             .Select(instruction => TryGetStoredLocalIndex(context, instruction))
             .Where(localIndex => localIndex is not null)
@@ -1515,7 +1529,7 @@ internal static class ManagedSymbolReader
     }
 
     // try/finally 的控制流程由 exception region metadata 決定。只接受 Roslyn 常見的
-    // try 尾端 leave → finally 尾端 endfinally → 共用 join 形狀，避免靠跳轉猜區塊。
+    // try 尾端 leave／throw／合法 rethrow → finally 尾端 endfinally 形狀，避免靠跳轉猜區塊。
     private static StructuredException? TryStructureFinally(
         ReconContext context,
         Instr[] instructions,
@@ -1544,10 +1558,12 @@ internal static class ManagedSymbolReader
             return null;
         }
 
-        var leave = instructions[tryEndIndex - 1];
+        var tryTerminator = instructions[tryEndIndex - 1];
         var endFinally = instructions[handlerEndIndex - 1];
-        if (leave.Name is not ("leave" or "leave.s") ||
-            leave.Target != handlerEndOffset ||
+        var tryLeaves = tryTerminator.Name is "leave" or "leave.s";
+        var tryTerminates = tryTerminator.Name is "throw" or "rethrow";
+        if ((!tryLeaves && !tryTerminates) ||
+            (tryLeaves && tryTerminator.Target != handlerEndOffset) ||
             endFinally.Name != "endfinally")
         {
             return null;
@@ -1555,11 +1571,11 @@ internal static class ManagedSymbolReader
 
         // Release 最佳化會讓內層 try/catch 的所有 leave 直接跳過 finally，且最後一個
         // catch handler 恰好結束在 finally handler 起點；此時尾端 leave 屬於 catch，不能先剝掉。
-        var hasRedirectedCatchLeaves = context.ExceptionRegions.Any(candidate =>
+        var nestedCatchEndsAtTryEnd = context.ExceptionRegions.Any(candidate =>
             candidate.Kind is ExceptionRegionKind.Catch or ExceptionRegionKind.Filter &&
             candidate.TryOffset == region.TryOffset &&
             candidate.HandlerOffset + candidate.HandlerLength == tryEndOffset);
-        var tryBodyEnd = hasRedirectedCatchLeaves ? tryEndIndex : tryEndIndex - 1;
+        var tryBodyEnd = nestedCatchEndsAtTryEnd || tryTerminates ? tryEndIndex : tryEndIndex - 1;
         var finallyBodyEnd = handlerEndIndex - 1;
         var nestedCatchExceptionLocals = new HashSet<int>();
         foreach (var nestedCatch in context.ExceptionRegions.Where(candidate =>
@@ -1641,7 +1657,7 @@ internal static class ManagedSymbolReader
                 .ToArray()
         };
         var tryBody = TryStructure(
-            hasRedirectedCatchLeaves
+            nestedCatchEndsAtTryEnd
                 ? nestedContext with
                 {
                     LeaveRedirect = new ExceptionLeaveRedirect(tryEndOffset, handlerEndOffset)
