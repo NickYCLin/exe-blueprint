@@ -164,6 +164,23 @@ public sealed class ManagedSymbolReaderTests
     }
 
     [Fact]
+    public async Task ReconstructsCompilerGeneratedSwitchWithSharedJoin()
+    {
+        var assemblyPath = typeof(SwitchFixture).Assembly.Location;
+        var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
+        var fixture = Assert.Single(
+            document.Files[0].Code!.Types,
+            type => type.FullName == "ExeBlueprint.Core.Tests.SwitchFixture");
+        var method = Assert.Single(fixture.Methods, method => method.Name == nameof(SwitchFixture.JoinedCases));
+
+        Assert.True(method.BodyReconstructed);
+        Assert.Contains("int v0 = default;", method.Body);
+        Assert.Contains("        v0 = 30;", method.Body);
+        Assert.Equal(4, method.Body.Count(line => line.Trim() == "break;"));
+        Assert.Equal("return v0;", method.Body[^1]);
+    }
+
+    [Fact]
     public async Task SummaryAggregatesManagedTypeAndMethodCounts()
     {
         var assemblyPath = typeof(BlueprintAnalyzer).Assembly.Location;

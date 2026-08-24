@@ -325,6 +325,11 @@ internal static class ManagedSymbolReader
                 continue;
             }
 
+            if (operandSize < 0 || position + operandSize > il.Length)
+            {
+                yield break;
+            }
+
             yield return new IlInstruction(offset, opValue, position, operandSize);
             position += operandSize;
         }
@@ -470,6 +475,8 @@ internal static class ManagedSymbolReader
         int Target,
         IReadOnlyList<int> SwitchTargets);
 
+    private readonly record struct StructuredSwitch(IReadOnlyList<string> Statements, int NextIndex);
+
     private sealed record ReconContext(
         MetadataReader Metadata,
         byte[] Il,
@@ -600,7 +607,7 @@ internal static class ManagedSymbolReader
                     return null;
                 }
 
-                var switchStatements = TryStructureTerminalSwitch(
+                var structuredSwitch = TryStructureSwitch(
                     context,
                     instructions,
                     offsetToIndex,
@@ -609,13 +616,18 @@ internal static class ManagedSymbolReader
                     selector,
                     declaredLocals,
                     depth + 1);
-                if (switchStatements is null)
+                if (structuredSwitch is null)
                 {
                     return null;
                 }
 
-                statements.AddRange(switchStatements);
-                index = end;
+                if (statements.Count + structuredSwitch.Value.Statements.Count > MaxBodyStatements)
+                {
+                    return null;
+                }
+
+                statements.AddRange(structuredSwitch.Value.Statements);
+                index = structuredSwitch.Value.NextIndex;
                 continue;
             }
 
@@ -737,9 +749,9 @@ internal static class ManagedSymbolReader
         return stack.Count == 0 ? statements : null;
     }
 
-    // 支援 Roslyn 常見的終止型 switch：default 先跳到自己的區塊，各 case/default 最後直接 return 或 throw。
-    // 共用 join 或需要把區域變數帶出 switch 的形狀暫不處理，避免產生作用域錯誤的 C#。
-    private static List<string>? TryStructureTerminalSwitch(
+    // 支援 Roslyn 常見的 switch：default 先跳到自己的區塊，各 case 直接結束，或寫入區域變數後跳到共同 join。
+    // 共用的區域變數會先提升到 switch 外並以 default 初始化，兼顧 C# 作用域與 IL locals init 語意。
+    private static StructuredSwitch? TryStructureSwitch(
         ReconContext context,
         Instr[] instructions,
         Dictionary<int, int> offsetToIndex,
@@ -795,15 +807,106 @@ internal static class ManagedSymbolReader
             return null;
         }
 
-        var statements = new List<string> { $"switch ({selector})", "{" };
+        var joinCandidates = new List<int>();
+        for (var block = 0; block < blockStarts.Length - 1; block++)
+        {
+            var boundary = blockStarts[block + 1];
+            var last = instructions[boundary - 1];
+            if (last.Name is not ("br" or "br.s") ||
+                !offsetToIndex.TryGetValue(last.Target, out var candidate) ||
+                candidate <= blockStarts[^1] ||
+                candidate >= end)
+            {
+                continue;
+            }
+
+            joinCandidates.Add(candidate);
+        }
+
+        var distinctJoins = joinCandidates.Distinct().ToArray();
+        if (distinctJoins.Length > 1)
+        {
+            return null;
+        }
+
+        int? joinIndex = distinctJoins.Length == 1 ? distinctJoins[0] : null;
+        var blocks = new List<(int Start, int BodyEnd, bool AddBreak)>();
         for (var block = 0; block < blockStarts.Length; block++)
         {
             var blockStart = blockStarts[block];
-            var blockEnd = block + 1 < blockStarts.Length ? blockStarts[block + 1] : end;
-            if (blockStart >= blockEnd || instructions[blockEnd - 1].Name is not ("ret" or "throw"))
+            var naturalEnd = block + 1 < blockStarts.Length
+                ? blockStarts[block + 1]
+                : joinIndex ?? end;
+            if (blockStart >= naturalEnd)
             {
                 return null;
             }
+
+            var last = instructions[naturalEnd - 1];
+            if (last.Name is "ret" or "throw")
+            {
+                blocks.Add((blockStart, naturalEnd, false));
+                continue;
+            }
+
+            if (joinIndex is null)
+            {
+                return null;
+            }
+
+            if (last.Name is "br" or "br.s")
+            {
+                if (!offsetToIndex.TryGetValue(last.Target, out var targetIndex) || targetIndex != joinIndex)
+                {
+                    return null;
+                }
+
+                blocks.Add((blockStart, naturalEnd - 1, true));
+                continue;
+            }
+
+            if (naturalEnd != joinIndex)
+            {
+                return null;
+            }
+
+            blocks.Add((blockStart, naturalEnd, true));
+        }
+
+        var statements = new List<string>();
+        if (joinIndex is not null)
+        {
+            var storedLocals = blocks
+                .Where(block => block.AddBreak)
+                .SelectMany(block => instructions[block.Start..block.BodyEnd])
+                .Select(instruction => TryGetStoredLocalIndex(context, instruction))
+                .Where(index => index is not null)
+                .Select(index => index!.Value)
+                .Distinct()
+                .Order()
+                .ToArray();
+            foreach (var localIndex in storedLocals)
+            {
+                if (!declaredLocals.Add(localIndex))
+                {
+                    continue;
+                }
+
+                var type = LocalDeclarationType(context, localIndex);
+                if (IsGeneratedName(type))
+                {
+                    return null;
+                }
+
+                statements.Add($"{type} v{localIndex} = default;");
+            }
+        }
+
+        statements.Add($"switch ({selector})");
+        statements.Add("{");
+        foreach (var block in blocks)
+        {
+            var blockStart = block.Start;
 
             foreach (var (value, _) in caseTargets.Where(target => target.Index == blockStart))
             {
@@ -820,7 +923,7 @@ internal static class ManagedSymbolReader
                 instructions,
                 offsetToIndex,
                 blockStart,
-                blockEnd,
+                block.BodyEnd,
                 new HashSet<int>(declaredLocals),
                 depth);
             if (body is null)
@@ -829,11 +932,26 @@ internal static class ManagedSymbolReader
             }
 
             statements.AddRange(body.Select(line => $"        {line}"));
+            if (block.AddBreak)
+            {
+                statements.Add("        break;");
+            }
         }
 
         statements.Add("}");
-        return statements;
+        return new StructuredSwitch(statements, joinIndex ?? end);
     }
+
+    private static int? TryGetStoredLocalIndex(ReconContext context, Instr instruction) => instruction.Name switch
+    {
+        "stloc.0" => 0,
+        "stloc.1" => 1,
+        "stloc.2" => 2,
+        "stloc.3" => 3,
+        "stloc.s" => context.Il[instruction.OperandOffset],
+        "stloc" => BinaryPrimitives.ReadUInt16LittleEndian(context.Il.AsSpan(instruction.OperandOffset, 2)),
+        _ => null
+    };
 
     // 依分支指令算出「順順落下（fall-through）」時的 C# 條件，也就是不跳轉時該執行 then 區塊的條件。
     private static bool TryBuildCondition(string name, Stack<string> stack, out string condition)

@@ -156,6 +156,51 @@ public sealed class IlBodyReconstructionTests
     }
 
     [Fact]
+    public void ReconstructsSwitchWithSharedJoin()
+    {
+        // 每個 case 指派 result 後跳到共同 return；default 直接落到 join。
+        byte[] il =
+        [
+            0x02,                         // IL_0000 ldarg.0
+            0x45, 0x03, 0x00, 0x00, 0x00, // IL_0001 switch (3 targets)
+            0x02, 0x00, 0x00, 0x00,       // case 0 -> IL_0014
+            0x07, 0x00, 0x00, 0x00,       // case 1 -> IL_0019
+            0x0C, 0x00, 0x00, 0x00,       // case 2 -> IL_001E
+            0x2B, 0x0F,                   // IL_0012 br.s default (IL_0023)
+            0x1F, 0x0A, 0x0A, 0x2B, 0x0D, // IL_0014 result = 10; br.s join
+            0x1F, 0x14, 0x0A, 0x2B, 0x08, // IL_0019 result = 20; br.s join
+            0x1F, 0x1E, 0x0A, 0x2B, 0x03, // IL_001E result = 30; br.s join
+            0x1F, 0x63, 0x0A,             // IL_0023 default: result = 99
+            0x06, 0x2A                    // IL_0026 join: return result
+        ];
+
+        var body = Reconstruct(il, isInstance: false, returnType: "int", localTypes: ["int"]);
+
+        Assert.NotNull(body);
+        Assert.Equal(
+            [
+                "int v0 = default;",
+                "switch (arg0)",
+                "{",
+                "    case 0:",
+                "        v0 = 10;",
+                "        break;",
+                "    case 1:",
+                "        v0 = 20;",
+                "        break;",
+                "    case 2:",
+                "        v0 = 30;",
+                "        break;",
+                "    default:",
+                "        v0 = 99;",
+                "        break;",
+                "}",
+                "return v0;"
+            ],
+            body);
+    }
+
+    [Fact]
     public void BailsOnBackwardInfiniteLoop()
     {
         // BODY: nop; br.s BODY  -> while(true), 目前不支援，應放棄。
@@ -168,13 +213,17 @@ public sealed class IlBodyReconstructionTests
         Assert.Null(Reconstruct(il, isInstance: false, returnType: "void"));
     }
 
-    private static IReadOnlyList<string>? Reconstruct(byte[] il, bool isInstance, string returnType)
+    private static IReadOnlyList<string>? Reconstruct(
+        byte[] il,
+        bool isInstance,
+        string returnType,
+        IReadOnlyList<string>? localTypes = null)
     {
         // 隨便挑一個現成組件當 MetadataReader；這些 IL 不含 token，不會真的用到它。
         var assemblyPath = typeof(BlueprintAnalyzer).Assembly.Location;
         using var peReader = new PEReader(File.OpenRead(assemblyPath));
         var metadata = peReader.GetMetadataReader();
-        return ManagedSymbolReader.ReconstructBodyForTest(metadata, il, isInstance, returnType);
+        return ManagedSymbolReader.ReconstructBodyForTest(metadata, il, isInstance, returnType, localTypes);
     }
 }
 
@@ -193,5 +242,27 @@ internal static class SwitchFixture
             default:
                 return 99;
         }
+    }
+
+    public static int JoinedCases(int value)
+    {
+        int result;
+        switch (value)
+        {
+            case 0:
+                result = 10;
+                break;
+            case 1:
+                result = 20;
+                break;
+            case 2:
+                result = 30;
+                break;
+            default:
+                result = 99;
+                break;
+        }
+
+        return result;
     }
 }
