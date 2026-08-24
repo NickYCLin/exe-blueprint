@@ -52,20 +52,28 @@ static async Task<int> RunAsync(string[] args, CancellationToken cancellationTok
             await MarkdownReportWriter.WriteAsync(document, reportPath, cancellationToken);
         }
 
-        if (parsed.EmitCSharp)
+        async Task EmitSkeletonAsync(bool enabled, string language, string directoryName, IReadOnlyList<GeneratedFile> generated)
         {
-            var generated = CSharpSkeletonGenerator.Generate(document);
+            if (!enabled)
+            {
+                return;
+            }
+
             if (generated.Count == 0)
             {
-                Console.WriteLine("沒有可轉出的 .NET 型別，略過 C# 骨架。");
+                Console.WriteLine($"沒有可轉出的 .NET 型別，略過 {language} 骨架。");
+                return;
             }
-            else
-            {
-                var csharpDirectory = Path.Combine(outputDirectory, "reconstructed-csharp");
-                await GeneratedProjectWriter.WriteAsync(generated, csharpDirectory, cancellationToken);
-                Console.WriteLine($"C# 骨架：{generated.Count:N0} 個檔案 → {Path.GetFullPath(csharpDirectory)}");
-            }
+
+            var directory = Path.Combine(outputDirectory, directoryName);
+            await GeneratedProjectWriter.WriteAsync(generated, directory, cancellationToken);
+            Console.WriteLine($"{language} 骨架：{generated.Count:N0} 個檔案 → {Path.GetFullPath(directory)}");
         }
+
+        await EmitSkeletonAsync(parsed.EmitCSharp, "C#", "reconstructed-csharp", parsed.EmitCSharp ? CSharpSkeletonGenerator.Generate(document) : []);
+        await EmitSkeletonAsync(parsed.EmitCpp, "C++", "reconstructed-cpp", parsed.EmitCpp ? CppSkeletonGenerator.Generate(document) : []);
+        await EmitSkeletonAsync(parsed.EmitRust, "Rust", "reconstructed-rust", parsed.EmitRust ? RustSkeletonGenerator.Generate(document) : []);
+        await EmitSkeletonAsync(parsed.EmitGo, "Go", "reconstructed-go", parsed.EmitGo ? GoSkeletonGenerator.Generate(document) : []);
 
         Console.WriteLine($"完成：{Path.GetFullPath(outputDirectory)}");
         Console.WriteLine($"檔案：{document.Input.FileCount:N0}");
@@ -105,6 +113,9 @@ static ParsedArguments ParseArguments(string[] args)
     var force = false;
     var jsonOnly = false;
     var emitCSharp = false;
+    var emitCpp = false;
+    var emitRust = false;
+    var emitGo = false;
 
     while (index < args.Length)
     {
@@ -129,12 +140,21 @@ static ParsedArguments ParseArguments(string[] args)
             case "--emit-csharp":
                 emitCSharp = true;
                 break;
+            case "--emit-cpp":
+                emitCpp = true;
+                break;
+            case "--emit-rust":
+                emitRust = true;
+                break;
+            case "--emit-go":
+                emitGo = true;
+                break;
             default:
                 throw new ArgumentException($"不支援的選項：{option}");
         }
     }
 
-    return new ParsedArguments(inputPath, outputDirectory, force, jsonOnly, emitCSharp);
+    return new ParsedArguments(inputPath, outputDirectory, force, jsonOnly, emitCSharp, emitCpp, emitRust, emitGo);
 }
 
 static string CreateDefaultOutputDirectory(string inputPath)
@@ -171,7 +191,10 @@ static void PrintHelp()
     Console.WriteLine("選項：");
     Console.WriteLine("  -o, --output <目錄>  指定輸出目錄");
     Console.WriteLine("  --json-only          只輸出 blueprint.json");
-    Console.WriteLine("  --emit-csharp        另外產生 .NET 型別的 C# 骨架");
+    Console.WriteLine("  --emit-csharp        另外產生 .NET 型別的 C# 骨架（含還原的方法體）");
+    Console.WriteLine("  --emit-cpp           另外產生 C++ 型別骨架");
+    Console.WriteLine("  --emit-rust          另外產生 Rust 型別骨架");
+    Console.WriteLine("  --emit-go            另外產生 Go 型別骨架");
     Console.WriteLine("  --force              覆寫既有 blueprint.json 與 REPORT.md");
     Console.WriteLine("  -v, --version        顯示版本");
     Console.WriteLine("  -h, --help           顯示說明");
@@ -184,4 +207,7 @@ internal sealed record ParsedArguments(
     string? OutputDirectory,
     bool Force,
     bool JsonOnly,
-    bool EmitCSharp);
+    bool EmitCSharp,
+    bool EmitCpp,
+    bool EmitRust,
+    bool EmitGo);

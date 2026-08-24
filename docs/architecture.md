@@ -75,6 +75,10 @@ auto-property 的隱藏欄位會還原成屬性名稱，運算子方法還原成
 重建採全有或全無：遇到無法結構化的跳轉、參照編譯器產生的名稱或任何不支援的指令，就整個方法放棄，
 寧可不還原也不產出語意錯誤的程式碼。enum 常值目前仍以整數呈現，型別名稱未加命名空間 using，所以不保證可直接編譯。
 
+另外也有 `CppSkeletonGenerator`、`RustSkeletonGenerator`、`GoSkeletonGenerator`，
+共用 `SkeletonSupport` 挑型別與 `LanguageTypeMap` 做基本型別對應，各自輸出該語言的型別與方法簽章骨架
+（struct／class／trait／interface／enum），方法體留空。這三個語言目前只還原結構，不翻譯方法內容。
+
 第一批預定的輸出方向：
 
 - .NET assembly → C# project

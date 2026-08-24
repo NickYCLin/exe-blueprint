@@ -17,6 +17,7 @@ ExeBlueprint 用來整理 Windows 應用程式套件。它會掃描 EXE、DLL、
 - 用堆疊模擬把方法 IL 還原成 C# 陳述式，把條件分支還原成 if／if-else，迴圈還原成 while（可巢狀）
 - 帶 switch 或非標準流程的方法還原不了，會保留反組譯 IL 當註解
 - 把 .NET 型別轉出一份 C# 骨架，能還原的方法直接給程式碼，其餘附上原始 IL
+- 另外可轉出 C++／Rust／Go 的型別與方法簽章骨架（結構為主，方法體留空）
 - 找出套件內可以對上的 EXE／DLL 相依關係
 - 依檔案內容辨識常見語言、runtime、框架與安裝器
 - 輸出 JSON 與繁體中文 Markdown 報告
@@ -57,15 +58,16 @@ exe-blueprint-output/<輸入名稱>-<時間>/
 dotnet run --project .\src\ExeBlueprint.Cli -- analyze .\App.exe --json-only
 ```
 
-要順便把 .NET 型別轉出一份 C# 骨架，加上 `--emit-csharp`：
+要順便把 .NET 型別轉出骨架，加上對應的 `--emit-*`（可同時多個）：
 
 ```powershell
-dotnet run --project .\src\ExeBlueprint.Cli -- analyze .\App.exe --emit-csharp
+dotnet run --project .\src\ExeBlueprint.Cli -- analyze .\App.exe --emit-csharp --emit-rust --emit-go --emit-cpp
 ```
 
-骨架會放在輸出目錄的 `reconstructed-csharp/`。能結構化的方法會用堆疊模擬還原成
-C# 陳述式（含 if／if-else 與 while 迴圈）；還原不了的方法會把原始 IL 放進註解當依據，方法體先用 `NotImplementedException`。
-用來對照結構或當轉語言的起點，不保證能直接編譯。
+各語言會分別放在輸出目錄的 `reconstructed-csharp/`、`reconstructed-cpp/`、`reconstructed-rust/`、`reconstructed-go/`。
+C# 會還原方法體：能結構化的方法用堆疊模擬還原成 C# 陳述式（含 if／if-else 與 while 迴圈），
+還原不了的把原始 IL 放進註解、方法體先用 `NotImplementedException`。
+C++／Rust／Go 目前只還原型別與方法簽章（結構），方法體留空。全部僅供對照或轉語言起點，不保證能直接編譯。
 
 輸出目錄已有報告時，程式預設不會覆寫。確定要覆寫可加上 `--force`。
 
@@ -102,7 +104,7 @@ src/ExeBlueprint.Cli/bin/Release/net10.0/win-x64/publish/exe-blueprint.exe
 - 擴充中介模型，補上 UI、資源和設定（函式、型別、欄位、屬性、呼叫圖已完成 .NET 部分）
 - 還原 switch、do-while 與 enum 常值，讓骨架能直接編譯成多專案 solution（目前已能還原 if／if-else、while、char 常值與區域變數型別）
 - 優先支援易語言、VB6、Delphi 到 C# 的轉換
-- 加入 C++、Rust、Go 和易語言程式碼產生器（C# 骨架已有第一版）
+- 讓 C++／Rust／Go 產生器也還原方法體、支援易語言（目前這三個語言只還原結構）
 - 比較原程式與重建版本的輸入、輸出和副作用
 - 製作可拖放檔案與資料夾的 Windows 桌面介面
 
