@@ -37,6 +37,33 @@ public sealed class IlBodyReconstructionTests
     }
 
     [Fact]
+    public void ReconstructsDoWhileLoop()
+    {
+        // static int M(int n) { int i = 0; do { i = i + 1; } while (i < n); return i; }
+        byte[] il =
+        [
+            0x16,       // ldc.i4.0
+            0x0A,       // stloc.0
+            0x06,       // IL_0002 BODY: ldloc.0
+            0x17,       // ldc.i4.1
+            0x58,       // add
+            0x0A,       // stloc.0
+            0x06,       // ldloc.0
+            0x02,       // ldarg.0
+            0x32, 0xF8, // blt.s BODY (-8 -> IL_0002)
+            0x06,       // ldloc.0
+            0x2A        // ret
+        ];
+
+        var body = Reconstruct(il, isInstance: false, returnType: "int");
+
+        Assert.NotNull(body);
+        Assert.Equal(
+            ["var v0 = 0;", "do", "{", "    v0 = (v0 + 1);", "} while (v0 < arg0);", "return v0;"],
+            body);
+    }
+
+    [Fact]
     public void ReconstructsIf()
     {
         // static int M(int n) { if (n == 5) { return 1; } return 2; }

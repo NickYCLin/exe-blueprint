@@ -518,6 +518,29 @@ internal static class ManagedSymbolReader
                 return null;
             }
 
+            // do-while（底測式）：此處是某個往回跳條件分支的目標，且中間為直線。
+            if (stack.Count == 0)
+            {
+                var doWhileEnd = TryMatchDoWhileLoop(instructions, index, end);
+                if (doWhileEnd is int branchIndex)
+                {
+                    var processed = TryProcessStraightLine(context, instructions, index, branchIndex, declaredLocals);
+                    if (processed is null ||
+                        !TryBuildTakenCondition(instructions[branchIndex].Name, processed.Value.Stack, out var doCondition) ||
+                        processed.Value.Stack.Count != 0)
+                    {
+                        return null;
+                    }
+
+                    statements.Add("do");
+                    statements.Add("{");
+                    statements.AddRange(processed.Value.Statements.Select(line => $"    {line}"));
+                    statements.Add($"}} while ({doCondition});");
+                    index = branchIndex + 1;
+                    continue;
+                }
+            }
+
             var instr = instructions[index];
             if (!instr.IsBranch)
             {
@@ -721,6 +744,51 @@ internal static class ManagedSymbolReader
         }
 
         return null;
+    }
+
+    // do-while：從 loopStart 往後第一個分支若是往回跳到 loopStart 的條件分支，且中間全是直線，就是底測式迴圈。
+    // 回傳收尾條件分支的索引，否則 null。
+    private static int? TryMatchDoWhileLoop(Instr[] instructions, int loopStart, int end)
+    {
+        var loopStartOffset = instructions[loopStart].Offset;
+        for (var index = loopStart; index < end; index++)
+        {
+            var instr = instructions[index];
+            if (!instr.IsBranch)
+            {
+                continue;
+            }
+
+            if (index == loopStart || instr.Name is "br" or "br.s" || instr.Target != loopStartOffset)
+            {
+                return null;
+            }
+
+            return index;
+        }
+
+        return null;
+    }
+
+    private static (List<string> Statements, Stack<string> Stack)? TryProcessStraightLine(
+        ReconContext context,
+        Instr[] instructions,
+        int start,
+        int end,
+        HashSet<int> declaredLocals)
+    {
+        var stack = new Stack<string>();
+        var statements = new List<string>();
+        for (var index = start; index < end; index++)
+        {
+            var instr = instructions[index];
+            if (instr.IsBranch || !ApplySimpleInstruction(context, instr, stack, statements, declaredLocals, out var terminal) || terminal)
+            {
+                return null;
+            }
+        }
+
+        return (statements, stack);
     }
 
     private static string? TryBuildLoopCondition(
