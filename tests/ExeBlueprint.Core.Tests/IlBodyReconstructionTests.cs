@@ -201,6 +201,59 @@ public sealed class IlBodyReconstructionTests
     }
 
     [Fact]
+    public void ReconstructsTryFinallyFromExceptionRegion()
+    {
+        // static int M(int n) { try { result = n + 1; } finally { result += 10; } return result; }
+        byte[] il =
+        [
+            0x02,       // IL_0000 ldarg.0
+            0x17,       // IL_0001 ldc.i4.1
+            0x58,       // IL_0002 add
+            0x0A,       // IL_0003 stloc.0
+            0xDE, 0x06, // IL_0004 leave.s IL_000C
+            0x06,       // IL_0006 ldloc.0
+            0x1F, 0x0A, // IL_0007 ldc.i4.s 10
+            0x58,       // IL_0009 add
+            0x0A,       // IL_000A stloc.0
+            0xDC,       // IL_000B endfinally
+            0x06,       // IL_000C ldloc.0
+            0x2A        // IL_000D ret
+        ];
+        var regions = new[]
+        {
+            new ManagedSymbolReader.ExceptionRegionInfo(
+                ExceptionRegionKind.Finally,
+                TryOffset: 0,
+                TryLength: 6,
+                HandlerOffset: 6,
+                HandlerLength: 6)
+        };
+
+        var body = Reconstruct(
+            il,
+            isInstance: false,
+            returnType: "int",
+            localTypes: ["int"],
+            exceptionRegions: regions);
+
+        Assert.NotNull(body);
+        Assert.Equal(
+            [
+                "int v0 = default;",
+                "try",
+                "{",
+                "    v0 = (arg0 + 1);",
+                "}",
+                "finally",
+                "{",
+                "    v0 = (v0 + 10);",
+                "}",
+                "return v0;"
+            ],
+            body);
+    }
+
+    [Fact]
     public void BailsOnBackwardInfiniteLoop()
     {
         // BODY: nop; br.s BODY  -> while(true), 目前不支援，應放棄。
@@ -217,13 +270,20 @@ public sealed class IlBodyReconstructionTests
         byte[] il,
         bool isInstance,
         string returnType,
-        IReadOnlyList<string>? localTypes = null)
+        IReadOnlyList<string>? localTypes = null,
+        IReadOnlyList<ManagedSymbolReader.ExceptionRegionInfo>? exceptionRegions = null)
     {
         // 隨便挑一個現成組件當 MetadataReader；這些 IL 不含 token，不會真的用到它。
         var assemblyPath = typeof(BlueprintAnalyzer).Assembly.Location;
         using var peReader = new PEReader(File.OpenRead(assemblyPath));
         var metadata = peReader.GetMetadataReader();
-        return ManagedSymbolReader.ReconstructBodyForTest(metadata, il, isInstance, returnType, localTypes);
+        return ManagedSymbolReader.ReconstructBodyForTest(
+            metadata,
+            il,
+            isInstance,
+            returnType,
+            localTypes,
+            exceptionRegions);
     }
 }
 

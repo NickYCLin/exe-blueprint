@@ -83,6 +83,8 @@ internal static class ManagedSymbolReader
                 var hasBody = method.RelativeVirtualAddress != 0;
                 var declaringName = BuildTypeFullName(namespaceName, name);
                 var il = hasBody ? TryReadIl(peReader, method) : null;
+                var localTypes = hasBody ? TryReadLocalTypes(peReader, method) : [];
+                var exceptionRegions = hasBody ? TryReadExceptionRegions(peReader, method) : [];
 
                 var model = BuildMethod(metadata, methodHandle, method, methodName, hasBody, entryPointMethod.Handle);
                 if (il is { Length: > 0 })
@@ -99,7 +101,8 @@ internal static class ManagedSymbolReader
                             isInstance,
                             ReadParameterNames(metadata, method),
                             model.ReturnType,
-                            TryReadLocalTypes(peReader, method));
+                            localTypes,
+                            exceptionRegions);
                         if (body is not null)
                         {
                             model = model with { Body = body, BodyReconstructed = true };
@@ -212,6 +215,29 @@ internal static class ManagedSymbolReader
             var metadata = peReader.GetMetadataReader();
             var signature = metadata.GetStandaloneSignature(body.LocalSignature);
             return signature.DecodeLocalSignature(SignatureTypeNameProvider.Instance, null);
+        }
+        catch (Exception exception) when (exception is BadImageFormatException or InvalidOperationException)
+        {
+            return [];
+        }
+    }
+
+    private static IReadOnlyList<ExceptionRegionInfo> TryReadExceptionRegions(
+        PEReader peReader,
+        MethodDefinition method)
+    {
+        try
+        {
+            return peReader
+                .GetMethodBody(method.RelativeVirtualAddress)
+                .ExceptionRegions
+                .Select(region => new ExceptionRegionInfo(
+                    region.Kind,
+                    region.TryOffset,
+                    region.TryLength,
+                    region.HandlerOffset,
+                    region.HandlerLength))
+                .ToArray();
         }
         catch (Exception exception) when (exception is BadImageFormatException or InvalidOperationException)
         {
@@ -478,13 +504,23 @@ internal static class ManagedSymbolReader
 
     private readonly record struct StructuredSwitch(IReadOnlyList<string> Statements, int NextIndex);
 
+    private readonly record struct StructuredException(IReadOnlyList<string> Statements, int NextIndex);
+
+    internal readonly record struct ExceptionRegionInfo(
+        ExceptionRegionKind Kind,
+        int TryOffset,
+        int TryLength,
+        int HandlerOffset,
+        int HandlerLength);
+
     private sealed record ReconContext(
         MetadataReader Metadata,
         byte[] Il,
         Dictionary<int, string> ParameterNames,
         bool IsInstance,
         string ReturnType,
-        IReadOnlyList<string> LocalTypes);
+        IReadOnlyList<string> LocalTypes,
+        IReadOnlyList<ExceptionRegionInfo> ExceptionRegions);
 
     // 測試用進入點：以現成的 MetadataReader 直接餵 IL bytes 驗證還原結果。
     internal static IReadOnlyList<string>? ReconstructBodyForTest(
@@ -492,11 +528,19 @@ internal static class ManagedSymbolReader
         byte[] il,
         bool isInstance,
         string returnType,
-        IReadOnlyList<string>? localTypes = null) =>
-        TryReconstructLinearBody(metadata, il, isInstance, new Dictionary<int, string>(), returnType, localTypes ?? []);
+        IReadOnlyList<string>? localTypes = null,
+        IReadOnlyList<ExceptionRegionInfo>? exceptionRegions = null) =>
+        TryReconstructLinearBody(
+            metadata,
+            il,
+            isInstance,
+            new Dictionary<int, string>(),
+            returnType,
+            localTypes ?? [],
+            exceptionRegions ?? []);
 
     // 把方法的 IL 還原成 C#。先解碼成指令陣列，再用區間遞迴結構化還原 if／if-else（可巢狀）。
-    // 採全有或全無：遇到無法安全切開的迴圈、非終止型 switch、例外處理或任何無法結構化的跳轉就整個方法放棄，
+    // 採全有或全無：遇到無法安全切開的迴圈、非終止型 switch、不支援的例外區域或任何無法結構化的跳轉就整個方法放棄，
     // 退回 IL 註解，寧可不還原也不要產出語意錯誤的程式碼。輸出的 C# 不保證能編譯，但語意貼近原程式。
     private static IReadOnlyList<string>? TryReconstructLinearBody(
         MetadataReader metadata,
@@ -504,7 +548,8 @@ internal static class ManagedSymbolReader
         bool isInstance,
         Dictionary<int, string> parameterNames,
         string returnType,
-        IReadOnlyList<string> localTypes)
+        IReadOnlyList<string> localTypes,
+        IReadOnlyList<ExceptionRegionInfo> exceptionRegions)
     {
         var instructions = new List<Instr>();
         var offsetToIndex = new Dictionary<int, int>();
@@ -547,7 +592,7 @@ internal static class ManagedSymbolReader
         }
 
         offsetToIndex[il.Length] = instructions.Count;
-        var context = new ReconContext(metadata, il, parameterNames, isInstance, returnType, localTypes);
+        var context = new ReconContext(metadata, il, parameterNames, isInstance, returnType, localTypes, exceptionRegions);
         return TryStructure(context, [.. instructions], offsetToIndex, 0, instructions.Count, new HashSet<int>(), 0);
     }
 
@@ -577,6 +622,42 @@ internal static class ManagedSymbolReader
                 return null;
             }
 
+            var instr = instructions[index];
+
+            // 先按 metadata 的保護區域邊界還原標準 try/finally；沒有明確區域資料時不猜測。
+            if (stack.Count == 0)
+            {
+                var startingRegions = context.ExceptionRegions
+                    .Where(region => region.TryOffset == instr.Offset)
+                    .ToArray();
+                if (startingRegions.Length > 0)
+                {
+                    if (startingRegions.Length != 1)
+                    {
+                        return null;
+                    }
+
+                    var structuredException = TryStructureFinally(
+                        context,
+                        instructions,
+                        offsetToIndex,
+                        index,
+                        end,
+                        startingRegions[0],
+                        declaredLocals,
+                        depth + 1);
+                    if (structuredException is null ||
+                        statements.Count + structuredException.Value.Statements.Count > MaxBodyStatements)
+                    {
+                        return null;
+                    }
+
+                    statements.AddRange(structuredException.Value.Statements);
+                    index = structuredException.Value.NextIndex;
+                    continue;
+                }
+            }
+
             // do-while（底測式）：此處是某個往回跳條件分支的目標，且中間為直線。
             if (stack.Count == 0)
             {
@@ -600,7 +681,6 @@ internal static class ManagedSymbolReader
                 }
             }
 
-            var instr = instructions[index];
             if (instr.Name == "switch")
             {
                 if (!TryPop(stack, out var selector) || stack.Count != 0)
@@ -748,6 +828,112 @@ internal static class ManagedSymbolReader
         }
 
         return stack.Count == 0 ? statements : null;
+    }
+
+    // try/finally 的控制流程由 exception region metadata 決定。只接受 Roslyn 常見的
+    // try 尾端 leave → finally 尾端 endfinally → 共用 join 形狀，避免靠跳轉猜區塊。
+    private static StructuredException? TryStructureFinally(
+        ReconContext context,
+        Instr[] instructions,
+        Dictionary<int, int> offsetToIndex,
+        int tryStartIndex,
+        int end,
+        ExceptionRegionInfo region,
+        HashSet<int> declaredLocals,
+        int depth)
+    {
+        if (depth > MaxStructureDepth || region.Kind != ExceptionRegionKind.Finally)
+        {
+            return null;
+        }
+
+        var tryEndOffset = region.TryOffset + region.TryLength;
+        var handlerEndOffset = region.HandlerOffset + region.HandlerLength;
+        if (!offsetToIndex.TryGetValue(tryEndOffset, out var tryEndIndex) ||
+            !offsetToIndex.TryGetValue(region.HandlerOffset, out var handlerStartIndex) ||
+            !offsetToIndex.TryGetValue(handlerEndOffset, out var handlerEndIndex) ||
+            tryStartIndex >= tryEndIndex ||
+            tryEndIndex != handlerStartIndex ||
+            handlerStartIndex >= handlerEndIndex ||
+            handlerEndIndex > end)
+        {
+            return null;
+        }
+
+        var leave = instructions[tryEndIndex - 1];
+        var endFinally = instructions[handlerEndIndex - 1];
+        if (leave.Name is not ("leave" or "leave.s") ||
+            leave.Target != handlerEndOffset ||
+            endFinally.Name != "endfinally")
+        {
+            return null;
+        }
+
+        var tryBodyEnd = tryEndIndex - 1;
+        var finallyBodyEnd = handlerEndIndex - 1;
+        var storedLocals = instructions[tryStartIndex..tryBodyEnd]
+            .Concat(instructions[handlerStartIndex..finallyBodyEnd])
+            .Select(instruction => TryGetStoredLocalIndex(context, instruction))
+            .Where(localIndex => localIndex is not null)
+            .Select(localIndex => localIndex!.Value)
+            .Distinct()
+            .Order()
+            .ToArray();
+
+        var statements = new List<string>();
+        foreach (var localIndex in storedLocals)
+        {
+            if (declaredLocals.Contains(localIndex))
+            {
+                continue;
+            }
+
+            var type = LocalDeclarationType(context, localIndex);
+            if (type == "var" || IsGeneratedName(type))
+            {
+                return null;
+            }
+
+            declaredLocals.Add(localIndex);
+            statements.Add($"{type} v{localIndex} = default;");
+        }
+
+        var nestedContext = context with
+        {
+            ExceptionRegions = context.ExceptionRegions
+                .Where(candidate => candidate != region)
+                .ToArray()
+        };
+        var tryBody = TryStructure(
+            nestedContext,
+            instructions,
+            offsetToIndex,
+            tryStartIndex,
+            tryBodyEnd,
+            new HashSet<int>(declaredLocals),
+            depth);
+        var finallyBody = TryStructure(
+            nestedContext,
+            instructions,
+            offsetToIndex,
+            handlerStartIndex,
+            finallyBodyEnd,
+            new HashSet<int>(declaredLocals),
+            depth);
+        if (tryBody is null || finallyBody is null)
+        {
+            return null;
+        }
+
+        statements.Add("try");
+        statements.Add("{");
+        statements.AddRange(tryBody.Select(line => $"    {line}"));
+        statements.Add("}");
+        statements.Add("finally");
+        statements.Add("{");
+        statements.AddRange(finallyBody.Select(line => $"    {line}"));
+        statements.Add("}");
+        return new StructuredException(statements, handlerEndIndex);
     }
 
     // 支援 Roslyn 常見的 switch：default 先跳到自己的區塊，各 case 直接結束，或寫入區域變數後跳到共同 join。

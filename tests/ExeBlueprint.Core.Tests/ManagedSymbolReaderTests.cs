@@ -69,7 +69,7 @@ public sealed class ManagedSymbolReaderTests
                 var trimmed = statement.Trim();
                 Assert.True(
                     trimmed.EndsWith(';')
-                    || trimmed is "{" or "}" or "else" or "do" or "default:"
+                    || trimmed is "{" or "}" or "else" or "do" or "try" or "finally" or "default:"
                     || trimmed.StartsWith("if (", StringComparison.Ordinal)
                     || trimmed.StartsWith("while (", StringComparison.Ordinal)
                     || trimmed.StartsWith("switch (", StringComparison.Ordinal)
@@ -220,6 +220,41 @@ public sealed class ManagedSymbolReaderTests
     }
 
     [Fact]
+    public async Task ReconstructsCompilerGeneratedTryFinally()
+    {
+        var assemblyPath = typeof(ExceptionHandlingFixture).Assembly.Location;
+        var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
+        var fixture = Assert.Single(
+            document.Files[0].Code!.Types,
+            type => type.FullName == "ExeBlueprint.Core.Tests.ExceptionHandlingFixture");
+        var method = Assert.Single(
+            fixture.Methods,
+            method => method.Name == nameof(ExceptionHandlingFixture.AddWithCleanup));
+
+        Assert.True(method.BodyReconstructed);
+        Assert.Contains("try", method.Body);
+        Assert.Contains("finally", method.Body);
+        Assert.Contains(method.Body, line => line.Contains("+ 10", StringComparison.Ordinal));
+        Assert.Equal("return v0;", method.Body[^1]);
+    }
+
+    [Fact]
+    public async Task LeavesUnsupportedCatchAsIl()
+    {
+        var assemblyPath = typeof(ExceptionHandlingFixture).Assembly.Location;
+        var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
+        var fixture = Assert.Single(
+            document.Files[0].Code!.Types,
+            type => type.FullName == "ExeBlueprint.Core.Tests.ExceptionHandlingFixture");
+        var method = Assert.Single(
+            fixture.Methods,
+            method => method.Name == nameof(ExceptionHandlingFixture.CatchAndReturn));
+
+        Assert.False(method.BodyReconstructed);
+        Assert.NotEmpty(method.Il);
+    }
+
+    [Fact]
     public async Task SummaryAggregatesManagedTypeAndMethodCounts()
     {
         var assemblyPath = typeof(BlueprintAnalyzer).Assembly.Location;
@@ -293,5 +328,35 @@ internal class MemberShapeFixture
         Changed?.Invoke(null, EventArgs.Empty);
         Updated?.Invoke(this, EventArgs.Empty);
         Hidden?.Invoke(this, EventArgs.Empty);
+    }
+}
+
+internal static class ExceptionHandlingFixture
+{
+    public static int AddWithCleanup(int value)
+    {
+        var result = value;
+        try
+        {
+            result += 1;
+        }
+        finally
+        {
+            result += 10;
+        }
+
+        return result;
+    }
+
+    public static int CatchAndReturn(int value)
+    {
+        try
+        {
+            return value + 1;
+        }
+        catch (InvalidOperationException)
+        {
+            return -1;
+        }
     }
 }

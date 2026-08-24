@@ -80,7 +80,9 @@ while／for 形狀（先跳條件、主體、條件、往回跳）還原成 whil
 區塊內以堆疊模擬還原載入、算式、欄位、屬性、方法呼叫、`new`、運算子、`return`、`throw`；
 auto-property 的隱藏欄位會還原成屬性名稱，運算子方法還原成運算子語法。
 呼叫時若參數型別是 char，整數常值會還原成 char 常值；區域變數會依方法的 local signature 用實際型別宣告。
-IL `switch` 跳表可還原直接 return／throw 的分支，也能處理各 case 指派區域變數後回到共同 join 的形狀；這類區域變數會提升到 switch 外並依 IL locals init 語意先設成 default。帶例外處理或非標準流程的方法目前仍會退回反組譯 IL 註解加 `NotImplementedException`。
+IL `switch` 跳表可還原直接 return／throw 的分支，也能處理各 case 指派區域變數後回到共同 join 的形狀；這類區域變數會提升到 switch 外並依 IL locals init 語意先設成 default。
+標準 `try/finally` 會依 exception region metadata 的保護區域與 handler 邊界還原，不靠跳轉位置猜測；
+跨區塊的區域變數會提升到 `try` 外並依 IL locals init 語意先設成 default。`catch`、filter、fault 或非標準例外區域目前仍會退回反組譯 IL 註解加 `NotImplementedException`。
 重建採全有或全無：遇到無法結構化的跳轉、參照編譯器產生的名稱或任何不支援的指令，就整個方法放棄，
 寧可不還原也不產出語意錯誤的程式碼。enum 會保留底層整數型別與各成員原始數值；
 型別引用已保留完整命名空間，但套件外依賴、泛型限制與巢狀型別仍可能需要手動補齊，因此不保證可直接編譯。
