@@ -316,6 +316,29 @@ public sealed class ManagedSymbolReaderTests
     }
 
     [Fact]
+    public async Task ReconstructsCompilerGeneratedCatchAndFinally()
+    {
+        var assemblyPath = typeof(ExceptionHandlingFixture).Assembly.Location;
+        var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
+        var fixture = Assert.Single(
+            document.Files[0].Code!.Types,
+            type => type.FullName == "ExeBlueprint.Core.Tests.ExceptionHandlingFixture");
+        var method = Assert.Single(
+            fixture.Methods,
+            method => method.Name == nameof(ExceptionHandlingFixture.CatchAndFinally));
+
+        Assert.True(method.BodyReconstructed);
+        Assert.Equal(2, method.Body.Count(line => line.Trim() == "try"));
+        Assert.Contains("    catch (System.DivideByZeroException caughtException0)", method.Body);
+        Assert.Contains("    catch (System.ArithmeticException)", method.Body);
+        Assert.Equal(2, method.Body.Count(line => line.TrimStart().StartsWith("catch", StringComparison.Ordinal)));
+        Assert.Contains("finally", method.Body);
+        Assert.Contains(method.Body, line => line.Contains("caughtException0.HResult", StringComparison.Ordinal));
+        Assert.DoesNotContain(method.Body, line =>
+            line.StartsWith("System.DivideByZeroException v", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task SummaryAggregatesManagedTypeAndMethodCounts()
     {
         var assemblyPath = typeof(BlueprintAnalyzer).Assembly.Location;
@@ -481,5 +504,28 @@ internal static class ExceptionHandlingFixture
         }
 
         return value;
+    }
+
+    public static int CatchAndFinally(int value)
+    {
+        var result = 0;
+        try
+        {
+            result = 10 / value;
+        }
+        catch (DivideByZeroException exception)
+        {
+            result = exception.HResult;
+        }
+        catch (ArithmeticException)
+        {
+            result = -1;
+        }
+        finally
+        {
+            result += 100;
+        }
+
+        return result;
     }
 }

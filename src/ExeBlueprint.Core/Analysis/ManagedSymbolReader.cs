@@ -510,6 +510,8 @@ internal static class ManagedSymbolReader
 
     private readonly record struct StructuredException(IReadOnlyList<string> Statements, int NextIndex);
 
+    private readonly record struct ExceptionLeaveRedirect(int JoinOffset, int TargetOffset);
+
     private sealed record CatchHandlerShape(
         ExceptionRegionInfo Region,
         int BodyStartIndex,
@@ -534,6 +536,7 @@ internal static class ManagedSymbolReader
         IReadOnlyList<string> LocalTypes,
         IReadOnlyList<ExceptionRegionInfo> ExceptionRegions,
         IReadOnlyDictionary<int, string> LocalNames,
+        ExceptionLeaveRedirect? LeaveRedirect,
         int CatchDepth);
 
     // 測試用進入點：以現成的 MetadataReader 直接餵 IL bytes 驗證還原結果。
@@ -615,6 +618,7 @@ internal static class ManagedSymbolReader
             localTypes,
             exceptionRegions,
             new Dictionary<int, string>(),
+            LeaveRedirect: null,
             CatchDepth: 0);
         return TryStructure(context, [.. instructions], offsetToIndex, 0, instructions.Count, new HashSet<int>(), 0);
     }
@@ -655,6 +659,7 @@ internal static class ManagedSymbolReader
                     .ToArray();
                 if (startingRegions.Length > 0)
                 {
+                    var outerFinally = TryFindOuterFinally(startingRegions);
                     var structuredException = startingRegions.All(region => region.Kind == ExceptionRegionKind.Catch)
                         ? TryStructureCatch(
                             context,
@@ -665,14 +670,14 @@ internal static class ManagedSymbolReader
                             startingRegions,
                             declaredLocals,
                             depth + 1)
-                        : startingRegions.Length == 1 && startingRegions[0].Kind == ExceptionRegionKind.Finally
+                        : outerFinally is ExceptionRegionInfo finallyRegion
                             ? TryStructureFinally(
                                 context,
                                 instructions,
                                 offsetToIndex,
                                 index,
                                 end,
-                                startingRegions[0],
+                                finallyRegion,
                                 declaredLocals,
                                 depth + 1)
                             : null;
@@ -756,8 +761,9 @@ internal static class ManagedSymbolReader
 
             if (instr.Name is "br" or "br.s")
             {
-                // 往前跳到本區間結尾＝順順落下，略過即可。
-                if (offsetToIndex.TryGetValue(instr.Target, out var branchIndex) && branchIndex == end)
+                // 跳到下一個指令或本區間結尾都不改變控制流程，略過即可。
+                if (offsetToIndex.TryGetValue(instr.Target, out var branchIndex) &&
+                    (branchIndex == index + 1 || branchIndex == end))
                 {
                     index++;
                     continue;
@@ -860,6 +866,34 @@ internal static class ManagedSymbolReader
         return stack.Count == 0 ? statements : null;
     }
 
+    // Roslyn 會把 try/catch/finally 編譯成內層 catch regions，再以較大的 finally region
+    // 包住整段 try/catch。只有所有同起點的其他區域都完整落在 finally 保護範圍內時才接受。
+    private static ExceptionRegionInfo? TryFindOuterFinally(IReadOnlyList<ExceptionRegionInfo> startingRegions)
+    {
+        var finallyRegions = startingRegions
+            .Where(region => region.Kind == ExceptionRegionKind.Finally)
+            .ToArray();
+        if (finallyRegions.Length != 1)
+        {
+            return null;
+        }
+
+        var outerFinally = finallyRegions[0];
+        var outerTryEnd = outerFinally.TryOffset + outerFinally.TryLength;
+        if (startingRegions.Any(region =>
+                region != outerFinally &&
+                (region.Kind != ExceptionRegionKind.Catch ||
+                 region.TryOffset != outerFinally.TryOffset ||
+                 region.TryLength >= outerFinally.TryLength ||
+                 region.HandlerOffset < region.TryOffset + region.TryLength ||
+                 region.HandlerOffset + region.HandlerLength > outerTryEnd)))
+        {
+            return null;
+        }
+
+        return outerFinally;
+    }
+
     // 同一個 try 的 catch handlers 會在 metadata 中共用保護區間，並依序排列到共同 join。
     // handler 入口的例外物件只接受 pop（未命名）或 stloc（具名）兩種標準形狀。
     private static StructuredException? TryStructureCatch(
@@ -893,6 +927,10 @@ internal static class ManagedSymbolReader
 
         var tryEndOffset = firstRegion.TryOffset + firstRegion.TryLength;
         var joinOffset = orderedRegions[^1].HandlerOffset + orderedRegions[^1].HandlerLength;
+        var leaveTarget = context.LeaveRedirect is ExceptionLeaveRedirect redirect &&
+                          redirect.JoinOffset == joinOffset
+            ? redirect.TargetOffset
+            : joinOffset;
         if (!offsetToIndex.TryGetValue(tryEndOffset, out var tryEndIndex) ||
             !offsetToIndex.TryGetValue(joinOffset, out var joinIndex) ||
             tryStartIndex >= tryEndIndex ||
@@ -904,7 +942,7 @@ internal static class ManagedSymbolReader
         }
 
         var tryLeave = instructions[tryEndIndex - 1];
-        if (tryLeave.Name is not ("leave" or "leave.s") || tryLeave.Target != joinOffset)
+        if (tryLeave.Name is not ("leave" or "leave.s") || tryLeave.Target != leaveTarget)
         {
             return null;
         }
@@ -929,7 +967,7 @@ internal static class ManagedSymbolReader
             int handlerBodyEnd;
             if (handlerLast.Name is "leave" or "leave.s")
             {
-                if (handlerLast.Target != joinOffset)
+                if (handlerLast.Target != leaveTarget)
                 {
                     return null;
                 }
@@ -1142,13 +1180,48 @@ internal static class ManagedSymbolReader
             return null;
         }
 
-        var tryBodyEnd = tryEndIndex - 1;
+        // Release 最佳化會讓內層 try/catch 的所有 leave 直接跳過 finally，且最後一個
+        // catch handler 恰好結束在 finally handler 起點；此時尾端 leave 屬於 catch，不能先剝掉。
+        var hasRedirectedCatchLeaves = context.ExceptionRegions.Any(candidate =>
+            candidate.Kind == ExceptionRegionKind.Catch &&
+            candidate.TryOffset == region.TryOffset &&
+            candidate.HandlerOffset + candidate.HandlerLength == tryEndOffset);
+        var tryBodyEnd = hasRedirectedCatchLeaves ? tryEndIndex : tryEndIndex - 1;
         var finallyBodyEnd = handlerEndIndex - 1;
+        var nestedCatchExceptionLocals = new HashSet<int>();
+        foreach (var nestedCatch in context.ExceptionRegions.Where(candidate =>
+                     candidate.Kind == ExceptionRegionKind.Catch &&
+                     candidate.TryOffset >= region.TryOffset &&
+                     candidate.TryOffset + candidate.TryLength <= tryEndOffset &&
+                     candidate.HandlerOffset >= region.TryOffset &&
+                     candidate.HandlerOffset + candidate.HandlerLength <= tryEndOffset))
+        {
+            if (!offsetToIndex.TryGetValue(nestedCatch.HandlerOffset, out var nestedHandlerStartIndex))
+            {
+                return null;
+            }
+
+            var prologue = instructions[nestedHandlerStartIndex];
+            if (prologue.Name == "pop")
+            {
+                continue;
+            }
+
+            var exceptionLocalIndex = TryGetStoredLocalIndex(context, prologue);
+            if (exceptionLocalIndex is null)
+            {
+                return null;
+            }
+
+            nestedCatchExceptionLocals.Add(exceptionLocalIndex.Value);
+        }
+
         var storedLocals = instructions[tryStartIndex..tryBodyEnd]
             .Concat(instructions[handlerStartIndex..finallyBodyEnd])
             .Select(instruction => TryGetStoredLocalIndex(context, instruction))
             .Where(localIndex => localIndex is not null)
             .Select(localIndex => localIndex!.Value)
+            .Where(localIndex => !nestedCatchExceptionLocals.Contains(localIndex))
             .Distinct()
             .Order()
             .ToArray();
@@ -1178,7 +1251,12 @@ internal static class ManagedSymbolReader
                 .ToArray()
         };
         var tryBody = TryStructure(
-            nestedContext,
+            hasRedirectedCatchLeaves
+                ? nestedContext with
+                {
+                    LeaveRedirect = new ExceptionLeaveRedirect(tryEndOffset, handlerEndOffset)
+                }
+                : nestedContext,
             instructions,
             offsetToIndex,
             tryStartIndex,
@@ -1186,7 +1264,7 @@ internal static class ManagedSymbolReader
             new HashSet<int>(declaredLocals),
             depth);
         var finallyBody = TryStructure(
-            nestedContext,
+            nestedContext with { LeaveRedirect = context.LeaveRedirect },
             instructions,
             offsetToIndex,
             handlerStartIndex,

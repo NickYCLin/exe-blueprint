@@ -64,6 +64,23 @@ public sealed class IlBodyReconstructionTests
     }
 
     [Fact]
+    public void IgnoresBranchToImmediatelyFollowingInstruction()
+    {
+        byte[] il =
+        [
+            0x02,       // IL_0000 ldarg.0
+            0x0A,       // IL_0001 stloc.0
+            0x2B, 0x00, // IL_0002 br.s IL_0004
+            0x06,       // IL_0004 ldloc.0
+            0x2A        // IL_0005 ret
+        ];
+
+        var body = Reconstruct(il, isInstance: false, returnType: "int");
+
+        Assert.Equal(["var v0 = arg0;", "return v0;"], body);
+    }
+
+    [Fact]
     public void ReconstructsIf()
     {
         // static int M(int n) { if (n == 5) { return 1; } return 2; }
@@ -300,6 +317,79 @@ public sealed class IlBodyReconstructionTests
                 "catch (System.InvalidOperationException)",
                 "{",
                 "    v0 = -1;",
+                "}",
+                "return v0;"
+            ],
+            body);
+    }
+
+    [Fact]
+    public void ReconstructsCombinedCatchAndFinallyFromNestedExceptionRegions()
+    {
+        // static int M(int n) { try { result = n + 1; } catch (Exception) { result = -1; }
+        // finally { result += 10; } return result; }
+        byte[] il =
+        [
+            0x02,       // IL_0000 ldarg.0
+            0x17,       // IL_0001 ldc.i4.1
+            0x58,       // IL_0002 add
+            0x0A,       // IL_0003 stloc.0
+            0xDE, 0x05, // IL_0004 leave.s IL_000B
+            0x26,       // IL_0006 pop
+            0x15,       // IL_0007 ldc.i4.m1
+            0x0A,       // IL_0008 stloc.0
+            0xDE, 0x00, // IL_0009 leave.s IL_000B
+            0xDE, 0x06, // IL_000B leave.s IL_0013
+            0x06,       // IL_000D ldloc.0
+            0x1F, 0x0A, // IL_000E ldc.i4.s 10
+            0x58,       // IL_0010 add
+            0x0A,       // IL_0011 stloc.0
+            0xDC,       // IL_0012 endfinally
+            0x06,       // IL_0013 ldloc.0
+            0x2A        // IL_0014 ret
+        ];
+        var regions = new[]
+        {
+            new ManagedSymbolReader.ExceptionRegionInfo(
+                ExceptionRegionKind.Catch,
+                TryOffset: 0,
+                TryLength: 6,
+                HandlerOffset: 6,
+                HandlerLength: 5,
+                CatchType: "System.Exception"),
+            new ManagedSymbolReader.ExceptionRegionInfo(
+                ExceptionRegionKind.Finally,
+                TryOffset: 0,
+                TryLength: 13,
+                HandlerOffset: 13,
+                HandlerLength: 6)
+        };
+
+        var body = Reconstruct(
+            il,
+            isInstance: false,
+            returnType: "int",
+            localTypes: ["int"],
+            exceptionRegions: regions);
+
+        Assert.NotNull(body);
+        Assert.Equal(
+            [
+                "int v0 = default;",
+                "try",
+                "{",
+                "    try",
+                "    {",
+                "        v0 = (arg0 + 1);",
+                "    }",
+                "    catch (System.Exception)",
+                "    {",
+                "        v0 = -1;",
+                "    }",
+                "}",
+                "finally",
+                "{",
+                "    v0 = (v0 + 10);",
                 "}",
                 "return v0;"
             ],
