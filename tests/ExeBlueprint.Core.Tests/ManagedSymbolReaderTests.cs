@@ -156,6 +156,26 @@ public sealed class ManagedSymbolReaderTests
     }
 
     [Fact]
+    public async Task ReconstructsIndexerAccessors()
+    {
+        var assemblyPath = typeof(ManagedSymbolReaderTests).Assembly.Location;
+        var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
+        var fixture = Assert.Single(
+            document.Files[0].Code!.Types,
+            type => type.FullName == typeof(TypedArgumentFixture).FullName);
+
+        var getter = Assert.Single(
+            fixture.Methods,
+            method => method.Name == nameof(TypedArgumentFixture.ReadCharacter));
+        Assert.Contains("return value[index];", getter.Body);
+
+        var setter = Assert.Single(
+            fixture.Methods,
+            method => method.Name == nameof(TypedArgumentFixture.SetDictionaryValue));
+        Assert.Contains("values[key] = value;", setter.Body);
+    }
+
+    [Fact]
     public async Task ReconstructsConditionalBranchesIntoIfStatements()
     {
         var assemblyPath = typeof(BlueprintAnalyzer).Assembly.Location;
@@ -757,6 +777,11 @@ internal static class TypedArgumentFixture
 
     public static void DeleteNonRecursively(string path) =>
         Directory.Delete(path, recursive: false);
+
+    public static char ReadCharacter(string value, int index) => value[index];
+
+    public static void SetDictionaryValue(Dictionary<string, string> values, string key, string value) =>
+        values[key] = value;
 }
 
 internal sealed class ReferenceConditionFixture(string? value)

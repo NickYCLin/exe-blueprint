@@ -2679,15 +2679,42 @@ internal static class ManagedSymbolReader
 
         var target = info.HasThis ? receiver! : info.DeclaringType;
 
-        if (info.Name.StartsWith("get_", StringComparison.Ordinal) && info.ParamCount == 0)
+        if (info.Name.StartsWith("get_", StringComparison.Ordinal))
         {
-            PushExpression(context, stack, $"{target}.{info.Name["get_".Length..]}", info.ReturnType);
+            if (info.ParamCount == 0)
+            {
+                PushExpression(context, stack, $"{target}.{info.Name["get_".Length..]}", info.ReturnType);
+                return true;
+            }
+
+            if (!info.HasThis)
+            {
+                return false;
+            }
+
+            PushExpression(context, stack, $"{target}[{string.Join(", ", args)}]", info.ReturnType);
             return true;
         }
 
-        if (info.Name.StartsWith("set_", StringComparison.Ordinal) && info.ParamCount == 1 && info.ReturnsVoid)
+        if (info.Name.StartsWith("set_", StringComparison.Ordinal))
         {
-            statements.Add($"{target}.{info.Name["set_".Length..]} = {args[0]};");
+            if (!info.ReturnsVoid || info.ParamCount == 0)
+            {
+                return false;
+            }
+
+            if (info.ParamCount == 1)
+            {
+                statements.Add($"{target}.{info.Name["set_".Length..]} = {args[0]};");
+                return true;
+            }
+
+            if (!info.HasThis)
+            {
+                return false;
+            }
+
+            statements.Add($"{target}[{string.Join(", ", args[..^1])}] = {args[^1]};");
             return true;
         }
 

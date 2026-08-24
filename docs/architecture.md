@@ -79,6 +79,7 @@ Ghidra 安裝目錄來自 `--ghidra` 或環境變數 `GHIDRA_INSTALL_DIR`。找�
 while／for 形狀（先跳條件、主體、條件、往回跳）還原成 while，並把底測式（往回跳收尾）還原成 do-while（皆可巢狀）；
 區塊內以堆疊模擬還原載入、算式、欄位、屬性、方法呼叫、`new`、運算子、`return`、`throw`；
 auto-property 的隱藏欄位會還原成屬性名稱，運算子方法還原成運算子語法。
+一般 property accessor 會輸出成成員存取，帶索引參數的 instance accessor 則會還原成 `target[index]` getter 或 setter，避免顯式呼叫 C# 禁止的 `get_*`／`set_*` 方法。
 呼叫時會依正式參數型別，把 IL 整數常值還原成 bool、char 或具明確轉型的 enum 引數；區域變數會依方法的 local signature 用實際型別宣告。
 重建 context 也會追蹤參數、區域變數、欄位、運算式與呼叫回傳型別；`brtrue`／`brfalse` 遇到參考型別時會輸出 `is null`／`is not null`，避免把物件直接當成 C# bool 條件。
 IL enum 位元運算的整數常值會轉回另一側的 enum 型別，enum selector 的 `switch` case 常值也會套用相同型別，避免輸出無法編譯的 enum／int 混合運算。
