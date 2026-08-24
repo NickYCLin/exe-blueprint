@@ -314,6 +314,11 @@ internal static class ManagedSymbolReader
                 }
 
                 var count = BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(position, 4));
+                if (count < 0 || count > (il.Length - position - 4) / 4)
+                {
+                    yield break;
+                }
+
                 var total = 4 + (count * 4);
                 yield return new IlInstruction(offset, opValue, position, total);
                 position += total;
@@ -363,10 +368,38 @@ internal static class ManagedSymbolReader
             case OperandType.ShortInlineBrTarget:
                 return $" IL_{offset + 1 + (sbyte)il[offset]:X4}";
             case OperandType.InlineSwitch:
-                return $" ({(instruction.OperandSize - 4) / 4} targets)";
+                var switchTargets = ReadSwitchTargets(il, instruction);
+                return switchTargets is null
+                    ? " (invalid targets)"
+                    : $" ({string.Join(", ", switchTargets.Select(target => $"IL_{target:X4}"))})";
             default:
                 return string.Empty;
         }
+    }
+
+    private static int[]? ReadSwitchTargets(byte[] il, IlInstruction instruction)
+    {
+        if (instruction.OperandSize < 4 ||
+            instruction.OperandOffset + instruction.OperandSize > il.Length)
+        {
+            return null;
+        }
+
+        var count = BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(instruction.OperandOffset, 4));
+        if (count < 0 || instruction.OperandSize != 4 + (count * 4))
+        {
+            return null;
+        }
+
+        var targets = new int[count];
+        var baseOffset = instruction.OperandOffset + instruction.OperandSize;
+        for (var index = 0; index < count; index++)
+        {
+            var deltaOffset = instruction.OperandOffset + 4 + (index * 4);
+            targets[index] = baseOffset + BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(deltaOffset, 4));
+        }
+
+        return targets;
     }
 
     private static string FormatUserString(MetadataReader metadata, int token)
@@ -429,7 +462,13 @@ internal static class ManagedSymbolReader
 
     private const int MaxStructureDepth = 32;
 
-    private readonly record struct Instr(int Offset, string Name, int OperandOffset, bool IsBranch, int Target);
+    private readonly record struct Instr(
+        int Offset,
+        string Name,
+        int OperandOffset,
+        bool IsBranch,
+        int Target,
+        IReadOnlyList<int> SwitchTargets);
 
     private sealed record ReconContext(
         MetadataReader Metadata,
@@ -449,7 +488,7 @@ internal static class ManagedSymbolReader
         TryReconstructLinearBody(metadata, il, isInstance, new Dictionary<int, string>(), returnType, localTypes ?? []);
 
     // 把方法的 IL 還原成 C#。先解碼成指令陣列，再用區間遞迴結構化還原 if／if-else（可巢狀）。
-    // 採全有或全無：遇到迴圈（回跳）、switch、例外處理或任何無法結構化的跳轉就整個方法放棄，
+    // 採全有或全無：遇到無法安全切開的迴圈、非終止型 switch、例外處理或任何無法結構化的跳轉就整個方法放棄，
     // 退回 IL 註解，寧可不還原也不要產出語意錯誤的程式碼。輸出的 C# 不保證能編譯，但語意貼近原程式。
     private static IReadOnlyList<string>? TryReconstructLinearBody(
         MetadataReader metadata,
@@ -469,12 +508,9 @@ internal static class ManagedSymbolReader
             }
 
             var operandType = opCode.OperandType;
-            if (operandType == OperandType.InlineSwitch)
-            {
-                return null;
-            }
 
             var target = -1;
+            IReadOnlyList<int> switchTargets = [];
             if (operandType == OperandType.ShortInlineBrTarget)
             {
                 target = instruction.OperandOffset + 1 + (sbyte)il[instruction.OperandOffset];
@@ -483,9 +519,23 @@ internal static class ManagedSymbolReader
             {
                 target = instruction.OperandOffset + 4 + BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(instruction.OperandOffset, 4));
             }
+            else if (operandType == OperandType.InlineSwitch)
+            {
+                switchTargets = ReadSwitchTargets(il, instruction) ?? [];
+                if (switchTargets.Count == 0)
+                {
+                    return null;
+                }
+            }
 
             offsetToIndex[instruction.Offset] = instructions.Count;
-            instructions.Add(new Instr(instruction.Offset, opCode.Name!, instruction.OperandOffset, target >= 0, target));
+            instructions.Add(new Instr(
+                instruction.Offset,
+                opCode.Name!,
+                instruction.OperandOffset,
+                target >= 0 || switchTargets.Count > 0,
+                target,
+                switchTargets));
         }
 
         offsetToIndex[il.Length] = instructions.Count;
@@ -543,6 +593,32 @@ internal static class ManagedSymbolReader
             }
 
             var instr = instructions[index];
+            if (instr.Name == "switch")
+            {
+                if (!TryPop(stack, out var selector) || stack.Count != 0)
+                {
+                    return null;
+                }
+
+                var switchStatements = TryStructureTerminalSwitch(
+                    context,
+                    instructions,
+                    offsetToIndex,
+                    index,
+                    end,
+                    selector,
+                    declaredLocals,
+                    depth + 1);
+                if (switchStatements is null)
+                {
+                    return null;
+                }
+
+                statements.AddRange(switchStatements);
+                index = end;
+                continue;
+            }
+
             if (!instr.IsBranch)
             {
                 if (!ApplySimpleInstruction(context, instr, stack, statements, declaredLocals, out var terminal))
@@ -659,6 +735,104 @@ internal static class ManagedSymbolReader
         }
 
         return stack.Count == 0 ? statements : null;
+    }
+
+    // 支援 Roslyn 常見的終止型 switch：default 先跳到自己的區塊，各 case/default 最後直接 return 或 throw。
+    // 共用 join 或需要把區域變數帶出 switch 的形狀暫不處理，避免產生作用域錯誤的 C#。
+    private static List<string>? TryStructureTerminalSwitch(
+        ReconContext context,
+        Instr[] instructions,
+        Dictionary<int, int> offsetToIndex,
+        int switchIndex,
+        int end,
+        string selector,
+        HashSet<int> declaredLocals,
+        int depth)
+    {
+        if (depth > MaxStructureDepth || switchIndex + 1 >= end)
+        {
+            return null;
+        }
+
+        var instruction = instructions[switchIndex];
+        var caseTargets = new List<(int Value, int Index)>();
+        for (var value = 0; value < instruction.SwitchTargets.Count; value++)
+        {
+            var target = instruction.SwitchTargets[value];
+            if (!offsetToIndex.TryGetValue(target, out var targetIndex) ||
+                targetIndex <= switchIndex ||
+                targetIndex >= end)
+            {
+                return null;
+            }
+
+            caseTargets.Add((value, targetIndex));
+        }
+
+        var fallThroughIndex = switchIndex + 1;
+        var defaultIndex = fallThroughIndex;
+        var fallThrough = instructions[fallThroughIndex];
+        if (fallThrough.Name is "br" or "br.s")
+        {
+            if (!offsetToIndex.TryGetValue(fallThrough.Target, out defaultIndex) ||
+                defaultIndex <= fallThroughIndex ||
+                defaultIndex >= end)
+            {
+                return null;
+            }
+
+            fallThroughIndex++;
+        }
+
+        var blockStarts = caseTargets
+            .Select(target => target.Index)
+            .Append(defaultIndex)
+            .Distinct()
+            .Order()
+            .ToArray();
+        if (blockStarts.Length == 0 || blockStarts[0] != fallThroughIndex)
+        {
+            return null;
+        }
+
+        var statements = new List<string> { $"switch ({selector})", "{" };
+        for (var block = 0; block < blockStarts.Length; block++)
+        {
+            var blockStart = blockStarts[block];
+            var blockEnd = block + 1 < blockStarts.Length ? blockStarts[block + 1] : end;
+            if (blockStart >= blockEnd || instructions[blockEnd - 1].Name is not ("ret" or "throw"))
+            {
+                return null;
+            }
+
+            foreach (var (value, _) in caseTargets.Where(target => target.Index == blockStart))
+            {
+                statements.Add($"    case {value}:");
+            }
+
+            if (defaultIndex == blockStart)
+            {
+                statements.Add("    default:");
+            }
+
+            var body = TryStructure(
+                context,
+                instructions,
+                offsetToIndex,
+                blockStart,
+                blockEnd,
+                new HashSet<int>(declaredLocals),
+                depth);
+            if (body is null)
+            {
+                return null;
+            }
+
+            statements.AddRange(body.Select(line => $"        {line}"));
+        }
+
+        statements.Add("}");
+        return statements;
     }
 
     // 依分支指令算出「順順落下（fall-through）」時的 C# 條件，也就是不跳轉時該執行 then 區塊的條件。

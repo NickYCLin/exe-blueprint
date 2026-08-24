@@ -68,7 +68,12 @@ public sealed class ManagedSymbolReaderTests
             {
                 var trimmed = statement.Trim();
                 Assert.True(
-                    trimmed.EndsWith(';') || trimmed is "{" or "}" or "else" || trimmed.StartsWith("if (", StringComparison.Ordinal),
+                    trimmed.EndsWith(';')
+                    || trimmed is "{" or "}" or "else" or "do" or "default:"
+                    || trimmed.StartsWith("if (", StringComparison.Ordinal)
+                    || trimmed.StartsWith("while (", StringComparison.Ordinal)
+                    || trimmed.StartsWith("switch (", StringComparison.Ordinal)
+                    || trimmed.StartsWith("case ", StringComparison.Ordinal),
                     $"未預期的重建輸出：{statement}");
             });
         }
@@ -139,6 +144,23 @@ public sealed class ManagedSymbolReaderTests
 
         var sparse = Assert.Single(enumType.Fields, field => field.Name == nameof(LongBackedTestEnum.Sparse));
         Assert.Equal("42", sparse.ConstantValue?.Value);
+    }
+
+    [Fact]
+    public async Task ReconstructsCompilerGeneratedSwitchTable()
+    {
+        var assemblyPath = typeof(SwitchFixture).Assembly.Location;
+        var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
+        var fixture = Assert.Single(
+            document.Files[0].Code!.Types,
+            type => type.FullName == "ExeBlueprint.Core.Tests.SwitchFixture");
+        var method = Assert.Single(fixture.Methods, method => method.Name == nameof(SwitchFixture.TerminalCases));
+
+        Assert.True(method.BodyReconstructed);
+        Assert.Contains("switch (value)", method.Body);
+        Assert.Contains("    case 2:", method.Body);
+        Assert.Contains("        return 99;", method.Body);
+        Assert.Contains(method.Il, instruction => instruction.Contains("switch (IL_", StringComparison.Ordinal));
     }
 
     [Fact]

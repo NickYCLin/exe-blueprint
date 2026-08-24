@@ -87,6 +87,75 @@ public sealed class IlBodyReconstructionTests
     }
 
     [Fact]
+    public void ReconstructsTerminalSwitchCases()
+    {
+        // static int M(int n) => n switch { 0 => 10, 1 => 20, 2 => 30, _ => 99 };
+        byte[] il =
+        [
+            0x02,                         // IL_0000 ldarg.0
+            0x45, 0x03, 0x00, 0x00, 0x00, // IL_0001 switch (3 targets)
+            0x02, 0x00, 0x00, 0x00,       // case 0 -> IL_0014
+            0x05, 0x00, 0x00, 0x00,       // case 1 -> IL_0017
+            0x08, 0x00, 0x00, 0x00,       // case 2 -> IL_001A
+            0x2B, 0x09,                   // IL_0012 br.s default (IL_001D)
+            0x1F, 0x0A, 0x2A,             // IL_0014 ldc.i4.s 10; ret
+            0x1F, 0x14, 0x2A,             // IL_0017 ldc.i4.s 20; ret
+            0x1F, 0x1E, 0x2A,             // IL_001A ldc.i4.s 30; ret
+            0x1F, 0x63, 0x2A              // IL_001D ldc.i4.s 99; ret
+        ];
+
+        var body = Reconstruct(il, isInstance: false, returnType: "int");
+
+        Assert.NotNull(body);
+        Assert.Equal(
+            [
+                "switch (arg0)",
+                "{",
+                "    case 0:",
+                "        return 10;",
+                "    case 1:",
+                "        return 20;",
+                "    case 2:",
+                "        return 30;",
+                "    default:",
+                "        return 99;",
+                "}"
+            ],
+            body);
+    }
+
+    [Fact]
+    public void ReconstructsGroupedCasesAndFallThroughDefault()
+    {
+        // case 0 與 case 1 共用同一個 target；default 直接接在 switch 後面，沒有額外 br。
+        byte[] il =
+        [
+            0x02,                         // IL_0000 ldarg.0
+            0x45, 0x02, 0x00, 0x00, 0x00, // IL_0001 switch (2 targets)
+            0x03, 0x00, 0x00, 0x00,       // case 0 -> IL_0011
+            0x03, 0x00, 0x00, 0x00,       // case 1 -> IL_0011
+            0x1F, 0x63, 0x2A,             // IL_000E default: ldc.i4.s 99; ret
+            0x1F, 0x0A, 0x2A              // IL_0011 cases: ldc.i4.s 10; ret
+        ];
+
+        var body = Reconstruct(il, isInstance: false, returnType: "int");
+
+        Assert.NotNull(body);
+        Assert.Equal(
+            [
+                "switch (arg0)",
+                "{",
+                "    default:",
+                "        return 99;",
+                "    case 0:",
+                "    case 1:",
+                "        return 10;",
+                "}"
+            ],
+            body);
+    }
+
+    [Fact]
     public void BailsOnBackwardInfiniteLoop()
     {
         // BODY: nop; br.s BODY  -> while(true), 目前不支援，應放棄。
@@ -106,5 +175,23 @@ public sealed class IlBodyReconstructionTests
         using var peReader = new PEReader(File.OpenRead(assemblyPath));
         var metadata = peReader.GetMetadataReader();
         return ManagedSymbolReader.ReconstructBodyForTest(metadata, il, isInstance, returnType);
+    }
+}
+
+internal static class SwitchFixture
+{
+    public static int TerminalCases(int value)
+    {
+        switch (value)
+        {
+            case 0:
+                return 10;
+            case 1:
+                return 20;
+            case 2:
+                return 30;
+            default:
+                return 99;
+        }
     }
 }

@@ -79,7 +79,7 @@ while／for 形狀（先跳條件、主體、條件、往回跳）還原成 whil
 區塊內以堆疊模擬還原載入、算式、欄位、屬性、方法呼叫、`new`、運算子、`return`、`throw`；
 auto-property 的隱藏欄位會還原成屬性名稱，運算子方法還原成運算子語法。
 呼叫時若參數型別是 char，整數常值會還原成 char 常值；區域變數會依方法的 local signature 用實際型別宣告。
-帶 switch、例外處理或非標準流程的方法目前還原不了，會退回反組譯 IL 註解加 `NotImplementedException`。
+IL `switch` 跳表若每個 case 與 default 都直接 return／throw，也會還原成 C# switch；帶共用 join、例外處理或非標準流程的方法目前仍會退回反組譯 IL 註解加 `NotImplementedException`。
 重建採全有或全無：遇到無法結構化的跳轉、參照編譯器產生的名稱或任何不支援的指令，就整個方法放棄，
 寧可不還原也不產出語意錯誤的程式碼。enum 會保留底層整數型別與各成員原始數值；型別名稱未加命名空間 using，所以不保證可直接編譯。
 
