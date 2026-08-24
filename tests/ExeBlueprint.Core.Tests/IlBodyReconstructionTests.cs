@@ -254,6 +254,87 @@ public sealed class IlBodyReconstructionTests
     }
 
     [Fact]
+    public void ReconstructsCatchFromExceptionRegion()
+    {
+        // static int M(int n) { try { return n + 1; } catch (InvalidOperationException) { return -1; } }
+        byte[] il =
+        [
+            0x02,       // IL_0000 ldarg.0
+            0x17,       // IL_0001 ldc.i4.1
+            0x58,       // IL_0002 add
+            0x0A,       // IL_0003 stloc.0
+            0xDE, 0x05, // IL_0004 leave.s IL_000B
+            0x26,       // IL_0006 pop
+            0x15,       // IL_0007 ldc.i4.m1
+            0x0A,       // IL_0008 stloc.0
+            0xDE, 0x00, // IL_0009 leave.s IL_000B
+            0x06,       // IL_000B ldloc.0
+            0x2A        // IL_000C ret
+        ];
+        var regions = new[]
+        {
+            new ManagedSymbolReader.ExceptionRegionInfo(
+                ExceptionRegionKind.Catch,
+                TryOffset: 0,
+                TryLength: 6,
+                HandlerOffset: 6,
+                HandlerLength: 5,
+                CatchType: "System.InvalidOperationException")
+        };
+
+        var body = Reconstruct(
+            il,
+            isInstance: false,
+            returnType: "int",
+            localTypes: ["int"],
+            exceptionRegions: regions);
+
+        Assert.NotNull(body);
+        Assert.Equal(
+            [
+                "int v0 = default;",
+                "try",
+                "{",
+                "    v0 = (arg0 + 1);",
+                "}",
+                "catch (System.InvalidOperationException)",
+                "{",
+                "    v0 = -1;",
+                "}",
+                "return v0;"
+            ],
+            body);
+    }
+
+    [Fact]
+    public void BailsOnUnsupportedFilterRegion()
+    {
+        byte[] il =
+        [
+            0x00,       // IL_0000 nop
+            0xDE, 0x03, // IL_0001 leave.s IL_0006
+            0x26,       // IL_0003 pop
+            0xDE, 0x00, // IL_0004 leave.s IL_0006
+            0x2A        // IL_0006 ret
+        ];
+        var regions = new[]
+        {
+            new ManagedSymbolReader.ExceptionRegionInfo(
+                ExceptionRegionKind.Filter,
+                TryOffset: 0,
+                TryLength: 3,
+                HandlerOffset: 3,
+                HandlerLength: 3)
+        };
+
+        Assert.Null(Reconstruct(
+            il,
+            isInstance: false,
+            returnType: "void",
+            exceptionRegions: regions));
+    }
+
+    [Fact]
     public void BailsOnBackwardInfiniteLoop()
     {
         // BODY: nop; br.s BODY  -> while(true), 目前不支援，應放棄。

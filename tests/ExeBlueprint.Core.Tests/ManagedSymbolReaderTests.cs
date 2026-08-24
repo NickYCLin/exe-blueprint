@@ -73,6 +73,7 @@ public sealed class ManagedSymbolReaderTests
                     || trimmed.StartsWith("if (", StringComparison.Ordinal)
                     || trimmed.StartsWith("while (", StringComparison.Ordinal)
                     || trimmed.StartsWith("switch (", StringComparison.Ordinal)
+                    || trimmed.StartsWith("catch", StringComparison.Ordinal)
                     || trimmed.StartsWith("case ", StringComparison.Ordinal),
                     $"未預期的重建輸出：{statement}");
             });
@@ -239,7 +240,7 @@ public sealed class ManagedSymbolReaderTests
     }
 
     [Fact]
-    public async Task LeavesUnsupportedCatchAsIl()
+    public async Task ReconstructsCompilerGeneratedCatch()
     {
         var assemblyPath = typeof(ExceptionHandlingFixture).Assembly.Location;
         var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
@@ -250,8 +251,68 @@ public sealed class ManagedSymbolReaderTests
             fixture.Methods,
             method => method.Name == nameof(ExceptionHandlingFixture.CatchAndReturn));
 
-        Assert.False(method.BodyReconstructed);
-        Assert.NotEmpty(method.Il);
+        Assert.True(method.BodyReconstructed);
+        Assert.Contains("catch (System.InvalidOperationException)", method.Body);
+        Assert.Contains("    v0 = -1;", method.Body);
+        Assert.Equal("return v0;", method.Body[^1]);
+    }
+
+    [Fact]
+    public async Task ReconstructsMultipleCatchHandlers()
+    {
+        var assemblyPath = typeof(ExceptionHandlingFixture).Assembly.Location;
+        var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
+        var fixture = Assert.Single(
+            document.Files[0].Code!.Types,
+            type => type.FullName == "ExeBlueprint.Core.Tests.ExceptionHandlingFixture");
+        var method = Assert.Single(
+            fixture.Methods,
+            method => method.Name == nameof(ExceptionHandlingFixture.MultipleCatch));
+
+        Assert.True(method.BodyReconstructed);
+        Assert.Contains("catch (System.DivideByZeroException)", method.Body);
+        Assert.Contains("catch (System.ArithmeticException)", method.Body);
+        Assert.Equal(2, method.Body.Count(line => line.StartsWith("catch", StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public async Task ReconstructsNamedCatchVariable()
+    {
+        var assemblyPath = typeof(ExceptionHandlingFixture).Assembly.Location;
+        var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
+        var fixture = Assert.Single(
+            document.Files[0].Code!.Types,
+            type => type.FullName == "ExeBlueprint.Core.Tests.ExceptionHandlingFixture");
+        var method = Assert.Single(
+            fixture.Methods,
+            method => method.Name == nameof(ExceptionHandlingFixture.CatchVariable));
+
+        Assert.True(method.BodyReconstructed);
+        Assert.Contains("catch (System.InvalidOperationException caughtException0)", method.Body);
+        Assert.Contains(method.Body, line => line.Contains("caughtException0.HResult", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task ReconstructsCatchAllAndRethrow()
+    {
+        var assemblyPath = typeof(ExceptionHandlingFixture).Assembly.Location;
+        var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
+        var fixture = Assert.Single(
+            document.Files[0].Code!.Types,
+            type => type.FullName == "ExeBlueprint.Core.Tests.ExceptionHandlingFixture");
+
+        var catchAll = Assert.Single(
+            fixture.Methods,
+            method => method.Name == nameof(ExceptionHandlingFixture.CatchAll));
+        Assert.True(catchAll.BodyReconstructed);
+        Assert.Contains("catch", catchAll.Body);
+
+        var rethrow = Assert.Single(
+            fixture.Methods,
+            method => method.Name == nameof(ExceptionHandlingFixture.Rethrow));
+        Assert.True(rethrow.BodyReconstructed);
+        Assert.Contains("catch (System.InvalidOperationException)", rethrow.Body);
+        Assert.Contains("    throw;", rethrow.Body);
     }
 
     [Fact]
@@ -358,5 +419,67 @@ internal static class ExceptionHandlingFixture
         {
             return -1;
         }
+    }
+
+    public static int MultipleCatch(int value)
+    {
+        try
+        {
+            return 10 / value;
+        }
+        catch (DivideByZeroException)
+        {
+            return -1;
+        }
+        catch (ArithmeticException)
+        {
+            return -2;
+        }
+    }
+
+    public static int CatchVariable(int value)
+    {
+        try
+        {
+            if (value < 0)
+            {
+                throw new InvalidOperationException();
+            }
+
+            return value;
+        }
+        catch (InvalidOperationException exception)
+        {
+            return exception.HResult;
+        }
+    }
+
+    public static int CatchAll(int value)
+    {
+        try
+        {
+            return 10 / value;
+        }
+        catch
+        {
+            return -1;
+        }
+    }
+
+    public static int Rethrow(int value)
+    {
+        try
+        {
+            if (value < 0)
+            {
+                throw new InvalidOperationException();
+            }
+        }
+        catch (InvalidOperationException)
+        {
+            throw;
+        }
+
+        return value;
     }
 }

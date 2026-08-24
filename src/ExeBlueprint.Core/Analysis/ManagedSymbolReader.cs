@@ -84,7 +84,7 @@ internal static class ManagedSymbolReader
                 var declaringName = BuildTypeFullName(namespaceName, name);
                 var il = hasBody ? TryReadIl(peReader, method) : null;
                 var localTypes = hasBody ? TryReadLocalTypes(peReader, method) : [];
-                var exceptionRegions = hasBody ? TryReadExceptionRegions(peReader, method) : [];
+                var exceptionRegions = hasBody ? TryReadExceptionRegions(peReader, metadata, method) : [];
 
                 var model = BuildMethod(metadata, methodHandle, method, methodName, hasBody, entryPointMethod.Handle);
                 if (il is { Length: > 0 })
@@ -224,6 +224,7 @@ internal static class ManagedSymbolReader
 
     private static IReadOnlyList<ExceptionRegionInfo> TryReadExceptionRegions(
         PEReader peReader,
+        MetadataReader metadata,
         MethodDefinition method)
     {
         try
@@ -236,7 +237,10 @@ internal static class ManagedSymbolReader
                     region.TryOffset,
                     region.TryLength,
                     region.HandlerOffset,
-                    region.HandlerLength))
+                    region.HandlerLength,
+                    region.Kind == ExceptionRegionKind.Catch && !region.CatchType.IsNil
+                        ? GetTypeName(metadata, region.CatchType)
+                        : null))
                 .ToArray();
         }
         catch (Exception exception) when (exception is BadImageFormatException or InvalidOperationException)
@@ -506,12 +510,20 @@ internal static class ManagedSymbolReader
 
     private readonly record struct StructuredException(IReadOnlyList<string> Statements, int NextIndex);
 
+    private sealed record CatchHandlerShape(
+        ExceptionRegionInfo Region,
+        int BodyStartIndex,
+        int BodyEndIndex,
+        int? ExceptionLocalIndex,
+        string? ExceptionVariableName);
+
     internal readonly record struct ExceptionRegionInfo(
         ExceptionRegionKind Kind,
         int TryOffset,
         int TryLength,
         int HandlerOffset,
-        int HandlerLength);
+        int HandlerLength,
+        string? CatchType = null);
 
     private sealed record ReconContext(
         MetadataReader Metadata,
@@ -520,7 +532,9 @@ internal static class ManagedSymbolReader
         bool IsInstance,
         string ReturnType,
         IReadOnlyList<string> LocalTypes,
-        IReadOnlyList<ExceptionRegionInfo> ExceptionRegions);
+        IReadOnlyList<ExceptionRegionInfo> ExceptionRegions,
+        IReadOnlyDictionary<int, string> LocalNames,
+        int CatchDepth);
 
     // 測試用進入點：以現成的 MetadataReader 直接餵 IL bytes 驗證還原結果。
     internal static IReadOnlyList<string>? ReconstructBodyForTest(
@@ -592,7 +606,16 @@ internal static class ManagedSymbolReader
         }
 
         offsetToIndex[il.Length] = instructions.Count;
-        var context = new ReconContext(metadata, il, parameterNames, isInstance, returnType, localTypes, exceptionRegions);
+        var context = new ReconContext(
+            metadata,
+            il,
+            parameterNames,
+            isInstance,
+            returnType,
+            localTypes,
+            exceptionRegions,
+            new Dictionary<int, string>(),
+            CatchDepth: 0);
         return TryStructure(context, [.. instructions], offsetToIndex, 0, instructions.Count, new HashSet<int>(), 0);
     }
 
@@ -624,7 +647,7 @@ internal static class ManagedSymbolReader
 
             var instr = instructions[index];
 
-            // 先按 metadata 的保護區域邊界還原標準 try/finally；沒有明確區域資料時不猜測。
+            // 先按 metadata 的保護區域邊界還原標準 try/catch/finally；沒有明確區域資料時不猜測。
             if (stack.Count == 0)
             {
                 var startingRegions = context.ExceptionRegions
@@ -632,20 +655,27 @@ internal static class ManagedSymbolReader
                     .ToArray();
                 if (startingRegions.Length > 0)
                 {
-                    if (startingRegions.Length != 1)
-                    {
-                        return null;
-                    }
-
-                    var structuredException = TryStructureFinally(
-                        context,
-                        instructions,
-                        offsetToIndex,
-                        index,
-                        end,
-                        startingRegions[0],
-                        declaredLocals,
-                        depth + 1);
+                    var structuredException = startingRegions.All(region => region.Kind == ExceptionRegionKind.Catch)
+                        ? TryStructureCatch(
+                            context,
+                            instructions,
+                            offsetToIndex,
+                            index,
+                            end,
+                            startingRegions,
+                            declaredLocals,
+                            depth + 1)
+                        : startingRegions.Length == 1 && startingRegions[0].Kind == ExceptionRegionKind.Finally
+                            ? TryStructureFinally(
+                                context,
+                                instructions,
+                                offsetToIndex,
+                                index,
+                                end,
+                                startingRegions[0],
+                                declaredLocals,
+                                depth + 1)
+                            : null;
                     if (structuredException is null ||
                         statements.Count + structuredException.Value.Statements.Count > MaxBodyStatements)
                     {
@@ -830,6 +860,249 @@ internal static class ManagedSymbolReader
         return stack.Count == 0 ? statements : null;
     }
 
+    // 同一個 try 的 catch handlers 會在 metadata 中共用保護區間，並依序排列到共同 join。
+    // handler 入口的例外物件只接受 pop（未命名）或 stloc（具名）兩種標準形狀。
+    private static StructuredException? TryStructureCatch(
+        ReconContext context,
+        Instr[] instructions,
+        Dictionary<int, int> offsetToIndex,
+        int tryStartIndex,
+        int end,
+        IReadOnlyList<ExceptionRegionInfo> regions,
+        HashSet<int> declaredLocals,
+        int depth)
+    {
+        if (depth > MaxStructureDepth || regions.Count == 0)
+        {
+            return null;
+        }
+
+        var orderedRegions = regions
+            .OrderBy(region => region.HandlerOffset)
+            .ToArray();
+        var firstRegion = orderedRegions[0];
+        if (orderedRegions.Any(region =>
+                region.Kind != ExceptionRegionKind.Catch ||
+                region.TryOffset != firstRegion.TryOffset ||
+                region.TryLength != firstRegion.TryLength ||
+                string.IsNullOrWhiteSpace(region.CatchType) ||
+                IsGeneratedName(region.CatchType)))
+        {
+            return null;
+        }
+
+        var tryEndOffset = firstRegion.TryOffset + firstRegion.TryLength;
+        var joinOffset = orderedRegions[^1].HandlerOffset + orderedRegions[^1].HandlerLength;
+        if (!offsetToIndex.TryGetValue(tryEndOffset, out var tryEndIndex) ||
+            !offsetToIndex.TryGetValue(joinOffset, out var joinIndex) ||
+            tryStartIndex >= tryEndIndex ||
+            tryEndIndex > joinIndex ||
+            joinIndex > end ||
+            orderedRegions[0].HandlerOffset != tryEndOffset)
+        {
+            return null;
+        }
+
+        var tryLeave = instructions[tryEndIndex - 1];
+        if (tryLeave.Name is not ("leave" or "leave.s") || tryLeave.Target != joinOffset)
+        {
+            return null;
+        }
+
+        var handlers = new List<CatchHandlerShape>();
+        for (var handlerOrdinal = 0; handlerOrdinal < orderedRegions.Length; handlerOrdinal++)
+        {
+            var region = orderedRegions[handlerOrdinal];
+            var handlerEndOffset = region.HandlerOffset + region.HandlerLength;
+            if (!offsetToIndex.TryGetValue(region.HandlerOffset, out var handlerStartIndex) ||
+                !offsetToIndex.TryGetValue(handlerEndOffset, out var handlerEndIndex) ||
+                handlerStartIndex >= handlerEndIndex ||
+                handlerEndIndex > joinIndex ||
+                (handlerOrdinal + 1 < orderedRegions.Length
+                    ? handlerEndOffset != orderedRegions[handlerOrdinal + 1].HandlerOffset
+                    : handlerEndOffset != joinOffset))
+            {
+                return null;
+            }
+
+            var handlerLast = instructions[handlerEndIndex - 1];
+            int handlerBodyEnd;
+            if (handlerLast.Name is "leave" or "leave.s")
+            {
+                if (handlerLast.Target != joinOffset)
+                {
+                    return null;
+                }
+
+                handlerBodyEnd = handlerEndIndex - 1;
+            }
+            else if (handlerLast.Name is "throw" or "rethrow")
+            {
+                handlerBodyEnd = handlerEndIndex;
+            }
+            else
+            {
+                return null;
+            }
+
+            var prologue = instructions[handlerStartIndex];
+            var handlerBodyStart = handlerStartIndex + 1;
+            int? exceptionLocalIndex = null;
+            string? exceptionVariableName = null;
+            if (prologue.Name != "pop")
+            {
+                exceptionLocalIndex = TryGetStoredLocalIndex(context, prologue);
+                if (exceptionLocalIndex is null || region.CatchType == "System.Object")
+                {
+                    return null;
+                }
+
+                exceptionVariableName = CreateCatchVariableName(context, handlerOrdinal);
+            }
+
+            if (handlerBodyStart > handlerBodyEnd)
+            {
+                return null;
+            }
+
+            handlers.Add(new CatchHandlerShape(
+                region,
+                handlerBodyStart,
+                handlerBodyEnd,
+                exceptionLocalIndex,
+                exceptionVariableName));
+        }
+
+        var tryBodyEnd = tryEndIndex - 1;
+        var tryStoredLocals = instructions[tryStartIndex..tryBodyEnd]
+            .Select(instruction => TryGetStoredLocalIndex(context, instruction))
+            .Where(localIndex => localIndex is not null)
+            .Select(localIndex => localIndex!.Value)
+            .ToArray();
+        var exceptionLocals = handlers
+            .Where(handler => handler.ExceptionLocalIndex is not null)
+            .Select(handler => handler.ExceptionLocalIndex!.Value)
+            .ToHashSet();
+        if (tryStoredLocals.Any(exceptionLocals.Contains))
+        {
+            return null;
+        }
+
+        var storedLocals = tryStoredLocals
+            .Concat(handlers.SelectMany(handler => instructions[handler.BodyStartIndex..handler.BodyEndIndex]
+                .Select(instruction => TryGetStoredLocalIndex(context, instruction))
+                .Where(localIndex => localIndex is not null)
+                .Select(localIndex => localIndex!.Value)))
+            .Where(localIndex => !exceptionLocals.Contains(localIndex))
+            .Distinct()
+            .Order()
+            .ToArray();
+
+        var statements = new List<string>();
+        foreach (var localIndex in storedLocals)
+        {
+            if (declaredLocals.Contains(localIndex))
+            {
+                continue;
+            }
+
+            var type = LocalDeclarationType(context, localIndex);
+            if (type == "var" || IsGeneratedName(type))
+            {
+                return null;
+            }
+
+            declaredLocals.Add(localIndex);
+            statements.Add($"{type} {LocalName(context, localIndex)} = default;");
+        }
+
+        var currentRegions = orderedRegions.ToHashSet();
+        var nestedContext = context with
+        {
+            ExceptionRegions = context.ExceptionRegions
+                .Where(candidate => !currentRegions.Contains(candidate))
+                .ToArray()
+        };
+        var tryBody = TryStructure(
+            nestedContext,
+            instructions,
+            offsetToIndex,
+            tryStartIndex,
+            tryBodyEnd,
+            new HashSet<int>(declaredLocals),
+            depth);
+        if (tryBody is null)
+        {
+            return null;
+        }
+
+        statements.Add("try");
+        statements.Add("{");
+        statements.AddRange(tryBody.Select(line => $"    {line}"));
+        statements.Add("}");
+
+        foreach (var handler in handlers)
+        {
+            var catchType = handler.Region.CatchType!;
+            if (catchType == "System.Object")
+            {
+                statements.Add("catch");
+            }
+            else
+            {
+                var variable = handler.ExceptionVariableName is null ? "" : $" {handler.ExceptionVariableName}";
+                statements.Add($"catch ({catchType}{variable})");
+            }
+
+            var handlerLocals = new HashSet<int>(declaredLocals);
+            var handlerContext = nestedContext with { CatchDepth = nestedContext.CatchDepth + 1 };
+            if (handler.ExceptionLocalIndex is int exceptionLocalIndex)
+            {
+                handlerLocals.Add(exceptionLocalIndex);
+                handlerContext = handlerContext with
+                {
+                    LocalNames = handlerContext.LocalNames
+                        .Where(pair => pair.Key != exceptionLocalIndex)
+                        .Append(new KeyValuePair<int, string>(exceptionLocalIndex, handler.ExceptionVariableName!))
+                        .ToDictionary(pair => pair.Key, pair => pair.Value)
+                };
+            }
+
+            var handlerBody = TryStructure(
+                handlerContext,
+                instructions,
+                offsetToIndex,
+                handler.BodyStartIndex,
+                handler.BodyEndIndex,
+                handlerLocals,
+                depth);
+            if (handlerBody is null)
+            {
+                return null;
+            }
+
+            statements.Add("{");
+            statements.AddRange(handlerBody.Select(line => $"    {line}"));
+            statements.Add("}");
+        }
+
+        return new StructuredException(statements, joinIndex);
+    }
+
+    private static string CreateCatchVariableName(ReconContext context, int ordinal)
+    {
+        var usedNames = context.ParameterNames.Values
+            .Concat(context.LocalNames.Values)
+            .ToHashSet(StringComparer.Ordinal);
+        var name = $"caughtException{ordinal}";
+        while (!usedNames.Add(name))
+        {
+            name += "_";
+        }
+
+        return name;
+    }
+
     // try/finally 的控制流程由 exception region metadata 決定。只接受 Roslyn 常見的
     // try 尾端 leave → finally 尾端 endfinally → 共用 join 形狀，避免靠跳轉猜區塊。
     private static StructuredException? TryStructureFinally(
@@ -895,7 +1168,7 @@ internal static class ManagedSymbolReader
             }
 
             declaredLocals.Add(localIndex);
-            statements.Add($"{type} v{localIndex} = default;");
+            statements.Add($"{type} {LocalName(context, localIndex)} = default;");
         }
 
         var nestedContext = context with
@@ -1080,12 +1353,12 @@ internal static class ManagedSymbolReader
                 }
 
                 var type = LocalDeclarationType(context, localIndex);
-                if (IsGeneratedName(type))
+                if (type == "var" || IsGeneratedName(type))
                 {
                     return null;
                 }
 
-                statements.Add($"{type} v{localIndex} = default;");
+                statements.Add($"{type} {LocalName(context, localIndex)} = default;");
             }
         }
 
@@ -1446,13 +1719,13 @@ internal static class ManagedSymbolReader
             case "ldloc.1":
             case "ldloc.2":
             case "ldloc.3":
-                stack.Push($"v{name["ldloc.".Length..]}");
+                stack.Push(LocalName(context, int.Parse(name["ldloc.".Length..])));
                 return true;
             case "ldloc.s":
-                stack.Push($"v{il[offset]}");
+                stack.Push(LocalName(context, il[offset]));
                 return true;
             case "ldloc":
-                stack.Push($"v{BinaryPrimitives.ReadUInt16LittleEndian(il.AsSpan(offset, 2))}");
+                stack.Push(LocalName(context, BinaryPrimitives.ReadUInt16LittleEndian(il.AsSpan(offset, 2))));
                 return true;
             case "stloc.0":
             case "stloc.1":
@@ -1582,6 +1855,15 @@ internal static class ManagedSymbolReader
                 statements.Add($"throw {thrown};");
                 terminal = true;
                 return true;
+            case "rethrow":
+                if (context.CatchDepth == 0 || stack.Count != 0)
+                {
+                    return false;
+                }
+
+                statements.Add("throw;");
+                terminal = true;
+                return true;
             case "ret":
                 if (context.ReturnType == "void")
                 {
@@ -1670,15 +1952,18 @@ internal static class ManagedSymbolReader
 
         if (declaredLocals.Add(index))
         {
-            statements.Add($"{LocalDeclarationType(context, index)} v{index} = {value};");
+            statements.Add($"{LocalDeclarationType(context, index)} {LocalName(context, index)} = {value};");
         }
         else
         {
-            statements.Add($"v{index} = {value};");
+            statements.Add($"{LocalName(context, index)} = {value};");
         }
 
         return true;
     }
+
+    private static string LocalName(ReconContext context, int index) =>
+        context.LocalNames.TryGetValue(index, out var name) ? name : $"v{index}";
 
     // 有讀到區域變數型別就用實際型別宣告，否則退回 var。ref／編譯器產生的型別一律用 var 比較安全。
     private static string LocalDeclarationType(ReconContext context, int index)
