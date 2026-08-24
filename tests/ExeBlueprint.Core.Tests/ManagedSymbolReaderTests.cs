@@ -80,6 +80,24 @@ public sealed class ManagedSymbolReaderTests
     }
 
     [Fact]
+    public async Task ReconstructsCharLiteralsAndTypedLocals()
+    {
+        var assemblyPath = typeof(BlueprintAnalyzer).Assembly.Location;
+        var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
+        var methods = document.Files[0].Code!.Types.SelectMany(type => type.Methods).ToArray();
+
+        // char 參數的整數常值應還原成 char 常值（NormalizeFieldName 會呼叫 name.StartsWith('<')）。
+        Assert.Contains(
+            methods,
+            method => method.Body.Any(line => line.Contains("StartsWith('<')", StringComparison.Ordinal)));
+
+        // 讀得到區域變數型別時，宣告應用實際型別而非 var。
+        Assert.Contains(
+            methods,
+            method => method.Body.Any(line => line.TrimStart().StartsWith("StringBuilder v", StringComparison.Ordinal)));
+    }
+
+    [Fact]
     public async Task ReconstructsConditionalBranchesIntoIfStatements()
     {
         var assemblyPath = typeof(BlueprintAnalyzer).Assembly.Location;

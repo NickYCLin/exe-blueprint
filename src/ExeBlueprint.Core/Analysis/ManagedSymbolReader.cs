@@ -97,7 +97,8 @@ internal static class ManagedSymbolReader
                             il,
                             isInstance,
                             ReadParameterNames(metadata, method),
-                            model.ReturnType);
+                            model.ReturnType,
+                            TryReadLocalTypes(peReader, method));
                         if (body is not null)
                         {
                             model = model with { Body = body, BodyReconstructed = true };
@@ -193,6 +194,26 @@ internal static class ManagedSymbolReader
         catch (Exception exception) when (exception is BadImageFormatException or InvalidOperationException)
         {
             return null;
+        }
+    }
+
+    private static IReadOnlyList<string> TryReadLocalTypes(PEReader peReader, MethodDefinition method)
+    {
+        try
+        {
+            var body = peReader.GetMethodBody(method.RelativeVirtualAddress);
+            if (body.LocalSignature.IsNil)
+            {
+                return [];
+            }
+
+            var metadata = peReader.GetMetadataReader();
+            var signature = metadata.GetStandaloneSignature(body.LocalSignature);
+            return signature.DecodeLocalSignature(SignatureTypeNameProvider.Instance, null);
+        }
+        catch (Exception exception) when (exception is BadImageFormatException or InvalidOperationException)
+        {
+            return [];
         }
     }
 
@@ -397,7 +418,13 @@ internal static class ManagedSymbolReader
 
     private const int MaxBodyStatements = 80;
 
-    private sealed record CallInfo(string DeclaringType, string Name, int ParamCount, bool HasThis, bool ReturnsVoid);
+    private sealed record CallInfo(
+        string DeclaringType,
+        string Name,
+        int ParamCount,
+        bool HasThis,
+        bool ReturnsVoid,
+        IReadOnlyList<string> ParameterTypes);
 
     private const int MaxStructureDepth = 32;
 
@@ -408,15 +435,17 @@ internal static class ManagedSymbolReader
         byte[] Il,
         Dictionary<int, string> ParameterNames,
         bool IsInstance,
-        string ReturnType);
+        string ReturnType,
+        IReadOnlyList<string> LocalTypes);
 
     // 測試用進入點：以現成的 MetadataReader 直接餵 IL bytes 驗證還原結果。
     internal static IReadOnlyList<string>? ReconstructBodyForTest(
         MetadataReader metadata,
         byte[] il,
         bool isInstance,
-        string returnType) =>
-        TryReconstructLinearBody(metadata, il, isInstance, new Dictionary<int, string>(), returnType);
+        string returnType,
+        IReadOnlyList<string>? localTypes = null) =>
+        TryReconstructLinearBody(metadata, il, isInstance, new Dictionary<int, string>(), returnType, localTypes ?? []);
 
     // 把方法的 IL 還原成 C#。先解碼成指令陣列，再用區間遞迴結構化還原 if／if-else（可巢狀）。
     // 採全有或全無：遇到迴圈（回跳）、switch、例外處理或任何無法結構化的跳轉就整個方法放棄，
@@ -426,7 +455,8 @@ internal static class ManagedSymbolReader
         byte[] il,
         bool isInstance,
         Dictionary<int, string> parameterNames,
-        string returnType)
+        string returnType,
+        IReadOnlyList<string> localTypes)
     {
         var instructions = new List<Instr>();
         var offsetToIndex = new Dictionary<int, int>();
@@ -458,7 +488,7 @@ internal static class ManagedSymbolReader
         }
 
         offsetToIndex[il.Length] = instructions.Count;
-        var context = new ReconContext(metadata, il, parameterNames, isInstance, returnType);
+        var context = new ReconContext(metadata, il, parameterNames, isInstance, returnType, localTypes);
         return TryStructure(context, [.. instructions], offsetToIndex, 0, instructions.Count, new HashSet<int>(), 0);
     }
 
@@ -880,11 +910,11 @@ internal static class ManagedSymbolReader
             case "stloc.1":
             case "stloc.2":
             case "stloc.3":
-                return TryStoreLocal(stack, statements, declaredLocals, int.Parse(name["stloc.".Length..]));
+                return TryStoreLocal(context, stack, statements, declaredLocals, int.Parse(name["stloc.".Length..]));
             case "stloc.s":
-                return TryStoreLocal(stack, statements, declaredLocals, il[offset]);
+                return TryStoreLocal(context, stack, statements, declaredLocals, il[offset]);
             case "stloc":
-                return TryStoreLocal(stack, statements, declaredLocals, BinaryPrimitives.ReadUInt16LittleEndian(il.AsSpan(offset, 2)));
+                return TryStoreLocal(context, stack, statements, declaredLocals, BinaryPrimitives.ReadUInt16LittleEndian(il.AsSpan(offset, 2)));
 
             case "ldsfld":
                 var loadStatic = ResolveField(metadata, BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)));
@@ -1083,15 +1113,40 @@ internal static class ManagedSymbolReader
         return true;
     }
 
-    private static bool TryStoreLocal(Stack<string> stack, List<string> statements, HashSet<int> declaredLocals, int index)
+    private static bool TryStoreLocal(ReconContext context, Stack<string> stack, List<string> statements, HashSet<int> declaredLocals, int index)
     {
         if (!TryPop(stack, out var value))
         {
             return false;
         }
 
-        statements.Add(declaredLocals.Add(index) ? $"var v{index} = {value};" : $"v{index} = {value};");
+        if (declaredLocals.Add(index))
+        {
+            statements.Add($"{LocalDeclarationType(context, index)} v{index} = {value};");
+        }
+        else
+        {
+            statements.Add($"v{index} = {value};");
+        }
+
         return true;
+    }
+
+    // 有讀到區域變數型別就用實際型別宣告，否則退回 var。ref／編譯器產生的型別一律用 var 比較安全。
+    private static string LocalDeclarationType(ReconContext context, int index)
+    {
+        if (index < 0 || index >= context.LocalTypes.Count)
+        {
+            return "var";
+        }
+
+        var type = context.LocalTypes[index];
+        if (string.IsNullOrEmpty(type) || type.StartsWith("ref ", StringComparison.Ordinal) || IsGeneratedName(type))
+        {
+            return "var";
+        }
+
+        return type;
     }
 
     // 編譯器產生的名稱（狀態機、lambda、匿名型別）沒辦法在 C# 直接寫出來，碰到就放棄整個方法。
@@ -1119,7 +1174,7 @@ internal static class ManagedSymbolReader
                 return false;
             }
 
-            args[index] = argument;
+            args[index] = RenderArgument(argument, index < info.ParameterTypes.Count ? info.ParameterTypes[index] : null);
         }
 
         string? receiver = null;
@@ -1223,12 +1278,34 @@ internal static class ManagedSymbolReader
                 return false;
             }
 
-            args[index] = argument;
+            args[index] = RenderArgument(argument, index < info.ParameterTypes.Count ? info.ParameterTypes[index] : null);
         }
 
         stack.Push($"new {info.DeclaringType}({string.Join(", ", args)})");
         return true;
     }
+
+    // 參數型別是 char、實際傳的又是整數常值時，還原成 char 常值（例如 StartsWith(60) → StartsWith('<')）。
+    private static string RenderArgument(string argument, string? parameterType)
+    {
+        if (parameterType != "char" || !int.TryParse(argument, out var value) || value is < 0 or > 0xFFFF)
+        {
+            return argument;
+        }
+
+        return FormatCharLiteral((char)value);
+    }
+
+    private static string FormatCharLiteral(char value) => value switch
+    {
+        '\'' => "'\\''",
+        '\\' => "'\\\\'",
+        '\n' => "'\\n'",
+        '\r' => "'\\r'",
+        '\t' => "'\\t'",
+        _ when !char.IsControl(value) => $"'{value}'",
+        _ => $"'\\u{(int)value:X4}'"
+    };
 
     private static CallInfo? ResolveCall(MetadataReader metadata, int token)
     {
@@ -1243,7 +1320,8 @@ internal static class ManagedSymbolReader
                     metadata.GetString(method.Name),
                     methodSignature.ParameterTypes.Length,
                     methodSignature.Header.IsInstance,
-                    methodSignature.ReturnType == "void");
+                    methodSignature.ReturnType == "void",
+                    methodSignature.ParameterTypes);
 
             case HandleKind.MemberReference:
                 var member = metadata.GetMemberReference((MemberReferenceHandle)handle);
@@ -1258,7 +1336,8 @@ internal static class ManagedSymbolReader
                     metadata.GetString(member.Name),
                     memberSignature.ParameterTypes.Length,
                     memberSignature.Header.IsInstance,
-                    memberSignature.ReturnType == "void");
+                    memberSignature.ReturnType == "void",
+                    memberSignature.ParameterTypes);
 
             case HandleKind.MethodSpecification:
                 var spec = metadata.GetMethodSpecification((MethodSpecificationHandle)handle);

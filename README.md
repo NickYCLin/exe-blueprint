@@ -100,7 +100,7 @@ src/ExeBlueprint.Cli/bin/Release/net10.0/win-x64/publish/exe-blueprint.exe
 - 解開 Inno Setup、NSIS、MSI、PyInstaller 與 Electron 套件
 - 串接 ILSpy、Ghidra 等分析後端（讓原生 PE 也能還原函式與流程）
 - 擴充中介模型，補上 UI、資源和設定（函式、型別、欄位、屬性、呼叫圖已完成 .NET 部分）
-- 還原 switch、do-while，並補上 char／enum 常值與區域變數型別，讓骨架能直接編譯成多專案 solution（目前已能還原 if／if-else 與 while）
+- 還原 switch、do-while 與 enum 常值，讓骨架能直接編譯成多專案 solution（目前已能還原 if／if-else、while、char 常值與區域變數型別）
 - 優先支援易語言、VB6、Delphi 到 C# 的轉換
 - 加入 C++、Rust、Go 和易語言程式碼產生器（C# 骨架已有第一版）
 - 比較原程式與重建版本的輸入、輸出和副作用
