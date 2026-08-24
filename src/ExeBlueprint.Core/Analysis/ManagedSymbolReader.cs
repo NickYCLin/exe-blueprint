@@ -534,6 +534,11 @@ internal static class ManagedSymbolReader
         string ExceptionVariableName,
         string Condition);
 
+    private sealed class FilterControlFlowBudget
+    {
+        public int RemainingNodes { get; set; } = MaxIlInstructions;
+    }
+
     internal readonly record struct ExceptionRegionInfo(
         ExceptionRegionKind Kind,
         int TryOffset,
@@ -1208,6 +1213,7 @@ internal static class ManagedSymbolReader
         var condition = TryBuildCatchFilterCondition(
             filterContext,
             instructions,
+            offsetToIndex,
             prologue.PredicateStartIndex,
             prologue.PredicateEndIndex,
             filterLocals);
@@ -1226,99 +1232,185 @@ internal static class ManagedSymbolReader
     private static string? TryBuildCatchFilterCondition(
         ReconContext context,
         Instr[] instructions,
+        Dictionary<int, int> offsetToIndex,
         int start,
         int end,
-        HashSet<int> declaredLocals)
-    {
-        var straightLine = TryProcessStraightLine(
+        HashSet<int> declaredLocals) =>
+        TryBuildCatchFilterControlFlow(
             context,
             instructions,
+            offsetToIndex,
             start,
             end,
-            new HashSet<int>(declaredLocals));
-        if (straightLine is not null &&
-            straightLine.Value.Statements.Count == 0 &&
-            straightLine.Value.Stack.Count == 1)
-        {
-            return NormalizeFilterCondition(straightLine.Value.Stack.Pop());
-        }
+            declaredLocals,
+            new HashSet<int>(),
+            new FilterControlFlowBudget(),
+            depth: 0);
 
-        var branchIndices = Enumerable.Range(start, end - start)
-            .Where(index => instructions[index].IsBranch)
-            .ToArray();
-        if (branchIndices.Length < 2)
+    private static string? TryBuildCatchFilterControlFlow(
+        ReconContext context,
+        Instr[] instructions,
+        Dictionary<int, int> offsetToIndex,
+        int start,
+        int end,
+        HashSet<int> declaredLocals,
+        HashSet<int> activeStarts,
+        FilterControlFlowBudget budget,
+        int depth)
+    {
+        if (depth > MaxStructureDepth ||
+            budget.RemainingNodes-- <= 0 ||
+            start >= end ||
+            !activeStarts.Add(start))
         {
             return null;
         }
 
-        var conditionBranchIndices = branchIndices[..^1];
-        var joinBranchIndex = branchIndices[^1];
-        var joinBranch = instructions[joinBranchIndex];
-        var constantIndex = joinBranchIndex + 1;
-        if (joinBranch.Name is not ("br" or "br.s") ||
-            constantIndex + 1 != end ||
-            joinBranch.Target != instructions[end].Offset ||
-            conditionBranchIndices.Any(index =>
-                instructions[index].Name is "br" or "br.s" ||
-                instructions[index].Target != instructions[constantIndex].Offset))
+        try
         {
-            return null;
-        }
+            var branchIndex = -1;
+            for (var index = start; index < end; index++)
+            {
+                if (instructions[index].IsBranch)
+                {
+                    branchIndex = index;
+                    break;
+                }
+            }
 
-        var constant = instructions[constantIndex].Name switch
-        {
-            "ldc.i4.0" => false,
-            "ldc.i4.1" => true,
-            _ => (bool?)null
-        };
-        if (constant is null)
-        {
-            return null;
-        }
+            if (branchIndex < 0)
+            {
+                var straightLine = TryProcessStraightLine(
+                    context,
+                    instructions,
+                    start,
+                    end,
+                    new HashSet<int>(declaredLocals));
+                return straightLine is not null &&
+                       straightLine.Value.Statements.Count == 0 &&
+                       straightLine.Value.Stack.Count == 1
+                    ? NormalizeFilterCondition(straightLine.Value.Stack.Pop())
+                    : null;
+            }
 
-        var conditions = new List<string>();
-        var segmentStart = start;
-        foreach (var conditionBranchIndex in conditionBranchIndices)
-        {
-            var segment = TryProcessStraightLine(
+            var branch = instructions[branchIndex];
+            if (branch.Name is "br" or "br.s")
+            {
+                if (!TryFollowFilterJoinBranches(instructions, offsetToIndex, branch.Target, end))
+                {
+                    return null;
+                }
+
+                var leaf = TryProcessStraightLine(
+                    context,
+                    instructions,
+                    start,
+                    branchIndex,
+                    new HashSet<int>(declaredLocals));
+                return leaf is not null && leaf.Value.Statements.Count == 0 && leaf.Value.Stack.Count == 1
+                    ? NormalizeFilterCondition(leaf.Value.Stack.Pop())
+                    : null;
+            }
+
+            if (!offsetToIndex.TryGetValue(branch.Target, out var takenStart) ||
+                takenStart <= branchIndex ||
+                takenStart >= end)
+            {
+                return null;
+            }
+
+            var condition = TryProcessStraightLine(
                 context,
                 instructions,
-                segmentStart,
-                conditionBranchIndex,
+                start,
+                branchIndex,
                 new HashSet<int>(declaredLocals));
-            if (segment is null || segment.Value.Statements.Count != 0)
+            if (condition is null || condition.Value.Statements.Count != 0)
             {
                 return null;
             }
 
-            var conditionBranch = instructions[conditionBranchIndex];
-            string segmentCondition;
-            var conditionBuilt = constant.Value
-                ? TryBuildTakenCondition(conditionBranch.Name, segment.Value.Stack, out segmentCondition)
-                : TryBuildCondition(conditionBranch.Name, segment.Value.Stack, out segmentCondition);
-            if (!conditionBuilt || segment.Value.Stack.Count != 0)
+            var takenStack = new Stack<string>(condition.Value.Stack.Reverse());
+            var fallThroughStack = new Stack<string>(condition.Value.Stack.Reverse());
+            if (!TryBuildTakenCondition(branch.Name, takenStack, out var takenCondition) ||
+                !TryBuildCondition(branch.Name, fallThroughStack, out var fallThroughCondition) ||
+                takenStack.Count != 0 ||
+                fallThroughStack.Count != 0)
             {
                 return null;
             }
 
-            conditions.Add(segmentCondition);
-            segmentStart = conditionBranchIndex + 1;
+            var taken = TryBuildCatchFilterControlFlow(
+                context,
+                instructions,
+                offsetToIndex,
+                takenStart,
+                end,
+                declaredLocals,
+                activeStarts,
+                budget,
+                depth + 1);
+            var fallThrough = TryBuildCatchFilterControlFlow(
+                context,
+                instructions,
+                offsetToIndex,
+                branchIndex + 1,
+                end,
+                declaredLocals,
+                activeStarts,
+                budget,
+                depth + 1);
+            if (taken is null || fallThrough is null)
+            {
+                return null;
+            }
+
+            return (taken, fallThrough) switch
+            {
+                ("false", _) => $"({fallThroughCondition} && {fallThrough})",
+                ("true", _) => $"({takenCondition} || {fallThrough})",
+                (_, "false") => $"({takenCondition} && {taken})",
+                (_, "true") => $"({fallThroughCondition} || {taken})",
+                _ => $"({takenCondition} ? {taken} : {fallThrough})"
+            };
         }
-
-        var right = TryProcessStraightLine(
-            context,
-            instructions,
-            segmentStart,
-            joinBranchIndex,
-            new HashSet<int>(declaredLocals));
-        if (right is null || right.Value.Statements.Count != 0 || right.Value.Stack.Count != 1)
+        finally
         {
-            return null;
+            activeStarts.Remove(start);
+        }
+    }
+
+    // Debug 版 Roslyn 有時會讓 leaf 先跳到另一個空的 br，再進入 predicate join。
+    // 只追蹤不碰堆疊、持續往前的無條件分支鏈，其他中介區塊一律拒絕。
+    private static bool TryFollowFilterJoinBranches(
+        Instr[] instructions,
+        Dictionary<int, int> offsetToIndex,
+        int targetOffset,
+        int end)
+    {
+        var seen = new HashSet<int>();
+        while (offsetToIndex.TryGetValue(targetOffset, out var targetIndex) && seen.Add(targetIndex))
+        {
+            if (targetIndex == end)
+            {
+                return true;
+            }
+
+            if (targetIndex > end || instructions[targetIndex].Name is not ("br" or "br.s"))
+            {
+                return false;
+            }
+
+            var nextOffset = instructions[targetIndex].Target;
+            if (!offsetToIndex.TryGetValue(nextOffset, out var nextIndex) || nextIndex <= targetIndex)
+            {
+                return false;
+            }
+
+            targetOffset = nextOffset;
         }
 
-        conditions.Add(NormalizeFilterCondition(right.Value.Stack.Pop()));
-        var op = constant.Value ? "||" : "&&";
-        return $"({string.Join($" {op} ", conditions)})";
+        return false;
     }
 
     private static string NormalizeFilterCondition(string condition) => condition switch

@@ -407,6 +407,33 @@ public sealed class ManagedSymbolReaderTests
         Assert.Contains(expectedRightCondition, filter, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData(nameof(ExceptionHandlingFixture.CatchFilterAndOr), " && ", " || ", "value == -1")]
+    [InlineData(nameof(ExceptionHandlingFixture.CatchFilterOrAnd), " || ", " && ", "value < 10")]
+    public async Task ReconstructsMixedShortCircuitCatchFilters(
+        string methodName,
+        string outerOperator,
+        string innerOperator,
+        string expectedLeaf)
+    {
+        var assemblyPath = typeof(ExceptionHandlingFixture).Assembly.Location;
+        var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
+        var fixture = Assert.Single(
+            document.Files[0].Code!.Types,
+            type => type.FullName == "ExeBlueprint.Core.Tests.ExceptionHandlingFixture");
+        var method = Assert.Single(fixture.Methods, method => method.Name == methodName);
+
+        Assert.True(method.BodyReconstructed);
+        var filter = Assert.Single(
+            method.Body,
+            line => line.StartsWith("catch (System.InvalidOperationException caughtException0) when (", StringComparison.Ordinal));
+        Assert.Contains(outerOperator, filter, StringComparison.Ordinal);
+        Assert.Contains(innerOperator, filter, StringComparison.Ordinal);
+        Assert.Contains("caughtException0.HResult", filter, StringComparison.Ordinal);
+        Assert.Contains(expectedLeaf, filter, StringComparison.Ordinal);
+        Assert.DoesNotContain(" ? ", filter, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task SummaryAggregatesManagedTypeAndMethodCounts()
     {
@@ -669,6 +696,42 @@ internal static class ExceptionHandlingFixture
         }
         catch (InvalidOperationException exception)
             when (exception.HResult == value || value > 10 || value == 5)
+        {
+            return -1;
+        }
+    }
+
+    public static int CatchFilterAndOr(int value)
+    {
+        try
+        {
+            if (value < 0)
+            {
+                throw new InvalidOperationException();
+            }
+
+            return value;
+        }
+        catch (InvalidOperationException exception)
+            when (exception.HResult == value && (value > 0 || value == -1))
+        {
+            return -1;
+        }
+    }
+
+    public static int CatchFilterOrAnd(int value)
+    {
+        try
+        {
+            if (value < 0)
+            {
+                throw new InvalidOperationException();
+            }
+
+            return value;
+        }
+        catch (InvalidOperationException exception)
+            when (exception.HResult == value || (value > 0 && value < 10))
         {
             return -1;
         }
