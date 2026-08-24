@@ -14,7 +14,8 @@ ExeBlueprint 用來整理 Windows 應用程式套件。它會掃描 EXE、DLL、
 - 讀出 .NET assembly 的命名空間、型別、欄位、屬性、方法簽章與繼承關係
 - 掃描 IL 建立方法層級呼叫圖，看得出程式流程怎麼串
 - 把每個方法的 IL 反組譯成可讀指令（呼叫、字串、分支目標都解析出來）
-- 把 .NET 型別轉出一份 C# 骨架，方法體帶著原始 IL，簡單的方法直接還原成 C#
+- 用堆疊模擬把直線（無分支）方法還原成 C# 陳述式，帶不動的方法保留 IL 註解
+- 把 .NET 型別轉出一份 C# 骨架，能還原的方法直接給程式碼，其餘附上原始 IL
 - 找出套件內可以對上的 EXE／DLL 相依關係
 - 依檔案內容辨識常見語言、runtime、框架與安裝器
 - 輸出 JSON 與繁體中文 Markdown 報告
@@ -61,8 +62,8 @@ dotnet run --project .\src\ExeBlueprint.Cli -- analyze .\App.exe --json-only
 dotnet run --project .\src\ExeBlueprint.Cli -- analyze .\App.exe --emit-csharp
 ```
 
-骨架會放在輸出目錄的 `reconstructed-csharp/`。空方法、回傳常數／字串／null 這類簡單方法會
-直接還原成 C#；其餘方法會把原始 IL 放進註解當還原依據，方法體先用 `NotImplementedException`。
+骨架會放在輸出目錄的 `reconstructed-csharp/`。直線（沒有 if／迴圈）的方法會用堆疊模擬還原成
+C# 陳述式；帶分支的方法還原不了，會把原始 IL 放進註解當依據，方法體先用 `NotImplementedException`。
 用來對照結構或當轉語言的起點，不保證能直接編譯。
 
 輸出目錄已有報告時，程式預設不會覆寫。確定要覆寫可加上 `--force`。
@@ -98,7 +99,7 @@ src/ExeBlueprint.Cli/bin/Release/net10.0/win-x64/publish/exe-blueprint.exe
 - 解開 Inno Setup、NSIS、MSI、PyInstaller 與 Electron 套件
 - 串接 ILSpy、Ghidra 等分析後端（讓原生 PE 也能還原函式與流程）
 - 擴充中介模型，補上 UI、資源和設定（函式、型別、欄位、屬性、呼叫圖已完成 .NET 部分）
-- 把 IL 進一步還原成 C# 陳述式，讓骨架長出真正的方法體、能直接編譯成多專案 solution（目前只還原最簡單的方法）
+- 還原帶分支的方法（if／迴圈／switch），讓骨架長出完整方法體、能直接編譯成多專案 solution（目前只還原直線方法）
 - 優先支援易語言、VB6、Delphi 到 C# 的轉換
 - 加入 C++、Rust、Go 和易語言程式碼產生器（C# 骨架已有第一版）
 - 比較原程式與重建版本的輸入、輸出和副作用

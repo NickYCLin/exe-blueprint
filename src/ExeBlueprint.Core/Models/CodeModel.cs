@@ -107,6 +107,10 @@ public sealed record MethodModel
     public IReadOnlyList<string> Il { get; init; } = [];
 
     public bool IlTruncated { get; init; }
+
+    public IReadOnlyList<string> Body { get; init; } = [];
+
+    public bool BodyReconstructed { get; init; }
 }
 
 public sealed record ParameterModel

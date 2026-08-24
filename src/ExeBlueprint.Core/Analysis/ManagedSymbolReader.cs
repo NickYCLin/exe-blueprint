@@ -88,6 +88,21 @@ internal static class ManagedSymbolReader
                 {
                     var (instructions, ilTruncated) = Disassemble(metadata, il);
                     model = model with { Il = instructions, IlTruncated = ilTruncated };
+
+                    if (methodName is not (".ctor" or ".cctor"))
+                    {
+                        var isInstance = !method.Attributes.HasFlag(MethodAttributes.Static);
+                        var body = TryReconstructLinearBody(
+                            metadata,
+                            il,
+                            isInstance,
+                            ReadParameterNames(metadata, method),
+                            model.ReturnType);
+                        if (body is not null)
+                        {
+                            model = model with { Body = body, BodyReconstructed = true };
+                        }
+                    }
                 }
 
                 methods.Add(model);
@@ -379,6 +394,671 @@ internal static class ManagedSymbolReader
                 return $"token(0x{token:X8})";
         }
     }
+
+    private const int MaxBodyStatements = 80;
+
+    private sealed record CallInfo(string DeclaringType, string Name, int ParamCount, bool HasThis, bool ReturnsVoid);
+
+    // 直線 IL 堆疊模擬：只還原沒有分支、沒有例外處理的方法。
+    // 採全有或全無：遇到任何分支、不支援的指令或堆疊不平衡就回傳 null，退回 IL 註解，
+    // 寧可不還原也不要產出語意錯誤的程式碼。輸出的 C# 不保證能編譯，但語意會貼近原程式。
+    private static IReadOnlyList<string>? TryReconstructLinearBody(
+        MetadataReader metadata,
+        byte[] il,
+        bool isInstance,
+        Dictionary<int, string> parameterNames,
+        string returnType)
+    {
+        var stack = new Stack<string>();
+        var statements = new List<string>();
+        var declaredLocals = new HashSet<int>();
+        var terminated = false;
+
+        string ArgName(int slot)
+        {
+            if (isInstance)
+            {
+                if (slot == 0)
+                {
+                    return "this";
+                }
+
+                return parameterNames.TryGetValue(slot, out var name) && !string.IsNullOrEmpty(name) ? name : $"arg{slot - 1}";
+            }
+
+            return parameterNames.TryGetValue(slot + 1, out var value) && !string.IsNullOrEmpty(value) ? value : $"arg{slot}";
+        }
+
+        foreach (var instruction in EnumerateInstructions(il))
+        {
+            if (terminated || statements.Count > MaxBodyStatements)
+            {
+                return null;
+            }
+
+            if (!OpCodesByValue.TryGetValue(instruction.OpValue, out var opCode))
+            {
+                return null;
+            }
+
+            var offset = instruction.OperandOffset;
+            var name = opCode.Name!;
+            switch (name)
+            {
+                case "nop":
+                    break;
+
+                case "dup":
+                    return null;
+
+                case "ldarg.0":
+                    stack.Push(ArgName(0));
+                    break;
+                case "ldarg.1":
+                    stack.Push(ArgName(1));
+                    break;
+                case "ldarg.2":
+                    stack.Push(ArgName(2));
+                    break;
+                case "ldarg.3":
+                    stack.Push(ArgName(3));
+                    break;
+                case "ldarg.s":
+                    stack.Push(ArgName(il[offset]));
+                    break;
+                case "ldarg":
+                    stack.Push(ArgName(BinaryPrimitives.ReadUInt16LittleEndian(il.AsSpan(offset, 2))));
+                    break;
+                case "starg.s":
+                    if (!TryPop(stack, out var stargValue))
+                    {
+                        return null;
+                    }
+
+                    statements.Add($"{ArgName(il[offset])} = {stargValue};");
+                    break;
+
+                case "ldnull":
+                    stack.Push("null");
+                    break;
+                case "ldstr":
+                    stack.Push(EscapeCSharpString(ReadUserString(metadata, BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)))));
+                    break;
+                case "ldc.i4.m1":
+                    stack.Push("-1");
+                    break;
+                case "ldc.i4.0":
+                case "ldc.i4.1":
+                case "ldc.i4.2":
+                case "ldc.i4.3":
+                case "ldc.i4.4":
+                case "ldc.i4.5":
+                case "ldc.i4.6":
+                case "ldc.i4.7":
+                case "ldc.i4.8":
+                    stack.Push(name["ldc.i4.".Length..]);
+                    break;
+                case "ldc.i4.s":
+                    stack.Push(((sbyte)il[offset]).ToString());
+                    break;
+                case "ldc.i4":
+                    stack.Push(BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)).ToString());
+                    break;
+                case "ldc.i8":
+                    stack.Push($"{BinaryPrimitives.ReadInt64LittleEndian(il.AsSpan(offset, 8))}L");
+                    break;
+                case "ldc.r4":
+                    stack.Push($"{BitConverter.Int32BitsToSingle(BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)))}f");
+                    break;
+                case "ldc.r8":
+                    stack.Push($"{BitConverter.Int64BitsToDouble(BinaryPrimitives.ReadInt64LittleEndian(il.AsSpan(offset, 8)))}");
+                    break;
+
+                case "ldloc.0":
+                case "ldloc.1":
+                case "ldloc.2":
+                case "ldloc.3":
+                    stack.Push($"v{name["ldloc.".Length..]}");
+                    break;
+                case "ldloc.s":
+                    stack.Push($"v{il[offset]}");
+                    break;
+                case "ldloc":
+                    stack.Push($"v{BinaryPrimitives.ReadUInt16LittleEndian(il.AsSpan(offset, 2))}");
+                    break;
+                case "stloc.0":
+                case "stloc.1":
+                case "stloc.2":
+                case "stloc.3":
+                    if (!TryStoreLocal(stack, statements, declaredLocals, int.Parse(name["stloc.".Length..])))
+                    {
+                        return null;
+                    }
+
+                    break;
+                case "stloc.s":
+                    if (!TryStoreLocal(stack, statements, declaredLocals, il[offset]))
+                    {
+                        return null;
+                    }
+
+                    break;
+                case "stloc":
+                    if (!TryStoreLocal(stack, statements, declaredLocals, BinaryPrimitives.ReadUInt16LittleEndian(il.AsSpan(offset, 2))))
+                    {
+                        return null;
+                    }
+
+                    break;
+
+                case "ldsfld":
+                    var loadStatic = ResolveField(metadata, BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)));
+                    if (loadStatic is null)
+                    {
+                        return null;
+                    }
+
+                    stack.Push($"{loadStatic.Value.DeclaringType}.{loadStatic.Value.Name}");
+                    break;
+                case "ldfld":
+                    var loadField = ResolveField(metadata, BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)));
+                    if (loadField is null || !TryPop(stack, out var fieldTarget))
+                    {
+                        return null;
+                    }
+
+                    stack.Push($"{fieldTarget}.{loadField.Value.Name}");
+                    break;
+                case "stsfld":
+                    var storeStatic = ResolveField(metadata, BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)));
+                    if (storeStatic is null || !TryPop(stack, out var storeStaticValue))
+                    {
+                        return null;
+                    }
+
+                    statements.Add($"{storeStatic.Value.DeclaringType}.{storeStatic.Value.Name} = {storeStaticValue};");
+                    break;
+                case "stfld":
+                    var storeField = ResolveField(metadata, BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)));
+                    if (storeField is null || !TryPop(stack, out var storeFieldValue) || !TryPop(stack, out var storeFieldTarget))
+                    {
+                        return null;
+                    }
+
+                    statements.Add($"{storeFieldTarget}.{storeField.Value.Name} = {storeFieldValue};");
+                    break;
+
+                case "add":
+                case "sub":
+                case "mul":
+                case "div":
+                case "div.un":
+                case "rem":
+                case "rem.un":
+                case "and":
+                case "or":
+                case "xor":
+                case "shl":
+                case "shr":
+                case "shr.un":
+                    if (!TryBinary(stack, BinaryOperator(name)))
+                    {
+                        return null;
+                    }
+
+                    break;
+                case "ceq":
+                    if (!TryBinary(stack, "=="))
+                    {
+                        return null;
+                    }
+
+                    break;
+                case "cgt":
+                case "cgt.un":
+                    if (!TryBinary(stack, ">"))
+                    {
+                        return null;
+                    }
+
+                    break;
+                case "clt":
+                case "clt.un":
+                    if (!TryBinary(stack, "<"))
+                    {
+                        return null;
+                    }
+
+                    break;
+                case "neg":
+                    if (!TryUnary(stack, "-"))
+                    {
+                        return null;
+                    }
+
+                    break;
+                case "not":
+                    if (!TryUnary(stack, "~"))
+                    {
+                        return null;
+                    }
+
+                    break;
+
+                case "conv.i1":
+                case "conv.i2":
+                case "conv.i4":
+                case "conv.i8":
+                case "conv.u1":
+                case "conv.u2":
+                case "conv.u4":
+                case "conv.u8":
+                case "conv.r4":
+                case "conv.r8":
+                    if (!TryUnaryCast(stack, ConversionType(name)))
+                    {
+                        return null;
+                    }
+
+                    break;
+
+                case "castclass":
+                    var castType = GetTypeName(metadata, MetadataTokens.EntityHandle(BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4))));
+                    if (castType is null || !TryPop(stack, out var castValue))
+                    {
+                        return null;
+                    }
+
+                    stack.Push($"(({castType}){castValue})");
+                    break;
+                case "isinst":
+                    var instType = GetTypeName(metadata, MetadataTokens.EntityHandle(BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4))));
+                    if (instType is null || !TryPop(stack, out var instValue))
+                    {
+                        return null;
+                    }
+
+                    stack.Push($"({instValue} as {instType})");
+                    break;
+
+                case "call":
+                case "callvirt":
+                    if (!TryEmitCall(metadata, BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)), stack, statements))
+                    {
+                        return null;
+                    }
+
+                    break;
+                case "newobj":
+                    if (!TryEmitNewObject(metadata, BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)), stack))
+                    {
+                        return null;
+                    }
+
+                    break;
+
+                case "pop":
+                    if (!TryPop(stack, out var discarded))
+                    {
+                        return null;
+                    }
+
+                    statements.Add($"{discarded};");
+                    break;
+                case "throw":
+                    if (!TryPop(stack, out var thrown))
+                    {
+                        return null;
+                    }
+
+                    statements.Add($"throw {thrown};");
+                    terminated = true;
+                    break;
+                case "ret":
+                    if (returnType == "void")
+                    {
+                        if (stack.Count != 0)
+                        {
+                            return null;
+                        }
+                    }
+                    else
+                    {
+                        if (stack.Count != 1)
+                        {
+                            return null;
+                        }
+
+                        var value = stack.Pop();
+                        if (returnType == "bool" && value is "0" or "1")
+                        {
+                            value = value == "1" ? "true" : "false";
+                        }
+
+                        statements.Add($"return {value};");
+                    }
+
+                    terminated = true;
+                    break;
+
+                default:
+                    return null;
+            }
+        }
+
+        return terminated && stack.Count == 0 ? statements : null;
+    }
+
+    private static bool TryPop(Stack<string> stack, out string value)
+    {
+        if (stack.Count == 0)
+        {
+            value = string.Empty;
+            return false;
+        }
+
+        value = stack.Pop();
+        return true;
+    }
+
+    private static bool TryBinary(Stack<string> stack, string op)
+    {
+        if (stack.Count < 2)
+        {
+            return false;
+        }
+
+        var right = stack.Pop();
+        var left = stack.Pop();
+        stack.Push($"({left} {op} {right})");
+        return true;
+    }
+
+    private static bool TryUnary(Stack<string> stack, string op)
+    {
+        if (!TryPop(stack, out var value))
+        {
+            return false;
+        }
+
+        stack.Push($"({op}{value})");
+        return true;
+    }
+
+    private static bool TryUnaryCast(Stack<string> stack, string type)
+    {
+        if (!TryPop(stack, out var value))
+        {
+            return false;
+        }
+
+        stack.Push($"({type})({value})");
+        return true;
+    }
+
+    private static bool TryStoreLocal(Stack<string> stack, List<string> statements, HashSet<int> declaredLocals, int index)
+    {
+        if (!TryPop(stack, out var value))
+        {
+            return false;
+        }
+
+        statements.Add(declaredLocals.Add(index) ? $"var v{index} = {value};" : $"v{index} = {value};");
+        return true;
+    }
+
+    private static bool TryEmitCall(MetadataReader metadata, int token, Stack<string> stack, List<string> statements)
+    {
+        var info = ResolveCall(metadata, token);
+        if (info is null || info.Name is ".ctor" or ".cctor")
+        {
+            return false;
+        }
+
+        var args = new string[info.ParamCount];
+        for (var index = info.ParamCount - 1; index >= 0; index--)
+        {
+            if (!TryPop(stack, out var argument))
+            {
+                return false;
+            }
+
+            args[index] = argument;
+        }
+
+        string? receiver = null;
+        if (info.HasThis && !TryPop(stack, out receiver))
+        {
+            return false;
+        }
+
+        if (info.Name.StartsWith("op_", StringComparison.Ordinal))
+        {
+            return TryEmitOperator(info, args, stack);
+        }
+
+        var target = info.HasThis ? receiver! : info.DeclaringType;
+
+        if (info.Name.StartsWith("get_", StringComparison.Ordinal) && info.ParamCount == 0)
+        {
+            stack.Push($"{target}.{info.Name["get_".Length..]}");
+            return true;
+        }
+
+        if (info.Name.StartsWith("set_", StringComparison.Ordinal) && info.ParamCount == 1 && info.ReturnsVoid)
+        {
+            statements.Add($"{target}.{info.Name["set_".Length..]} = {args[0]};");
+            return true;
+        }
+
+        var call = $"{target}.{info.Name}({string.Join(", ", args)})";
+        if (info.ReturnsVoid)
+        {
+            statements.Add($"{call};");
+        }
+        else
+        {
+            stack.Push(call);
+        }
+
+        return true;
+    }
+
+    // 把運算子方法（op_Equality 等）還原成運算子語法，避免產生 Type.op_Equality(a, b) 這種非法 C#。
+    // 對應不到的運算子就放棄整個方法，退回 IL 註解。
+    private static bool TryEmitOperator(CallInfo info, string[] args, Stack<string> stack)
+    {
+        if (info.ParamCount == 2 && BinaryOperators.TryGetValue(info.Name, out var binary))
+        {
+            stack.Push($"({args[0]} {binary} {args[1]})");
+            return true;
+        }
+
+        if (info.ParamCount == 1 && UnaryOperators.TryGetValue(info.Name, out var unary))
+        {
+            stack.Push($"({unary}{args[0]})");
+            return true;
+        }
+
+        return false;
+    }
+
+    private static readonly IReadOnlyDictionary<string, string> BinaryOperators = new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        ["op_Equality"] = "==",
+        ["op_Inequality"] = "!=",
+        ["op_Addition"] = "+",
+        ["op_Subtraction"] = "-",
+        ["op_Multiply"] = "*",
+        ["op_Division"] = "/",
+        ["op_Modulus"] = "%",
+        ["op_LessThan"] = "<",
+        ["op_GreaterThan"] = ">",
+        ["op_LessThanOrEqual"] = "<=",
+        ["op_GreaterThanOrEqual"] = ">=",
+        ["op_BitwiseAnd"] = "&",
+        ["op_BitwiseOr"] = "|",
+        ["op_ExclusiveOr"] = "^",
+        ["op_LeftShift"] = "<<",
+        ["op_RightShift"] = ">>"
+    };
+
+    private static readonly IReadOnlyDictionary<string, string> UnaryOperators = new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        ["op_UnaryNegation"] = "-",
+        ["op_UnaryPlus"] = "+",
+        ["op_LogicalNot"] = "!",
+        ["op_OnesComplement"] = "~"
+    };
+
+    private static bool TryEmitNewObject(MetadataReader metadata, int token, Stack<string> stack)
+    {
+        var info = ResolveCall(metadata, token);
+        if (info is null)
+        {
+            return false;
+        }
+
+        var args = new string[info.ParamCount];
+        for (var index = info.ParamCount - 1; index >= 0; index--)
+        {
+            if (!TryPop(stack, out var argument))
+            {
+                return false;
+            }
+
+            args[index] = argument;
+        }
+
+        stack.Push($"new {info.DeclaringType}({string.Join(", ", args)})");
+        return true;
+    }
+
+    private static CallInfo? ResolveCall(MetadataReader metadata, int token)
+    {
+        var handle = MetadataTokens.EntityHandle(token);
+        switch (handle.Kind)
+        {
+            case HandleKind.MethodDefinition:
+                var method = metadata.GetMethodDefinition((MethodDefinitionHandle)handle);
+                var methodSignature = method.DecodeSignature(SignatureTypeNameProvider.Instance, null);
+                return new CallInfo(
+                    GetTypeName(metadata, method.GetDeclaringType()) ?? string.Empty,
+                    metadata.GetString(method.Name),
+                    methodSignature.ParameterTypes.Length,
+                    methodSignature.Header.IsInstance,
+                    methodSignature.ReturnType == "void");
+
+            case HandleKind.MemberReference:
+                var member = metadata.GetMemberReference((MemberReferenceHandle)handle);
+                if (member.GetKind() != MemberReferenceKind.Method)
+                {
+                    return null;
+                }
+
+                var memberSignature = member.DecodeMethodSignature(SignatureTypeNameProvider.Instance, null);
+                return new CallInfo(
+                    GetTypeName(metadata, member.Parent) ?? string.Empty,
+                    metadata.GetString(member.Name),
+                    memberSignature.ParameterTypes.Length,
+                    memberSignature.Header.IsInstance,
+                    memberSignature.ReturnType == "void");
+
+            case HandleKind.MethodSpecification:
+                var spec = metadata.GetMethodSpecification((MethodSpecificationHandle)handle);
+                return ResolveCall(metadata, MetadataTokens.GetToken(spec.Method));
+
+            default:
+                return null;
+        }
+    }
+
+    private static (string DeclaringType, string Name)? ResolveField(MetadataReader metadata, int token)
+    {
+        var handle = MetadataTokens.EntityHandle(token);
+        switch (handle.Kind)
+        {
+            case HandleKind.FieldDefinition:
+                var field = metadata.GetFieldDefinition((FieldDefinitionHandle)handle);
+                return (GetTypeName(metadata, field.GetDeclaringType()) ?? string.Empty, NormalizeFieldName(metadata.GetString(field.Name)));
+
+            case HandleKind.MemberReference:
+                var member = metadata.GetMemberReference((MemberReferenceHandle)handle);
+                if (member.GetKind() != MemberReferenceKind.Field)
+                {
+                    return null;
+                }
+
+                return (GetTypeName(metadata, member.Parent) ?? string.Empty, NormalizeFieldName(metadata.GetString(member.Name)));
+
+            default:
+                return null;
+        }
+    }
+
+    // auto-property 的隱藏欄位 <Name>k__BackingField，直接還原成屬性名稱 Name。
+    private static string NormalizeFieldName(string name)
+    {
+        if (name.StartsWith('<') && name.EndsWith(">k__BackingField", StringComparison.Ordinal))
+        {
+            return name[1..name.IndexOf('>', StringComparison.Ordinal)];
+        }
+
+        return name;
+    }
+
+    private static string ReadUserString(MetadataReader metadata, int token)
+    {
+        try
+        {
+            return metadata.GetUserString(MetadataTokens.UserStringHandle(token));
+        }
+        catch (Exception exception) when (exception is BadImageFormatException or ArgumentException)
+        {
+            return string.Empty;
+        }
+    }
+
+    private static string EscapeCSharpString(string value)
+    {
+        var escaped = value
+            .Replace("\\", "\\\\", StringComparison.Ordinal)
+            .Replace("\"", "\\\"", StringComparison.Ordinal)
+            .Replace("\r", "\\r", StringComparison.Ordinal)
+            .Replace("\n", "\\n", StringComparison.Ordinal)
+            .Replace("\t", "\\t", StringComparison.Ordinal);
+        return $"\"{escaped}\"";
+    }
+
+    private static string BinaryOperator(string name) => name switch
+    {
+        "add" => "+",
+        "sub" => "-",
+        "mul" => "*",
+        "div" or "div.un" => "/",
+        "rem" or "rem.un" => "%",
+        "and" => "&",
+        "or" => "|",
+        "xor" => "^",
+        "shl" => "<<",
+        "shr" or "shr.un" => ">>",
+        _ => "?"
+    };
+
+    private static string ConversionType(string name) => name switch
+    {
+        "conv.i1" => "sbyte",
+        "conv.i2" => "short",
+        "conv.i4" => "int",
+        "conv.i8" => "long",
+        "conv.u1" => "byte",
+        "conv.u2" => "ushort",
+        "conv.u4" => "uint",
+        "conv.u8" => "ulong",
+        "conv.r4" => "float",
+        "conv.r8" => "double",
+        _ => "object"
+    };
 
     private static string? CallKind(short opValue)
     {

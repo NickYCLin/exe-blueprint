@@ -46,6 +46,33 @@ public sealed class ManagedSymbolReaderTests
     }
 
     [Fact]
+    public async Task ReconstructsStraightLineMethodBodiesIntoCSharp()
+    {
+        var assemblyPath = typeof(BlueprintAnalyzer).Assembly.Location;
+        var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
+        var code = document.Files[0].Code!;
+
+        var reconstructed = code.Types
+            .SelectMany(type => type.Methods)
+            .Where(method => method.BodyReconstructed)
+            .ToArray();
+
+        Assert.NotEmpty(reconstructed);
+
+        // 重建出來的陳述式都應以分號或區塊結尾，不能再殘留 <>k__BackingField 這種原始名稱。
+        foreach (var method in reconstructed)
+        {
+            Assert.All(method.Body, statement => Assert.EndsWith(";", statement, StringComparison.Ordinal));
+            Assert.DoesNotContain(method.Body, statement => statement.Contains("k__BackingField", StringComparison.Ordinal));
+        }
+
+        // record 產生的 Equals(object) 是典型直線方法，應被還原。
+        Assert.Contains(reconstructed, method =>
+            method.Name == "Equals"
+            && method.Body.Any(statement => statement.Contains(" as ", StringComparison.Ordinal)));
+    }
+
+    [Fact]
     public async Task SummaryAggregatesManagedTypeAndMethodCounts()
     {
         var assemblyPath = typeof(BlueprintAnalyzer).Assembly.Location;

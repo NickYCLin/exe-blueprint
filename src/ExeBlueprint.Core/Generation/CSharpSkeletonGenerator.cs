@@ -199,12 +199,11 @@ public static class CSharpSkeletonGenerator
         builder.AppendLine(header);
         builder.AppendLine($"{body}{{");
 
-        var reconstructed = TryReconstructBody(method);
-        if (reconstructed is not null)
+        if (method.BodyReconstructed)
         {
-            if (reconstructed.Length > 0)
+            foreach (var statement in method.Body)
             {
-                builder.AppendLine($"{body}    {reconstructed}");
+                builder.AppendLine($"{body}    {statement}");
             }
         }
         else
@@ -234,65 +233,6 @@ public static class CSharpSkeletonGenerator
         {
             builder.AppendLine($"{indent}// …其餘 IL 請看 blueprint.json。");
         }
-    }
-
-    // 只還原最安全、不會誤判的模式：空方法、回傳常數／字串／null／布林。
-    // 其餘一律保留 IL 註解加 NotImplementedException，寧可不還原也不要產生錯的實作。
-    private static string? TryReconstructBody(MethodModel method)
-    {
-        var body = method.Il
-            .Select(StripOffset)
-            .Where(instruction => instruction != "nop")
-            .ToArray();
-
-        var isVoid = method.ReturnType is "void";
-        if (body.Length == 0 || (body.Length == 1 && body[0] == "ret"))
-        {
-            return isVoid ? "" : null;
-        }
-
-        if (body.Length != 2 || body[1] != "ret")
-        {
-            return null;
-        }
-
-        var load = body[0];
-        if (load == "ldnull")
-        {
-            return "return null;";
-        }
-
-        if (load.StartsWith("ldstr ", StringComparison.Ordinal))
-        {
-            var literal = load["ldstr ".Length..];
-            // 反組譯時長字串會被截斷成「…」，這時不還原，以免產生內容錯誤的字串。
-            return literal.Contains('…') ? null : $"return {literal};";
-        }
-
-        var isBool = method.ReturnType is "bool";
-        return load switch
-        {
-            "ldc.i4.0" => isBool ? "return false;" : "return 0;",
-            "ldc.i4.1" => isBool ? "return true;" : "return 1;",
-            "ldc.i4.2" => "return 2;",
-            "ldc.i4.3" => "return 3;",
-            "ldc.i4.4" => "return 4;",
-            "ldc.i4.5" => "return 5;",
-            "ldc.i4.6" => "return 6;",
-            "ldc.i4.7" => "return 7;",
-            "ldc.i4.8" => "return 8;",
-            "ldc.i4.m1" => "return -1;",
-            _ when load.StartsWith("ldc.i4.s ", StringComparison.Ordinal) => $"return {load["ldc.i4.s ".Length..]};",
-            _ when load.StartsWith("ldc.i4 ", StringComparison.Ordinal) => $"return {load["ldc.i4 ".Length..]};",
-            _ when load.StartsWith("ldc.i8 ", StringComparison.Ordinal) => $"return {load["ldc.i8 ".Length..]};",
-            _ => null
-        };
-    }
-
-    private static string StripOffset(string instruction)
-    {
-        var separator = instruction.IndexOf(": ", StringComparison.Ordinal);
-        return separator < 0 ? instruction : instruction[(separator + 2)..];
     }
 
     private static string BuildMethodModifiers(TypeModel type, MethodModel method)

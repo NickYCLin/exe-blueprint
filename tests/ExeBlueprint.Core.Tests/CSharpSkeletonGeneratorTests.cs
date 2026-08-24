@@ -38,14 +38,15 @@ public sealed class CSharpSkeletonGeneratorTests
         Assert.NotEmpty(sourceFiles);
         foreach (var file in sourceFiles)
         {
-            // 註解裡的原始 IL 允許帶原始名稱；這裡只檢查實際產生的宣告與陳述式。
+            // 註解裡的原始 IL 允許帶原始名稱；字串常值裡也可能剛好有反引號。
+            // 這裡只檢查真正的 metadata 殘留：泛型 arity（`1）與運算子方法呼叫（.op_）。
             var codeLines = file.Content
                 .Split('\n')
                 .Where(line => !line.TrimStart().StartsWith("//", StringComparison.Ordinal));
             foreach (var line in codeLines)
             {
-                Assert.DoesNotContain('`', line);
-                Assert.DoesNotContain("op_", line, StringComparison.Ordinal);
+                Assert.DoesNotMatch(@"`\d", line);
+                Assert.DoesNotContain(".op_", line, StringComparison.Ordinal);
             }
         }
     }
