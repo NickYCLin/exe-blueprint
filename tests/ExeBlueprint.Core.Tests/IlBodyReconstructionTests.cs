@@ -397,7 +397,7 @@ public sealed class IlBodyReconstructionTests
     }
 
     [Fact]
-    public void BailsOnUnsupportedFilterRegion()
+    public void BailsOnMalformedFilterRegion()
     {
         byte[] il =
         [
@@ -414,7 +414,8 @@ public sealed class IlBodyReconstructionTests
                 TryOffset: 0,
                 TryLength: 3,
                 HandlerOffset: 3,
-                HandlerLength: 3)
+                HandlerLength: 3,
+                FilterOffset: 3)
         };
 
         Assert.Null(Reconstruct(

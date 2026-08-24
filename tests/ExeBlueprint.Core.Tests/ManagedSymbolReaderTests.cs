@@ -339,6 +339,50 @@ public sealed class ManagedSymbolReaderTests
     }
 
     [Fact]
+    public async Task ReconstructsCompilerGeneratedCatchFilter()
+    {
+        var assemblyPath = typeof(ExceptionHandlingFixture).Assembly.Location;
+        var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
+        var fixture = Assert.Single(
+            document.Files[0].Code!.Types,
+            type => type.FullName == "ExeBlueprint.Core.Tests.ExceptionHandlingFixture");
+        var method = Assert.Single(
+            fixture.Methods,
+            method => method.Name == nameof(ExceptionHandlingFixture.CatchFilter));
+
+        Assert.True(method.BodyReconstructed);
+        var filter = Assert.Single(
+            method.Body,
+            line => line.StartsWith("catch (System.InvalidOperationException caughtException0) when (", StringComparison.Ordinal));
+        Assert.Contains("caughtException0.HResult", filter, StringComparison.Ordinal);
+        Assert.Contains("== value", filter, StringComparison.Ordinal);
+        Assert.Contains("catch (System.InvalidOperationException)", method.Body);
+        Assert.Equal(2, method.Body.Count(line => line.StartsWith("catch", StringComparison.Ordinal)));
+        Assert.DoesNotContain(method.Body, line => line.Contains(" v3", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task ReconstructsCatchFilterCombinedWithFinally()
+    {
+        var assemblyPath = typeof(ExceptionHandlingFixture).Assembly.Location;
+        var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
+        var fixture = Assert.Single(
+            document.Files[0].Code!.Types,
+            type => type.FullName == "ExeBlueprint.Core.Tests.ExceptionHandlingFixture");
+        var method = Assert.Single(
+            fixture.Methods,
+            method => method.Name == nameof(ExceptionHandlingFixture.CatchFilterAndFinally));
+
+        Assert.True(method.BodyReconstructed);
+        Assert.Equal(2, method.Body.Count(line => line.Trim() == "try"));
+        Assert.Contains(method.Body, line =>
+            line.TrimStart().StartsWith("catch (System.DivideByZeroException caughtException0) when (", StringComparison.Ordinal));
+        Assert.Contains("finally", method.Body);
+        Assert.DoesNotContain(method.Body, line =>
+            line.StartsWith("System.DivideByZeroException v", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task SummaryAggregatesManagedTypeAndMethodCounts()
     {
         var assemblyPath = typeof(BlueprintAnalyzer).Assembly.Location;
@@ -518,6 +562,46 @@ internal static class ExceptionHandlingFixture
             result = exception.HResult;
         }
         catch (ArithmeticException)
+        {
+            result = -1;
+        }
+        finally
+        {
+            result += 100;
+        }
+
+        return result;
+    }
+
+    public static int CatchFilter(int value)
+    {
+        try
+        {
+            if (value < 0)
+            {
+                throw new InvalidOperationException();
+            }
+
+            return value;
+        }
+        catch (InvalidOperationException exception) when (exception.HResult == value)
+        {
+            return -1;
+        }
+        catch (InvalidOperationException)
+        {
+            return -2;
+        }
+    }
+
+    public static int CatchFilterAndFinally(int value)
+    {
+        var result = 0;
+        try
+        {
+            result = 10 / value;
+        }
+        catch (DivideByZeroException exception) when (exception.HResult == value)
         {
             result = -1;
         }

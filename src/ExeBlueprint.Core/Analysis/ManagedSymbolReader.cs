@@ -240,7 +240,8 @@ internal static class ManagedSymbolReader
                     region.HandlerLength,
                     region.Kind == ExceptionRegionKind.Catch && !region.CatchType.IsNil
                         ? GetTypeName(metadata, region.CatchType)
-                        : null))
+                        : null,
+                    region.Kind == ExceptionRegionKind.Filter ? region.FilterOffset : -1))
                 .ToArray();
         }
         catch (Exception exception) when (exception is BadImageFormatException or InvalidOperationException)
@@ -513,11 +514,25 @@ internal static class ManagedSymbolReader
     private readonly record struct ExceptionLeaveRedirect(int JoinOffset, int TargetOffset);
 
     private sealed record CatchHandlerShape(
-        ExceptionRegionInfo Region,
+        string CatchType,
         int BodyStartIndex,
         int BodyEndIndex,
         int? ExceptionLocalIndex,
-        string? ExceptionVariableName);
+        string? ExceptionVariableName,
+        string? FilterCondition);
+
+    private sealed record CatchFilterPrologue(
+        string CatchType,
+        int ExceptionLocalIndex,
+        int PredicateStartIndex,
+        int PredicateEndIndex,
+        int? PredicateTemporaryLocalIndex);
+
+    private sealed record CatchFilterShape(
+        string CatchType,
+        int ExceptionLocalIndex,
+        string ExceptionVariableName,
+        string Condition);
 
     internal readonly record struct ExceptionRegionInfo(
         ExceptionRegionKind Kind,
@@ -525,7 +540,8 @@ internal static class ManagedSymbolReader
         int TryLength,
         int HandlerOffset,
         int HandlerLength,
-        string? CatchType = null);
+        string? CatchType = null,
+        int FilterOffset = -1);
 
     private sealed record ReconContext(
         MetadataReader Metadata,
@@ -660,7 +676,8 @@ internal static class ManagedSymbolReader
                 if (startingRegions.Length > 0)
                 {
                     var outerFinally = TryFindOuterFinally(startingRegions);
-                    var structuredException = startingRegions.All(region => region.Kind == ExceptionRegionKind.Catch)
+                    var structuredException = startingRegions.All(region =>
+                            region.Kind is ExceptionRegionKind.Catch or ExceptionRegionKind.Filter)
                         ? TryStructureCatch(
                             context,
                             instructions,
@@ -882,10 +899,10 @@ internal static class ManagedSymbolReader
         var outerTryEnd = outerFinally.TryOffset + outerFinally.TryLength;
         if (startingRegions.Any(region =>
                 region != outerFinally &&
-                (region.Kind != ExceptionRegionKind.Catch ||
+                (region.Kind is not (ExceptionRegionKind.Catch or ExceptionRegionKind.Filter) ||
                  region.TryOffset != outerFinally.TryOffset ||
                  region.TryLength >= outerFinally.TryLength ||
-                 region.HandlerOffset < region.TryOffset + region.TryLength ||
+                 ExceptionClauseStartOffset(region) < region.TryOffset + region.TryLength ||
                  region.HandlerOffset + region.HandlerLength > outerTryEnd)))
         {
             return null;
@@ -893,6 +910,9 @@ internal static class ManagedSymbolReader
 
         return outerFinally;
     }
+
+    private static int ExceptionClauseStartOffset(ExceptionRegionInfo region) =>
+        region.Kind == ExceptionRegionKind.Filter ? region.FilterOffset : region.HandlerOffset;
 
     // 同一個 try 的 catch handlers 會在 metadata 中共用保護區間，並依序排列到共同 join。
     // handler 入口的例外物件只接受 pop（未命名）或 stloc（具名）兩種標準形狀。
@@ -912,15 +932,15 @@ internal static class ManagedSymbolReader
         }
 
         var orderedRegions = regions
-            .OrderBy(region => region.HandlerOffset)
+            .OrderBy(ExceptionClauseStartOffset)
             .ToArray();
         var firstRegion = orderedRegions[0];
         if (orderedRegions.Any(region =>
-                region.Kind != ExceptionRegionKind.Catch ||
+                region.Kind is not (ExceptionRegionKind.Catch or ExceptionRegionKind.Filter) ||
                 region.TryOffset != firstRegion.TryOffset ||
                 region.TryLength != firstRegion.TryLength ||
-                string.IsNullOrWhiteSpace(region.CatchType) ||
-                IsGeneratedName(region.CatchType)))
+                (region.Kind == ExceptionRegionKind.Catch &&
+                 (string.IsNullOrWhiteSpace(region.CatchType) || IsGeneratedName(region.CatchType)))))
         {
             return null;
         }
@@ -936,7 +956,7 @@ internal static class ManagedSymbolReader
             tryStartIndex >= tryEndIndex ||
             tryEndIndex > joinIndex ||
             joinIndex > end ||
-            orderedRegions[0].HandlerOffset != tryEndOffset)
+            ExceptionClauseStartOffset(orderedRegions[0]) != tryEndOffset)
         {
             return null;
         }
@@ -951,13 +971,16 @@ internal static class ManagedSymbolReader
         for (var handlerOrdinal = 0; handlerOrdinal < orderedRegions.Length; handlerOrdinal++)
         {
             var region = orderedRegions[handlerOrdinal];
+            var clauseStartOffset = ExceptionClauseStartOffset(region);
             var handlerEndOffset = region.HandlerOffset + region.HandlerLength;
-            if (!offsetToIndex.TryGetValue(region.HandlerOffset, out var handlerStartIndex) ||
+            if (!offsetToIndex.TryGetValue(clauseStartOffset, out var clauseStartIndex) ||
+                !offsetToIndex.TryGetValue(region.HandlerOffset, out var handlerStartIndex) ||
                 !offsetToIndex.TryGetValue(handlerEndOffset, out var handlerEndIndex) ||
+                clauseStartIndex > handlerStartIndex ||
                 handlerStartIndex >= handlerEndIndex ||
                 handlerEndIndex > joinIndex ||
                 (handlerOrdinal + 1 < orderedRegions.Length
-                    ? handlerEndOffset != orderedRegions[handlerOrdinal + 1].HandlerOffset
+                    ? handlerEndOffset != ExceptionClauseStartOffset(orderedRegions[handlerOrdinal + 1])
                     : handlerEndOffset != joinOffset))
             {
                 return null;
@@ -987,15 +1010,40 @@ internal static class ManagedSymbolReader
             var handlerBodyStart = handlerStartIndex + 1;
             int? exceptionLocalIndex = null;
             string? exceptionVariableName = null;
-            if (prologue.Name != "pop")
+            string catchType;
+            string? filterCondition = null;
+            if (region.Kind == ExceptionRegionKind.Filter)
             {
-                exceptionLocalIndex = TryGetStoredLocalIndex(context, prologue);
-                if (exceptionLocalIndex is null || region.CatchType == "System.Object")
+                var filter = TryStructureCatchFilter(
+                    context,
+                    instructions,
+                    offsetToIndex,
+                    region,
+                    handlerOrdinal,
+                    declaredLocals);
+                if (filter is null || prologue.Name != "pop")
                 {
                     return null;
                 }
 
-                exceptionVariableName = CreateCatchVariableName(context, handlerOrdinal);
+                catchType = filter.CatchType;
+                exceptionLocalIndex = filter.ExceptionLocalIndex;
+                exceptionVariableName = filter.ExceptionVariableName;
+                filterCondition = filter.Condition;
+            }
+            else
+            {
+                catchType = region.CatchType!;
+                if (prologue.Name != "pop")
+                {
+                    exceptionLocalIndex = TryGetStoredLocalIndex(context, prologue);
+                    if (exceptionLocalIndex is null || catchType == "System.Object")
+                    {
+                        return null;
+                    }
+
+                    exceptionVariableName = CreateCatchVariableName(context, handlerOrdinal);
+                }
             }
 
             if (handlerBodyStart > handlerBodyEnd)
@@ -1004,11 +1052,12 @@ internal static class ManagedSymbolReader
             }
 
             handlers.Add(new CatchHandlerShape(
-                region,
+                catchType,
                 handlerBodyStart,
                 handlerBodyEnd,
                 exceptionLocalIndex,
-                exceptionVariableName));
+                exceptionVariableName,
+                filterCondition));
         }
 
         var tryBodyEnd = tryEndIndex - 1;
@@ -1081,7 +1130,7 @@ internal static class ManagedSymbolReader
 
         foreach (var handler in handlers)
         {
-            var catchType = handler.Region.CatchType!;
+            var catchType = handler.CatchType;
             if (catchType == "System.Object")
             {
                 statements.Add("catch");
@@ -1089,7 +1138,8 @@ internal static class ManagedSymbolReader
             else
             {
                 var variable = handler.ExceptionVariableName is null ? "" : $" {handler.ExceptionVariableName}";
-                statements.Add($"catch ({catchType}{variable})");
+                var filter = handler.FilterCondition is null ? "" : $" when ({handler.FilterCondition})";
+                statements.Add($"catch ({catchType}{variable}){filter}");
             }
 
             var handlerLocals = new HashSet<int>(declaredLocals);
@@ -1125,6 +1175,139 @@ internal static class ManagedSymbolReader
         }
 
         return new StructuredException(statements, joinIndex);
+    }
+
+    // Roslyn 的標準 catch filter：isinst → 保存具型別例外 → 純運算式 predicate →
+    // ldc.i4.0/cgt.un → endfilter。Debug 會在 predicate 尾端多一組 stloc/ldloc 布林暫存。
+    private static CatchFilterShape? TryStructureCatchFilter(
+        ReconContext context,
+        Instr[] instructions,
+        Dictionary<int, int> offsetToIndex,
+        ExceptionRegionInfo region,
+        int handlerOrdinal,
+        HashSet<int> declaredLocals)
+    {
+        var prologue = TryReadCatchFilterPrologue(context, instructions, offsetToIndex, region);
+        if (prologue is null)
+        {
+            return null;
+        }
+
+        var variableName = CreateCatchVariableName(context, handlerOrdinal);
+        var filterContext = context with
+        {
+            LocalNames = context.LocalNames
+                .Where(pair => pair.Key != prologue.ExceptionLocalIndex)
+                .Append(new KeyValuePair<int, string>(prologue.ExceptionLocalIndex, variableName))
+                .ToDictionary(pair => pair.Key, pair => pair.Value)
+        };
+        var filterLocals = new HashSet<int>(declaredLocals)
+        {
+            prologue.ExceptionLocalIndex
+        };
+        var predicate = TryProcessStraightLine(
+            filterContext,
+            instructions,
+            prologue.PredicateStartIndex,
+            prologue.PredicateEndIndex,
+            filterLocals);
+        if (predicate is null || predicate.Value.Statements.Count != 0 || predicate.Value.Stack.Count != 1)
+        {
+            return null;
+        }
+
+        var condition = predicate.Value.Stack.Pop();
+        condition = condition switch
+        {
+            "0" => "false",
+            "1" => "true",
+            _ => condition
+        };
+        return new CatchFilterShape(
+            prologue.CatchType,
+            prologue.ExceptionLocalIndex,
+            variableName,
+            condition);
+    }
+
+    private static CatchFilterPrologue? TryReadCatchFilterPrologue(
+        ReconContext context,
+        Instr[] instructions,
+        Dictionary<int, int> offsetToIndex,
+        ExceptionRegionInfo region)
+    {
+        if (region.Kind != ExceptionRegionKind.Filter ||
+            region.FilterOffset < 0 ||
+            !offsetToIndex.TryGetValue(region.FilterOffset, out var filterStartIndex) ||
+            !offsetToIndex.TryGetValue(region.HandlerOffset, out var handlerStartIndex) ||
+            filterStartIndex + 6 >= handlerStartIndex)
+        {
+            return null;
+        }
+
+        var isInstance = instructions[filterStartIndex];
+        var duplicate = instructions[filterStartIndex + 1];
+        var hasType = instructions[filterStartIndex + 2];
+        var discardFailedCast = instructions[filterStartIndex + 3];
+        var falseValue = instructions[filterStartIndex + 4];
+        var skipPredicate = instructions[filterStartIndex + 5];
+        if (isInstance.Name != "isinst" ||
+            duplicate.Name != "dup" ||
+            hasType.Name is not ("brtrue" or "brtrue.s") ||
+            discardFailedCast.Name != "pop" ||
+            falseValue.Name != "ldc.i4.0" ||
+            skipPredicate.Name is not ("br" or "br.s") ||
+            !offsetToIndex.TryGetValue(hasType.Target, out var storeExceptionIndex) ||
+            storeExceptionIndex != filterStartIndex + 6)
+        {
+            return null;
+        }
+
+        var catchType = GetTypeName(
+            context.Metadata,
+            MetadataTokens.EntityHandle(BinaryPrimitives.ReadInt32LittleEndian(
+                context.Il.AsSpan(isInstance.OperandOffset, 4))));
+        var exceptionLocalIndex = TryGetStoredLocalIndex(context, instructions[storeExceptionIndex]);
+        var endFilterIndex = handlerStartIndex - 1;
+        var normalizeIndex = endFilterIndex - 1;
+        var normalizeValueIndex = endFilterIndex - 2;
+        if (string.IsNullOrWhiteSpace(catchType) ||
+            IsGeneratedName(catchType) ||
+            exceptionLocalIndex is null ||
+            normalizeValueIndex <= storeExceptionIndex ||
+            instructions[endFilterIndex].Name != "endfilter" ||
+            skipPredicate.Target != instructions[endFilterIndex].Offset ||
+            instructions[normalizeValueIndex].Name != "ldc.i4.0" ||
+            instructions[normalizeIndex].Name != "cgt.un")
+        {
+            return null;
+        }
+
+        var predicateStartIndex = storeExceptionIndex + 1;
+        var predicateEndIndex = normalizeValueIndex;
+        int? predicateTemporaryLocalIndex = null;
+        if (predicateEndIndex - predicateStartIndex >= 2)
+        {
+            var storedTemporary = TryGetStoredLocalIndex(context, instructions[predicateEndIndex - 2]);
+            var loadedTemporary = TryGetLoadedLocalIndex(context, instructions[predicateEndIndex - 1]);
+            if (storedTemporary is not null && loadedTemporary == storedTemporary)
+            {
+                predicateTemporaryLocalIndex = storedTemporary;
+                predicateEndIndex -= 2;
+            }
+        }
+
+        if (predicateStartIndex >= predicateEndIndex)
+        {
+            return null;
+        }
+
+        return new CatchFilterPrologue(
+            catchType,
+            exceptionLocalIndex.Value,
+            predicateStartIndex,
+            predicateEndIndex,
+            predicateTemporaryLocalIndex);
     }
 
     private static string CreateCatchVariableName(ReconContext context, int ordinal)
@@ -1183,19 +1366,36 @@ internal static class ManagedSymbolReader
         // Release 最佳化會讓內層 try/catch 的所有 leave 直接跳過 finally，且最後一個
         // catch handler 恰好結束在 finally handler 起點；此時尾端 leave 屬於 catch，不能先剝掉。
         var hasRedirectedCatchLeaves = context.ExceptionRegions.Any(candidate =>
-            candidate.Kind == ExceptionRegionKind.Catch &&
+            candidate.Kind is ExceptionRegionKind.Catch or ExceptionRegionKind.Filter &&
             candidate.TryOffset == region.TryOffset &&
             candidate.HandlerOffset + candidate.HandlerLength == tryEndOffset);
         var tryBodyEnd = hasRedirectedCatchLeaves ? tryEndIndex : tryEndIndex - 1;
         var finallyBodyEnd = handlerEndIndex - 1;
         var nestedCatchExceptionLocals = new HashSet<int>();
         foreach (var nestedCatch in context.ExceptionRegions.Where(candidate =>
-                     candidate.Kind == ExceptionRegionKind.Catch &&
+                     candidate.Kind is ExceptionRegionKind.Catch or ExceptionRegionKind.Filter &&
                      candidate.TryOffset >= region.TryOffset &&
                      candidate.TryOffset + candidate.TryLength <= tryEndOffset &&
-                     candidate.HandlerOffset >= region.TryOffset &&
+                     ExceptionClauseStartOffset(candidate) >= region.TryOffset &&
                      candidate.HandlerOffset + candidate.HandlerLength <= tryEndOffset))
         {
+            if (nestedCatch.Kind == ExceptionRegionKind.Filter)
+            {
+                var filter = TryReadCatchFilterPrologue(context, instructions, offsetToIndex, nestedCatch);
+                if (filter is null)
+                {
+                    return null;
+                }
+
+                nestedCatchExceptionLocals.Add(filter.ExceptionLocalIndex);
+                if (filter.PredicateTemporaryLocalIndex is int predicateTemporaryLocalIndex)
+                {
+                    nestedCatchExceptionLocals.Add(predicateTemporaryLocalIndex);
+                }
+
+                continue;
+            }
+
             if (!offsetToIndex.TryGetValue(nestedCatch.HandlerOffset, out var nestedHandlerStartIndex))
             {
                 return null;
@@ -1488,6 +1688,17 @@ internal static class ManagedSymbolReader
         "stloc.3" => 3,
         "stloc.s" => context.Il[instruction.OperandOffset],
         "stloc" => BinaryPrimitives.ReadUInt16LittleEndian(context.Il.AsSpan(instruction.OperandOffset, 2)),
+        _ => null
+    };
+
+    private static int? TryGetLoadedLocalIndex(ReconContext context, Instr instruction) => instruction.Name switch
+    {
+        "ldloc.0" => 0,
+        "ldloc.1" => 1,
+        "ldloc.2" => 2,
+        "ldloc.3" => 3,
+        "ldloc.s" => context.Il[instruction.OperandOffset],
+        "ldloc" => BinaryPrimitives.ReadUInt16LittleEndian(context.Il.AsSpan(instruction.OperandOffset, 2)),
         _ => null
     };
 
