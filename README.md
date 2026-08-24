@@ -4,6 +4,16 @@ ExeBlueprint 用來整理 Windows 應用程式套件。它會掃描 EXE、DLL、
 
 目前版本只做靜態分析，不會執行輸入程式。
 
+## 下載
+
+不想安裝 .NET SDK，可以直接到 [GitHub Releases](https://github.com/NickYCLin/exe-blueprint/releases/latest) 下載 Windows 64 位元自包含版本：
+
+- `exe-blueprint-v0.1.0-win-x64.exe`：可直接執行的單檔版。
+- `exe-blueprint-v0.1.0-win-x64.zip`：方便下載與保存的壓縮版。
+- `SHA256SUMS.txt`：用來核對下載檔是否完整。
+
+目前執行檔尚未做程式碼簽章，Windows 可能顯示 SmartScreen 提醒。請只從本專案的 Releases 下載，並核對 SHA-256。
+
 ## 目前能做什麼
 
 - 分析單一檔案、完整資料夾或 ZIP

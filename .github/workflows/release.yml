@@ -1,0 +1,117 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Verify version
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if ($env:RELEASE_TAG -notmatch '^v(?<version>\d+\.\d+\.\d+)$') {
+              throw "Tag 格式錯誤：$env:RELEASE_TAG"
+          }
+
+          [xml] $project = Get-Content .\src\ExeBlueprint.Cli\ExeBlueprint.Cli.csproj -Raw
+          $projectVersion = [string] $project.Project.PropertyGroup.Version
+          if ($projectVersion -ne $Matches.version) {
+              throw "Tag 版本 $($Matches.version) 與專案版本 $projectVersion 不一致。"
+          }
+
+          $notesPath = ".\docs\releases\$env:RELEASE_TAG.md"
+          if (-not (Test-Path -LiteralPath $notesPath)) {
+              throw "找不到版本說明：$notesPath"
+          }
+
+      - name: Restore
+        run: dotnet restore .\ExeBlueprint.slnx
+
+      - name: Test
+        run: dotnet test .\ExeBlueprint.slnx -c Release --no-restore
+
+      - name: Publish and package
+        id: package
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $version = $env:RELEASE_TAG.TrimStart('v')
+          $publishDir = Join-Path $env:RUNNER_TEMP 'exe-blueprint-publish'
+          $assetDir = Join-Path $env:RUNNER_TEMP 'exe-blueprint-assets'
+          New-Item -ItemType Directory -Path $publishDir, $assetDir -Force | Out-Null
+
+          dotnet publish .\src\ExeBlueprint.Cli `
+              -c Release `
+              -r win-x64 `
+              --self-contained true `
+              --no-restore `
+              -p:Version=$version `
+              -p:DebugSymbols=false `
+              -p:DebugType=None `
+              -o $publishDir
+
+          $exeName = "exe-blueprint-$env:RELEASE_TAG-win-x64.exe"
+          $zipName = "exe-blueprint-$env:RELEASE_TAG-win-x64.zip"
+          $exePath = Join-Path $assetDir $exeName
+          $zipPath = Join-Path $assetDir $zipName
+          Copy-Item -LiteralPath (Join-Path $publishDir 'exe-blueprint.exe') -Destination $exePath
+          Compress-Archive -LiteralPath $exePath -DestinationPath $zipPath -CompressionLevel Optimal
+
+          $checksumPath = Join-Path $assetDir 'SHA256SUMS.txt'
+          $checksumLines = foreach ($path in @($exePath, $zipPath)) {
+              $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+              "$hash  $(Split-Path -Leaf $path)"
+          }
+          [System.IO.File]::WriteAllLines($checksumPath, $checksumLines, [System.Text.Encoding]::ASCII)
+
+          "asset_dir=$assetDir" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Create GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          ASSET_DIR: ${{ steps.package.outputs.asset_dir }}
+        run: |
+          $notesPath = ".\docs\releases\$env:RELEASE_TAG.md"
+          $assets = Get-ChildItem -LiteralPath $env:ASSET_DIR -File |
+              Sort-Object Name |
+              Select-Object -ExpandProperty FullName
+
+          gh release view $env:RELEASE_TAG *> $null
+          $releaseExists = $LASTEXITCODE -eq 0
+          if ($releaseExists) {
+              gh release upload $env:RELEASE_TAG @assets --clobber
+              gh release edit $env:RELEASE_TAG `
+                  --title "ExeBlueprint $env:RELEASE_TAG" `
+                  --notes-file $notesPath
+          }
+          else {
+              gh release create $env:RELEASE_TAG @assets `
+                  --verify-tag `
+                  --title "ExeBlueprint $env:RELEASE_TAG" `
+                  --notes-file $notesPath
+          }
