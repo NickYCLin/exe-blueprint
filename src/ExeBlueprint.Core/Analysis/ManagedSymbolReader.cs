@@ -105,6 +105,7 @@ internal static class ManagedSymbolReader
                             il,
                             isInstance,
                             ReadParameterNames(metadata, method),
+                            model.Parameters.Select(parameter => parameter.Type).ToArray(),
                             model.ReturnType,
                             localTypes,
                             exceptionRegions);
@@ -504,6 +505,7 @@ internal static class ManagedSymbolReader
         string Name,
         int ParamCount,
         bool HasThis,
+        string ReturnType,
         bool ReturnsVoid,
         IReadOnlyList<string> ParameterTypes);
 
@@ -562,11 +564,13 @@ internal static class ManagedSymbolReader
         MetadataReader Metadata,
         byte[] Il,
         Dictionary<int, string> ParameterNames,
+        IReadOnlyList<string> ParameterTypes,
         bool IsInstance,
         string ReturnType,
         IReadOnlyList<string> LocalTypes,
         IReadOnlyList<ExceptionRegionInfo> ExceptionRegions,
         IReadOnlyDictionary<int, string> LocalNames,
+        Dictionary<string, string> ExpressionTypes,
         ExceptionLeaveRedirect? LeaveRedirect,
         int CatchDepth);
 
@@ -577,12 +581,14 @@ internal static class ManagedSymbolReader
         bool isInstance,
         string returnType,
         IReadOnlyList<string>? localTypes = null,
-        IReadOnlyList<ExceptionRegionInfo>? exceptionRegions = null) =>
+        IReadOnlyList<ExceptionRegionInfo>? exceptionRegions = null,
+        IReadOnlyList<string>? parameterTypes = null) =>
         TryReconstructLinearBody(
             metadata,
             il,
             isInstance,
             new Dictionary<int, string>(),
+            parameterTypes ?? [],
             returnType,
             localTypes ?? [],
             exceptionRegions ?? []);
@@ -595,6 +601,7 @@ internal static class ManagedSymbolReader
         byte[] il,
         bool isInstance,
         Dictionary<int, string> parameterNames,
+        IReadOnlyList<string> parameterTypes,
         string returnType,
         IReadOnlyList<string> localTypes,
         IReadOnlyList<ExceptionRegionInfo> exceptionRegions)
@@ -644,11 +651,13 @@ internal static class ManagedSymbolReader
             metadata,
             il,
             parameterNames,
+            parameterTypes,
             isInstance,
             returnType,
             localTypes,
             exceptionRegions,
             new Dictionary<int, string>(),
+            new Dictionary<string, string>(StringComparer.Ordinal),
             LeaveRedirect: null,
             CatchDepth: 0);
         return TryStructure(context, [.. instructions], offsetToIndex, 0, instructions.Count, new HashSet<int>(), 0);
@@ -733,7 +742,7 @@ internal static class ManagedSymbolReader
                 {
                     var processed = TryProcessStraightLine(context, instructions, index, branchIndex, declaredLocals);
                     if (processed is null ||
-                        !TryBuildTakenCondition(instructions[branchIndex].Name, processed.Value.Stack, out var doCondition) ||
+                        !TryBuildTakenCondition(context, instructions[branchIndex].Name, processed.Value.Stack, out var doCondition) ||
                         processed.Value.Stack.Count != 0)
                     {
                         return null;
@@ -837,7 +846,7 @@ internal static class ManagedSymbolReader
                 return null;
             }
 
-            if (!TryBuildCondition(instr.Name, stack, out var condition) || stack.Count != 0)
+            if (!TryBuildCondition(context, instr.Name, stack, out var condition) || stack.Count != 0)
             {
                 return null;
             }
@@ -1357,8 +1366,8 @@ internal static class ManagedSymbolReader
 
             var takenStack = new Stack<string>(condition.Value.Stack.Reverse());
             var fallThroughStack = new Stack<string>(condition.Value.Stack.Reverse());
-            if (!TryBuildTakenCondition(branch.Name, takenStack, out var takenCondition) ||
-                !TryBuildCondition(branch.Name, fallThroughStack, out var fallThroughCondition) ||
+            if (!TryBuildTakenCondition(context, branch.Name, takenStack, out var takenCondition) ||
+                !TryBuildCondition(context, branch.Name, fallThroughStack, out var fallThroughCondition) ||
                 takenStack.Count != 0 ||
                 fallThroughStack.Count != 0)
             {
@@ -1927,7 +1936,7 @@ internal static class ManagedSymbolReader
     };
 
     // 依分支指令算出「順順落下（fall-through）」時的 C# 條件，也就是不跳轉時該執行 then 區塊的條件。
-    private static bool TryBuildCondition(string name, Stack<string> stack, out string condition)
+    private static bool TryBuildCondition(ReconContext context, string name, Stack<string> stack, out string condition)
     {
         condition = string.Empty;
         switch (name)
@@ -1939,7 +1948,7 @@ internal static class ManagedSymbolReader
                     return false;
                 }
 
-                condition = $"!({truthy})";
+                condition = RenderBranchCondition(context, truthy, branchWhenTrue: false);
                 return true;
             case "brfalse":
             case "brfalse.s":
@@ -1948,7 +1957,7 @@ internal static class ManagedSymbolReader
                     return false;
                 }
 
-                condition = falsy;
+                condition = RenderBranchCondition(context, falsy, branchWhenTrue: true);
                 return true;
         }
 
@@ -2076,7 +2085,7 @@ internal static class ManagedSymbolReader
         }
 
         // 迴圈條件必須是純運算式，不能夾帶副作用陳述式。
-        if (statements.Count != 0 || !TryBuildTakenCondition(instructions[branchIndex].Name, stack, out var condition) || stack.Count != 0)
+        if (statements.Count != 0 || !TryBuildTakenCondition(context, instructions[branchIndex].Name, stack, out var condition) || stack.Count != 0)
         {
             return null;
         }
@@ -2085,7 +2094,7 @@ internal static class ManagedSymbolReader
     }
 
     // 分支「成立時」的 C# 條件；用於迴圈（往回跳＝再跑一次主體）。
-    private static bool TryBuildTakenCondition(string name, Stack<string> stack, out string condition)
+    private static bool TryBuildTakenCondition(ReconContext context, string name, Stack<string> stack, out string condition)
     {
         condition = string.Empty;
         switch (name)
@@ -2097,7 +2106,7 @@ internal static class ManagedSymbolReader
                     return false;
                 }
 
-                condition = truthy;
+                condition = RenderBranchCondition(context, truthy, branchWhenTrue: true);
                 return true;
             case "brfalse":
             case "brfalse.s":
@@ -2106,7 +2115,7 @@ internal static class ManagedSymbolReader
                     return false;
                 }
 
-                condition = $"!({falsy})";
+                condition = RenderBranchCondition(context, falsy, branchWhenTrue: false);
                 return true;
         }
 
@@ -2129,6 +2138,56 @@ internal static class ManagedSymbolReader
         return condition.Length > 0;
     }
 
+    // brtrue／brfalse 可直接判斷 bool、整數、managed pointer 與 object reference，C# 則要求 bool 條件。
+    // 已知參考型別用 null pattern；其他具名值以 default 比較，保留 CLR 的零值判斷語意。
+    private static string RenderBranchCondition(ReconContext context, string expression, bool branchWhenTrue)
+    {
+        if (!context.ExpressionTypes.TryGetValue(expression, out var type) || type == "bool")
+        {
+            return branchWhenTrue ? expression : $"!({expression})";
+        }
+
+        if (IsKnownReferenceType(context.Metadata, type))
+        {
+            return $"{expression} is {(branchWhenTrue ? "not null" : "null")}";
+        }
+
+        if (type.StartsWith('!') ||
+            type.StartsWith("ref ", StringComparison.Ordinal) ||
+            type.EndsWith('*') ||
+            type is "TypedReference" or "method*")
+        {
+            return branchWhenTrue ? expression : $"!({expression})";
+        }
+
+        var isDefault = $"System.Collections.Generic.EqualityComparer<{type}>.Default.Equals({expression}, default)";
+        return branchWhenTrue ? $"!({isDefault})" : isDefault;
+    }
+
+    private static bool IsKnownReferenceType(MetadataReader metadata, string type)
+    {
+        if (type is "string" or "object" || type.EndsWith(']'))
+        {
+            return true;
+        }
+
+        var genericStart = type.IndexOf('<');
+        var definitionName = genericStart >= 0 ? type[..genericStart] : type;
+        foreach (var handle in metadata.TypeDefinitions)
+        {
+            if (GetTypeDefinitionFullName(metadata, handle) != definitionName)
+            {
+                continue;
+            }
+
+            var definition = metadata.GetTypeDefinition(handle);
+            var baseType = GetTypeName(metadata, definition.BaseType);
+            return baseType is not ("System.Enum" or "System.ValueType");
+        }
+
+        return false;
+    }
+
     private static string ArgName(ReconContext context, int slot)
     {
         if (context.IsInstance)
@@ -2142,6 +2201,34 @@ internal static class ManagedSymbolReader
         }
 
         return context.ParameterNames.TryGetValue(slot + 1, out var value) && !string.IsNullOrEmpty(value) ? value : $"arg{slot}";
+    }
+
+    private static string? ArgType(ReconContext context, int slot)
+    {
+        var parameterIndex = context.IsInstance ? slot - 1 : slot;
+        return parameterIndex >= 0 && parameterIndex < context.ParameterTypes.Count
+            ? context.ParameterTypes[parameterIndex]
+            : null;
+    }
+
+    private static void PushArgument(ReconContext context, Stack<string> stack, int slot) =>
+        PushExpression(context, stack, ArgName(context, slot), ArgType(context, slot));
+
+    private static void PushLocal(ReconContext context, Stack<string> stack, int index) =>
+        PushExpression(
+            context,
+            stack,
+            LocalName(context, index),
+            index >= 0 && index < context.LocalTypes.Count ? context.LocalTypes[index] : null);
+
+    private static void PushExpression(ReconContext context, Stack<string> stack, string expression, string? type)
+    {
+        if (!string.IsNullOrEmpty(type))
+        {
+            context.ExpressionTypes[expression] = type;
+        }
+
+        stack.Push(expression);
     }
 
     private static bool ApplySimpleInstruction(
@@ -2166,22 +2253,22 @@ internal static class ManagedSymbolReader
                 return false;
 
             case "ldarg.0":
-                stack.Push(ArgName(context, 0));
+                PushArgument(context, stack, 0);
                 return true;
             case "ldarg.1":
-                stack.Push(ArgName(context, 1));
+                PushArgument(context, stack, 1);
                 return true;
             case "ldarg.2":
-                stack.Push(ArgName(context, 2));
+                PushArgument(context, stack, 2);
                 return true;
             case "ldarg.3":
-                stack.Push(ArgName(context, 3));
+                PushArgument(context, stack, 3);
                 return true;
             case "ldarg.s":
-                stack.Push(ArgName(context, il[offset]));
+                PushArgument(context, stack, il[offset]);
                 return true;
             case "ldarg":
-                stack.Push(ArgName(context, BinaryPrimitives.ReadUInt16LittleEndian(il.AsSpan(offset, 2))));
+                PushArgument(context, stack, BinaryPrimitives.ReadUInt16LittleEndian(il.AsSpan(offset, 2)));
                 return true;
             case "starg.s":
                 if (!TryPop(stack, out var stargValue))
@@ -2193,13 +2280,17 @@ internal static class ManagedSymbolReader
                 return true;
 
             case "ldnull":
-                stack.Push("null");
+                PushExpression(context, stack, "null", "object");
                 return true;
             case "ldstr":
-                stack.Push(EscapeCSharpString(ReadUserString(metadata, BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)))));
+                PushExpression(
+                    context,
+                    stack,
+                    EscapeCSharpString(ReadUserString(metadata, BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)))),
+                    "string");
                 return true;
             case "ldc.i4.m1":
-                stack.Push("-1");
+                PushExpression(context, stack, "-1", "int");
                 return true;
             case "ldc.i4.0":
             case "ldc.i4.1":
@@ -2210,35 +2301,35 @@ internal static class ManagedSymbolReader
             case "ldc.i4.6":
             case "ldc.i4.7":
             case "ldc.i4.8":
-                stack.Push(name["ldc.i4.".Length..]);
+                PushExpression(context, stack, name["ldc.i4.".Length..], "int");
                 return true;
             case "ldc.i4.s":
-                stack.Push(((sbyte)il[offset]).ToString());
+                PushExpression(context, stack, ((sbyte)il[offset]).ToString(), "int");
                 return true;
             case "ldc.i4":
-                stack.Push(BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)).ToString());
+                PushExpression(context, stack, BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)).ToString(), "int");
                 return true;
             case "ldc.i8":
-                stack.Push($"{BinaryPrimitives.ReadInt64LittleEndian(il.AsSpan(offset, 8))}L");
+                PushExpression(context, stack, $"{BinaryPrimitives.ReadInt64LittleEndian(il.AsSpan(offset, 8))}L", "long");
                 return true;
             case "ldc.r4":
-                stack.Push($"{BitConverter.Int32BitsToSingle(BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)))}f");
+                PushExpression(context, stack, $"{BitConverter.Int32BitsToSingle(BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)))}f", "float");
                 return true;
             case "ldc.r8":
-                stack.Push($"{BitConverter.Int64BitsToDouble(BinaryPrimitives.ReadInt64LittleEndian(il.AsSpan(offset, 8)))}");
+                PushExpression(context, stack, $"{BitConverter.Int64BitsToDouble(BinaryPrimitives.ReadInt64LittleEndian(il.AsSpan(offset, 8)))}", "double");
                 return true;
 
             case "ldloc.0":
             case "ldloc.1":
             case "ldloc.2":
             case "ldloc.3":
-                stack.Push(LocalName(context, int.Parse(name["ldloc.".Length..])));
+                PushLocal(context, stack, int.Parse(name["ldloc.".Length..]));
                 return true;
             case "ldloc.s":
-                stack.Push(LocalName(context, il[offset]));
+                PushLocal(context, stack, il[offset]);
                 return true;
             case "ldloc":
-                stack.Push(LocalName(context, BinaryPrimitives.ReadUInt16LittleEndian(il.AsSpan(offset, 2))));
+                PushLocal(context, stack, BinaryPrimitives.ReadUInt16LittleEndian(il.AsSpan(offset, 2)));
                 return true;
             case "stloc.0":
             case "stloc.1":
@@ -2257,7 +2348,11 @@ internal static class ManagedSymbolReader
                     return false;
                 }
 
-                stack.Push($"{loadStatic.Value.DeclaringType}.{loadStatic.Value.Name}");
+                PushExpression(
+                    context,
+                    stack,
+                    $"{loadStatic.Value.DeclaringType}.{loadStatic.Value.Name}",
+                    loadStatic.Value.Type);
                 return true;
             case "ldfld":
                 var loadField = ResolveField(metadata, BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)));
@@ -2266,7 +2361,7 @@ internal static class ManagedSymbolReader
                     return false;
                 }
 
-                stack.Push($"{fieldTarget}.{loadField.Value.Name}");
+                PushExpression(context, stack, $"{fieldTarget}.{loadField.Value.Name}", loadField.Value.Type);
                 return true;
             case "stsfld":
                 var storeStatic = ResolveField(metadata, BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)));
@@ -2300,19 +2395,19 @@ internal static class ManagedSymbolReader
             case "shl":
             case "shr":
             case "shr.un":
-                return TryBinary(stack, BinaryOperator(name));
+                return TryBinary(context, stack, BinaryOperator(name));
             case "ceq":
-                return TryBinary(stack, "==");
+                return TryBinary(context, stack, "==", "bool");
             case "cgt":
             case "cgt.un":
-                return TryBinary(stack, ">");
+                return TryBinary(context, stack, ">", "bool");
             case "clt":
             case "clt.un":
-                return TryBinary(stack, "<");
+                return TryBinary(context, stack, "<", "bool");
             case "neg":
-                return TryUnary(stack, "-");
+                return TryUnary(context, stack, "-");
             case "not":
-                return TryUnary(stack, "~");
+                return TryUnary(context, stack, "~");
 
             case "conv.i1":
             case "conv.i2":
@@ -2324,7 +2419,7 @@ internal static class ManagedSymbolReader
             case "conv.u8":
             case "conv.r4":
             case "conv.r8":
-                return TryUnaryCast(stack, ConversionType(name));
+                return TryUnaryCast(context, stack, ConversionType(name));
 
             case "castclass":
                 var castType = GetTypeName(metadata, MetadataTokens.EntityHandle(BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4))));
@@ -2333,7 +2428,7 @@ internal static class ManagedSymbolReader
                     return false;
                 }
 
-                stack.Push($"(({castType}){castValue})");
+                PushExpression(context, stack, $"(({castType}){castValue})", castType);
                 return true;
             case "isinst":
                 var instType = GetTypeName(metadata, MetadataTokens.EntityHandle(BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4))));
@@ -2342,14 +2437,14 @@ internal static class ManagedSymbolReader
                     return false;
                 }
 
-                stack.Push($"({instValue} as {instType})");
+                PushExpression(context, stack, $"({instValue} as {instType})", instType);
                 return true;
 
             case "call":
             case "callvirt":
-                return TryEmitCall(metadata, BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)), stack, statements);
+                return TryEmitCall(context, BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)), stack, statements);
             case "newobj":
-                return TryEmitNewObject(metadata, BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)), stack);
+                return TryEmitNewObject(context, BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)), stack);
 
             case "pop":
                 if (!TryPop(stack, out var discarded))
@@ -2421,7 +2516,7 @@ internal static class ManagedSymbolReader
         return true;
     }
 
-    private static bool TryBinary(Stack<string> stack, string op)
+    private static bool TryBinary(ReconContext context, Stack<string> stack, string op, string? resultType = null)
     {
         if (stack.Count < 2)
         {
@@ -2430,29 +2525,35 @@ internal static class ManagedSymbolReader
 
         var right = stack.Pop();
         var left = stack.Pop();
-        stack.Push($"({left} {op} {right})");
+        if (resultType is null)
+        {
+            context.ExpressionTypes.TryGetValue(left, out resultType);
+        }
+
+        PushExpression(context, stack, $"({left} {op} {right})", resultType);
         return true;
     }
 
-    private static bool TryUnary(Stack<string> stack, string op)
+    private static bool TryUnary(ReconContext context, Stack<string> stack, string op)
     {
         if (!TryPop(stack, out var value))
         {
             return false;
         }
 
-        stack.Push($"({op}{value})");
+        context.ExpressionTypes.TryGetValue(value, out var type);
+        PushExpression(context, stack, $"({op}{value})", type);
         return true;
     }
 
-    private static bool TryUnaryCast(Stack<string> stack, string type)
+    private static bool TryUnaryCast(ReconContext context, Stack<string> stack, string type)
     {
         if (!TryPop(stack, out var value))
         {
             return false;
         }
 
-        stack.Push($"({type})({value})");
+        PushExpression(context, stack, $"({type})({value})", type);
         return true;
     }
 
@@ -2499,8 +2600,9 @@ internal static class ManagedSymbolReader
     private static bool IsGeneratedName(string name) =>
         name.StartsWith('<') || name.Contains(".<", StringComparison.Ordinal) || name.Contains("<>", StringComparison.Ordinal);
 
-    private static bool TryEmitCall(MetadataReader metadata, int token, Stack<string> stack, List<string> statements)
+    private static bool TryEmitCall(ReconContext context, int token, Stack<string> stack, List<string> statements)
     {
+        var metadata = context.Metadata;
         var info = ResolveCall(metadata, token);
         if (info is null || info.Name is ".ctor" or ".cctor" || IsGeneratedName(info.Name))
         {
@@ -2531,14 +2633,14 @@ internal static class ManagedSymbolReader
 
         if (info.Name.StartsWith("op_", StringComparison.Ordinal))
         {
-            return TryEmitOperator(info, args, stack);
+            return TryEmitOperator(context, info, args, stack);
         }
 
         var target = info.HasThis ? receiver! : info.DeclaringType;
 
         if (info.Name.StartsWith("get_", StringComparison.Ordinal) && info.ParamCount == 0)
         {
-            stack.Push($"{target}.{info.Name["get_".Length..]}");
+            PushExpression(context, stack, $"{target}.{info.Name["get_".Length..]}", info.ReturnType);
             return true;
         }
 
@@ -2555,7 +2657,7 @@ internal static class ManagedSymbolReader
         }
         else
         {
-            stack.Push(call);
+            PushExpression(context, stack, call, info.ReturnType);
         }
 
         return true;
@@ -2563,17 +2665,17 @@ internal static class ManagedSymbolReader
 
     // 把運算子方法（op_Equality 等）還原成運算子語法，避免產生 Type.op_Equality(a, b) 這種非法 C#。
     // 對應不到的運算子就放棄整個方法，退回 IL 註解。
-    private static bool TryEmitOperator(CallInfo info, string[] args, Stack<string> stack)
+    private static bool TryEmitOperator(ReconContext context, CallInfo info, string[] args, Stack<string> stack)
     {
         if (info.ParamCount == 2 && BinaryOperators.TryGetValue(info.Name, out var binary))
         {
-            stack.Push($"({args[0]} {binary} {args[1]})");
+            PushExpression(context, stack, $"({args[0]} {binary} {args[1]})", info.ReturnType);
             return true;
         }
 
         if (info.ParamCount == 1 && UnaryOperators.TryGetValue(info.Name, out var unary))
         {
-            stack.Push($"({unary}{args[0]})");
+            PushExpression(context, stack, $"({unary}{args[0]})", info.ReturnType);
             return true;
         }
 
@@ -2608,8 +2710,9 @@ internal static class ManagedSymbolReader
         ["op_OnesComplement"] = "~"
     };
 
-    private static bool TryEmitNewObject(MetadataReader metadata, int token, Stack<string> stack)
+    private static bool TryEmitNewObject(ReconContext context, int token, Stack<string> stack)
     {
+        var metadata = context.Metadata;
         var info = ResolveCall(metadata, token);
         if (info is null || IsGeneratedName(info.DeclaringType))
         {
@@ -2627,7 +2730,7 @@ internal static class ManagedSymbolReader
             args[index] = RenderArgument(argument, index < info.ParameterTypes.Count ? info.ParameterTypes[index] : null);
         }
 
-        stack.Push($"new {info.DeclaringType}({string.Join(", ", args)})");
+        PushExpression(context, stack, $"new {info.DeclaringType}({string.Join(", ", args)})", info.DeclaringType);
         return true;
     }
 
@@ -2699,6 +2802,7 @@ internal static class ManagedSymbolReader
                     metadata.GetString(method.Name),
                     methodSignature.ParameterTypes.Length,
                     methodSignature.Header.IsInstance,
+                    methodSignature.ReturnType,
                     methodSignature.ReturnType == "void",
                     methodSignature.ParameterTypes);
 
@@ -2715,6 +2819,7 @@ internal static class ManagedSymbolReader
                     metadata.GetString(member.Name),
                     memberSignature.ParameterTypes.Length,
                     memberSignature.Header.IsInstance,
+                    memberSignature.ReturnType,
                     memberSignature.ReturnType == "void",
                     memberSignature.ParameterTypes);
 
@@ -2727,14 +2832,17 @@ internal static class ManagedSymbolReader
         }
     }
 
-    private static (string DeclaringType, string Name)? ResolveField(MetadataReader metadata, int token)
+    private static (string DeclaringType, string Name, string Type)? ResolveField(MetadataReader metadata, int token)
     {
         var handle = MetadataTokens.EntityHandle(token);
         switch (handle.Kind)
         {
             case HandleKind.FieldDefinition:
                 var field = metadata.GetFieldDefinition((FieldDefinitionHandle)handle);
-                return (GetTypeName(metadata, field.GetDeclaringType()) ?? string.Empty, NormalizeFieldName(metadata.GetString(field.Name)));
+                return (
+                    GetTypeName(metadata, field.GetDeclaringType()) ?? string.Empty,
+                    NormalizeFieldName(metadata.GetString(field.Name)),
+                    field.DecodeSignature(SignatureTypeNameProvider.Instance, null));
 
             case HandleKind.MemberReference:
                 var member = metadata.GetMemberReference((MemberReferenceHandle)handle);
@@ -2743,7 +2851,10 @@ internal static class ManagedSymbolReader
                     return null;
                 }
 
-                return (GetTypeName(metadata, member.Parent) ?? string.Empty, NormalizeFieldName(metadata.GetString(member.Name)));
+                return (
+                    GetTypeName(metadata, member.Parent) ?? string.Empty,
+                    NormalizeFieldName(metadata.GetString(member.Name)),
+                    member.DecodeFieldSignature(SignatureTypeNameProvider.Instance, null));
 
             default:
                 return null;

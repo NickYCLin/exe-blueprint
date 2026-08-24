@@ -136,6 +136,26 @@ public sealed class ManagedSymbolReaderTests
     }
 
     [Fact]
+    public async Task ReconstructsReferenceBranchesAsNullChecks()
+    {
+        var assemblyPath = typeof(ManagedSymbolReaderTests).Assembly.Location;
+        var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
+        var fixture = Assert.Single(
+            document.Files[0].Code!.Types,
+            type => type.FullName == typeof(ReferenceConditionFixture).FullName);
+
+        var parameter = Assert.Single(
+            fixture.Methods,
+            method => method.Name == nameof(ReferenceConditionFixture.HasParameter));
+        Assert.Contains("if (value is null)", parameter.Body);
+
+        var field = Assert.Single(
+            fixture.Methods,
+            method => method.Name == nameof(ReferenceConditionFixture.HasField));
+        Assert.Contains("if (this._value is null)", field.Body);
+    }
+
+    [Fact]
     public async Task ReconstructsConditionalBranchesIntoIfStatements()
     {
         var assemblyPath = typeof(BlueprintAnalyzer).Assembly.Location;
@@ -737,6 +757,31 @@ internal static class TypedArgumentFixture
 
     public static void DeleteNonRecursively(string path) =>
         Directory.Delete(path, recursive: false);
+}
+
+internal sealed class ReferenceConditionFixture(string? value)
+{
+    private readonly string? _value = value;
+
+    public static bool HasParameter(ReferenceConditionFixture? value)
+    {
+        if (value is null)
+        {
+            return false;
+        }
+
+        return true;
+    }
+
+    public bool HasField()
+    {
+        if (_value is null)
+        {
+            return false;
+        }
+
+        return true;
+    }
 }
 
 internal static class ExceptionHandlingFixture

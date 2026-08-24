@@ -104,6 +104,43 @@ public sealed class IlBodyReconstructionTests
     }
 
     [Fact]
+    public void ReconstructsTypedTruthinessConditions()
+    {
+        // static bool M(T value) { if (value) return true; return false; }
+        byte[] il =
+        [
+            0x02,       // IL_0000 ldarg.0
+            0x2C, 0x02, // IL_0001 brfalse.s IL_0005
+            0x17,       // IL_0003 ldc.i4.1
+            0x2A,       // IL_0004 ret
+            0x16,       // IL_0005 ldc.i4.0
+            0x2A        // IL_0006 ret
+        ];
+
+        var booleanBody = Reconstruct(
+            il,
+            isInstance: false,
+            returnType: "bool",
+            parameterTypes: ["bool"]);
+        Assert.Equal(["if (arg0)", "{", "    return true;", "}", "return false;"], booleanBody);
+
+        var integerBody = Reconstruct(
+            il,
+            isInstance: false,
+            returnType: "bool",
+            parameterTypes: ["int"]);
+        Assert.Equal(
+            [
+                "if (!(System.Collections.Generic.EqualityComparer<int>.Default.Equals(arg0, default)))",
+                "{",
+                "    return true;",
+                "}",
+                "return false;"
+            ],
+            integerBody);
+    }
+
+    [Fact]
     public void ReconstructsTerminalSwitchCases()
     {
         // static int M(int n) => n switch { 0 => 10, 1 => 20, 2 => 30, _ => 99 };
@@ -569,7 +606,8 @@ public sealed class IlBodyReconstructionTests
         bool isInstance,
         string returnType,
         IReadOnlyList<string>? localTypes = null,
-        IReadOnlyList<ManagedSymbolReader.ExceptionRegionInfo>? exceptionRegions = null)
+        IReadOnlyList<ManagedSymbolReader.ExceptionRegionInfo>? exceptionRegions = null,
+        IReadOnlyList<string>? parameterTypes = null)
     {
         // 隨便挑一個現成組件當 MetadataReader；這些 IL 不含 token，不會真的用到它。
         var assemblyPath = typeof(BlueprintAnalyzer).Assembly.Location;
@@ -581,7 +619,8 @@ public sealed class IlBodyReconstructionTests
             isInstance,
             returnType,
             localTypes,
-            exceptionRegions);
+            exceptionRegions,
+            parameterTypes);
     }
 }
 
