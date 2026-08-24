@@ -179,6 +179,48 @@ public sealed class IlBodyReconstructionTests
     }
 
     [Fact]
+    public void ReconstructsEnumMaskAndSwitchCases()
+    {
+        // static int M(FieldAttributes value) => (value & (FieldAttributes)7) - 1 switch { 0 => 10, 1 => 20, _ => 99 };
+        byte[] il =
+        [
+            0x02,                         // IL_0000 ldarg.0
+            0x1D,                         // IL_0001 ldc.i4.7
+            0x5F,                         // IL_0002 and
+            0x17,                         // IL_0003 ldc.i4.1
+            0x59,                         // IL_0004 sub
+            0x45, 0x02, 0x00, 0x00, 0x00, // IL_0005 switch (2 targets)
+            0x02, 0x00, 0x00, 0x00,       // case 0 -> IL_0014
+            0x05, 0x00, 0x00, 0x00,       // case 1 -> IL_0017
+            0x2B, 0x06,                   // IL_0012 br.s default (IL_001A)
+            0x1F, 0x0A, 0x2A,             // IL_0014 ldc.i4.s 10; ret
+            0x1F, 0x14, 0x2A,             // IL_0017 ldc.i4.s 20; ret
+            0x1F, 0x63, 0x2A              // IL_001A ldc.i4.s 99; ret
+        ];
+
+        var body = Reconstruct(
+            il,
+            isInstance: false,
+            returnType: "int",
+            parameterTypes: ["System.Reflection.FieldAttributes"]);
+
+        Assert.NotNull(body);
+        Assert.Equal(
+            [
+                "switch (((arg0 & unchecked((System.Reflection.FieldAttributes)7)) - 1))",
+                "{",
+                "    case unchecked((System.Reflection.FieldAttributes)0):",
+                "        return 10;",
+                "    case unchecked((System.Reflection.FieldAttributes)1):",
+                "        return 20;",
+                "    default:",
+                "        return 99;",
+                "}"
+            ],
+            body);
+    }
+
+    [Fact]
     public void ReconstructsGroupedCasesAndFallThroughDefault()
     {
         // case 0 與 case 1 共用同一個 target；default 直接接在 switch 後面，沒有額外 br。

@@ -1881,7 +1881,7 @@ internal static class ManagedSymbolReader
 
             foreach (var (value, _) in caseTargets.Where(target => target.Index == blockStart))
             {
-                statements.Add($"    case {value}:");
+                statements.Add($"    case {RenderSwitchCaseValue(context, selector, value)}:");
             }
 
             if (defaultIndex == blockStart)
@@ -1911,6 +1911,16 @@ internal static class ManagedSymbolReader
 
         statements.Add("}");
         return new StructuredSwitch(statements, joinIndex ?? end);
+    }
+
+    private static string RenderSwitchCaseValue(ReconContext context, string selector, int value)
+    {
+        if (context.ExpressionTypes.TryGetValue(selector, out var selectorType) && IsPotentialEnumType(selectorType))
+        {
+            return $"unchecked(({selectorType}){value})";
+        }
+
+        return value.ToString(CultureInfo.InvariantCulture);
     }
 
     private static int? TryGetStoredLocalIndex(ReconContext context, Instr instruction) => instruction.Name switch
@@ -2525,14 +2535,45 @@ internal static class ManagedSymbolReader
 
         var right = stack.Pop();
         var left = stack.Pop();
+        context.ExpressionTypes.TryGetValue(left, out var leftType);
+        context.ExpressionTypes.TryGetValue(right, out var rightType);
+        if (op is "&" or "|" or "^")
+        {
+            if (IsPotentialEnumType(leftType) && IsIntegerLiteral(right))
+            {
+                right = $"unchecked(({leftType}){right})";
+                resultType ??= leftType;
+            }
+            else if (IsPotentialEnumType(rightType) && IsIntegerLiteral(left))
+            {
+                left = $"unchecked(({rightType}){left})";
+                resultType ??= rightType;
+            }
+        }
+
         if (resultType is null)
         {
-            context.ExpressionTypes.TryGetValue(left, out resultType);
+            resultType = leftType;
         }
 
         PushExpression(context, stack, $"({left} {op} {right})", resultType);
         return true;
     }
+
+    private static bool IsIntegerLiteral(string expression)
+    {
+        var value = expression.TrimEnd('L', 'l', 'U', 'u');
+        return long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out _);
+    }
+
+    private static bool IsPotentialEnumType(string? type) => type is not null
+        && type is not ("bool" or "char" or "sbyte" or "byte" or "short" or "ushort" or "int" or "uint"
+            or "long" or "ulong" or "nint" or "nuint" or "float" or "double" or "decimal" or "string"
+            or "object" or "TypedReference" or "method*")
+        && !type.StartsWith('!')
+        && !type.StartsWith("ref ", StringComparison.Ordinal)
+        && !type.EndsWith('*')
+        && !type.EndsWith(']');
 
     private static bool TryUnary(ReconContext context, Stack<string> stack, string op)
     {
