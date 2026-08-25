@@ -1,8 +1,6 @@
 using System.Reflection;
 using System.Text;
-using ExeBlueprint.Analysis;
-using ExeBlueprint.Generation;
-using ExeBlueprint.Reporting;
+using ExeBlueprint.Application;
 
 Console.OutputEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
 using var cancellation = new CancellationTokenSource();
@@ -31,56 +29,29 @@ static async Task<int> RunAsync(string[] args, CancellationToken cancellationTok
     try
     {
         var parsed = ParseArguments(args);
-        var outputDirectory = parsed.OutputDirectory ?? CreateDefaultOutputDirectory(parsed.InputPath);
-        var jsonPath = Path.Combine(outputDirectory, "blueprint.json");
-        var reportPath = Path.Combine(outputDirectory, "REPORT.md");
-
-        if (!parsed.Force && (File.Exists(jsonPath) || File.Exists(reportPath)))
-        {
-            Console.Error.WriteLine("輸出目錄已有分析結果。請更換目錄，或加上 --force 覆寫。 ");
-            return 3;
-        }
-
-        Directory.CreateDirectory(outputDirectory);
         Console.WriteLine($"正在分析：{Path.GetFullPath(parsed.InputPath)}");
-
-        var analyzer = new BlueprintAnalyzer();
-        var analysisOptions = new AnalysisOptions
+        var service = new BlueprintExportService();
+        var result = await service.RunAsync(new BlueprintExportRequest
         {
+            InputPath = parsed.InputPath,
+            OutputDirectory = parsed.OutputDirectory,
+            Overwrite = parsed.Force,
+            JsonOnly = parsed.JsonOnly,
+            EmitCSharp = parsed.EmitCSharp,
+            EmitCpp = parsed.EmitCpp,
+            EmitRust = parsed.EmitRust,
+            EmitGo = parsed.EmitGo,
             EnableNativeAnalysis = parsed.Native,
             GhidraInstallDir = parsed.GhidraDir
-        };
-        var document = await analyzer.AnalyzeAsync(parsed.InputPath, analysisOptions, cancellationToken);
-        await BlueprintJsonWriter.WriteAsync(document, jsonPath, cancellationToken);
-        if (!parsed.JsonOnly)
+        }, cancellationToken: cancellationToken);
+
+        foreach (var skeleton in result.Skeletons)
         {
-            await MarkdownReportWriter.WriteAsync(document, reportPath, cancellationToken);
+            Console.WriteLine($"{skeleton.Language} 骨架：{skeleton.FileCount:N0} 個檔案 → {skeleton.Directory}");
         }
 
-        async Task EmitSkeletonAsync(bool enabled, string language, string directoryName, IReadOnlyList<GeneratedFile> generated)
-        {
-            if (!enabled)
-            {
-                return;
-            }
-
-            if (generated.Count == 0)
-            {
-                Console.WriteLine($"沒有可轉出的 .NET 型別，略過 {language} 骨架。");
-                return;
-            }
-
-            var directory = Path.Combine(outputDirectory, directoryName);
-            await GeneratedProjectWriter.WriteAsync(generated, directory, cancellationToken);
-            Console.WriteLine($"{language} 骨架：{generated.Count:N0} 個檔案 → {Path.GetFullPath(directory)}");
-        }
-
-        await EmitSkeletonAsync(parsed.EmitCSharp, "C#", "reconstructed-csharp", parsed.EmitCSharp ? CSharpSkeletonGenerator.Generate(document) : []);
-        await EmitSkeletonAsync(parsed.EmitCpp, "C++", "reconstructed-cpp", parsed.EmitCpp ? CppSkeletonGenerator.Generate(document) : []);
-        await EmitSkeletonAsync(parsed.EmitRust, "Rust", "reconstructed-rust", parsed.EmitRust ? RustSkeletonGenerator.Generate(document) : []);
-        await EmitSkeletonAsync(parsed.EmitGo, "Go", "reconstructed-go", parsed.EmitGo ? GoSkeletonGenerator.Generate(document) : []);
-
-        Console.WriteLine($"完成：{Path.GetFullPath(outputDirectory)}");
+        var document = result.Document;
+        Console.WriteLine($"完成：{result.OutputDirectory}");
         Console.WriteLine($"檔案：{document.Input.FileCount:N0}");
         Console.WriteLine($"PE 執行檔：{document.Summary.ExecutableCount:N0}");
         Console.WriteLine($"程式庫：{document.Summary.LibraryCount:N0}");
@@ -174,20 +145,6 @@ static ParsedArguments ParseArguments(string[] args)
     }
 
     return new ParsedArguments(inputPath, outputDirectory, force, jsonOnly, emitCSharp, emitCpp, emitRust, emitGo, native, ghidraDir);
-}
-
-static string CreateDefaultOutputDirectory(string inputPath)
-{
-    var fullPath = Path.GetFullPath(inputPath);
-    var name = Directory.Exists(fullPath)
-        ? new DirectoryInfo(fullPath).Name
-        : Path.GetFileNameWithoutExtension(fullPath);
-    var safeName = string.Concat(name.Select(character =>
-        Path.GetInvalidFileNameChars().Contains(character) ? '_' : character));
-    return Path.Combine(
-        Environment.CurrentDirectory,
-        "exe-blueprint-output",
-        $"{safeName}-{DateTimeOffset.Now:yyyyMMdd-HHmmss}");
 }
 
 static string FormatTechnologies(IEnumerable<string> technologies)
