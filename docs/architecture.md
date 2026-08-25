@@ -24,7 +24,10 @@ Blueprint 中介資料
 
 `ExeBlueprint.Core` 已包含輸入盤點、ZIP 安全解壓、檔案分類、PE／.NET 讀取、.NET 型別／欄位／屬性／事件／方法與 enum 常值抽取、方法層級呼叫圖、技術辨識、相依關係、報告產生，以及 .NET 型別的 C# 骨架產生。
 
-`ExeBlueprint.Cli` 提供命令列入口，後續桌面版也會呼叫同一套核心。
+`ExeBlueprint.Application.BlueprintExportService` 負責串接分析、JSON、Markdown 與各語言骨架輸出。
+`ExeBlueprint.Cli` 和 Avalonia 製作的 `ExeBlueprint.Desktop` 都呼叫這個服務，所以兩種入口的分析結果與覆寫保護一致。
+
+桌面版只放檔案／資料夾選擇、選項、進度與狀態，不在 UI 專案裡重做分析器。Avalonia 使用同一份 XAML 在 Windows、macOS 與 Linux 顯示，平台差異集中在檔案選擇器與 Release 包裝。
 
 ## Blueprint 資料
 

@@ -6,16 +6,16 @@ on:
       - "v*.*.*"
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  publish:
+  validate:
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
 
     steps:
       - name: Checkout
@@ -35,8 +35,8 @@ jobs:
               throw "Tag 格式錯誤：$env:RELEASE_TAG"
           }
 
-          [xml] $project = Get-Content .\src\ExeBlueprint.Cli\ExeBlueprint.Cli.csproj -Raw
-          $projectVersion = [string] $project.Project.PropertyGroup.Version
+          [xml] $props = Get-Content .\Directory.Build.props -Raw
+          $projectVersion = [string] $props.Project.PropertyGroup.Version
           if ($projectVersion -ne $Matches.version) {
               throw "Tag 版本 $($Matches.version) 與專案版本 $projectVersion 不一致。"
           }
@@ -49,66 +49,189 @@ jobs:
       - name: Restore
         run: dotnet restore .\ExeBlueprint.slnx
 
-      - name: Test
-        run: dotnet test .\ExeBlueprint.slnx -c Release --no-restore
+      - name: Build
+        run: dotnet build .\ExeBlueprint.slnx -c Release --no-restore
 
-      - name: Publish and package
-        id: package
+      - name: Test
+        run: dotnet test .\ExeBlueprint.slnx -c Release --no-build
+
+  package:
+    needs: validate
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            rid: win-x64
+            asset_suffix: win-x64
+          - os: ubuntu-latest
+            rid: linux-x64
+            asset_suffix: linux-x64
+          - os: macos-15-intel
+            rid: osx-x64
+            asset_suffix: macos-x64
+          - os: macos-15
+            rid: osx-arm64
+            asset_suffix: macos-arm64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Publish
         shell: pwsh
         env:
           RELEASE_TAG: ${{ github.ref_name }}
+          TARGET_RID: ${{ matrix.rid }}
         run: |
           $version = $env:RELEASE_TAG.TrimStart('v')
-          $publishDir = Join-Path $env:RUNNER_TEMP 'exe-blueprint-publish'
-          $assetDir = Join-Path $env:RUNNER_TEMP 'exe-blueprint-assets'
-          New-Item -ItemType Directory -Path $publishDir, $assetDir -Force | Out-Null
+          $desktopDir = Join-Path $env:RUNNER_TEMP "desktop-$env:TARGET_RID"
+          $cliDir = Join-Path $env:RUNNER_TEMP "cli-$env:TARGET_RID"
 
-          dotnet publish .\src\ExeBlueprint.Cli `
+          dotnet publish ./src/ExeBlueprint.Desktop `
               -c Release `
-              -r win-x64 `
+              -r $env:TARGET_RID `
               --self-contained true `
-              --no-restore `
               -p:Version=$version `
+              -p:PublishSingleFile=false `
               -p:DebugSymbols=false `
               -p:DebugType=None `
-              -o $publishDir
+              -o $desktopDir
 
-          $publishedExe = Join-Path $publishDir 'exe-blueprint.exe'
-          $exeName = "exe-blueprint-$env:RELEASE_TAG-win-x64.exe"
-          $zipName = "exe-blueprint-$env:RELEASE_TAG-win-x64.zip"
-          $exePath = Join-Path $assetDir $exeName
-          $zipPath = Join-Path $assetDir $zipName
+          dotnet publish ./src/ExeBlueprint.Cli `
+              -c Release `
+              -r $env:TARGET_RID `
+              --self-contained true `
+              -p:Version=$version `
+              -p:PublishSingleFile=true `
+              -p:DebugSymbols=false `
+              -p:DebugType=None `
+              -o $cliDir
 
-          # 單獨的 exe 資產（給會用命令列的人直接下載）。
-          Copy-Item -LiteralPath $publishedExe -Destination $exePath
+      - name: Package Windows
+        if: matrix.rid == 'win-x64'
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          TARGET_RID: ${{ matrix.rid }}
+          ASSET_SUFFIX: ${{ matrix.asset_suffix }}
+        run: |
+          $stageDir = Join-Path $env:RUNNER_TEMP "stage-$env:TARGET_RID"
+          $assetDir = Join-Path $env:RUNNER_TEMP 'release-assets'
+          New-Item -ItemType Directory -Path $stageDir, $assetDir -Force | Out-Null
 
-          # 好用的 zip 包：穩定檔名的 exe + 雙擊/拖放啟動器 + 白話說明。
-          $stageDir = Join-Path $env:RUNNER_TEMP 'exe-blueprint-stage'
-          if (Test-Path -LiteralPath $stageDir) { Remove-Item -LiteralPath $stageDir -Recurse -Force }
-          New-Item -ItemType Directory -Path $stageDir -Force | Out-Null
-          Copy-Item -LiteralPath $publishedExe -Destination (Join-Path $stageDir 'exe-blueprint.exe')
-          Copy-Item -LiteralPath .\packaging\run.bat -Destination (Join-Path $stageDir 'run.bat')
-          Copy-Item -LiteralPath .\packaging\README.txt -Destination (Join-Path $stageDir 'README.txt')
-          Compress-Archive -Path (Join-Path $stageDir '*') -DestinationPath $zipPath -CompressionLevel Optimal
+          Copy-Item -Path (Join-Path $env:RUNNER_TEMP "desktop-$env:TARGET_RID\*") -Destination $stageDir -Recurse
+          Copy-Item -LiteralPath (Join-Path $env:RUNNER_TEMP "cli-$env:TARGET_RID\exe-blueprint.exe") `
+              -Destination (Join-Path $stageDir 'exe-blueprint-cli.exe')
+          Copy-Item -LiteralPath .\packaging\README-desktop.txt -Destination (Join-Path $stageDir 'README.txt')
 
-          $checksumPath = Join-Path $assetDir 'SHA256SUMS.txt'
-          $checksumLines = foreach ($path in @($exePath, $zipPath)) {
-              $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
-              "$hash  $(Split-Path -Leaf $path)"
-          }
-          [System.IO.File]::WriteAllLines($checksumPath, $checksumLines, [System.Text.Encoding]::ASCII)
+          $assetPath = Join-Path $assetDir "ExeBlueprint-$env:RELEASE_TAG-$env:ASSET_SUFFIX.zip"
+          Compress-Archive -Path (Join-Path $stageDir '*') -DestinationPath $assetPath -CompressionLevel Optimal
 
-          "asset_dir=$assetDir" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          & (Join-Path $stageDir 'exe-blueprint-cli.exe') --version
+          if ($LASTEXITCODE -ne 0) { throw 'Windows CLI smoke test 失敗。' }
+
+      - name: Package Linux
+        if: matrix.rid == 'linux-x64'
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          TARGET_RID: ${{ matrix.rid }}
+          ASSET_SUFFIX: ${{ matrix.asset_suffix }}
+        run: |
+          set -euo pipefail
+          stage_dir="$RUNNER_TEMP/stage-$TARGET_RID"
+          asset_dir="$RUNNER_TEMP/release-assets"
+          mkdir -p "$stage_dir" "$asset_dir"
+          cp -R "$RUNNER_TEMP/desktop-$TARGET_RID/." "$stage_dir/"
+          cp "$RUNNER_TEMP/cli-$TARGET_RID/exe-blueprint" "$stage_dir/exe-blueprint-cli"
+          cp ./packaging/README-desktop.txt "$stage_dir/README.txt"
+          chmod +x "$stage_dir/ExeBlueprint" "$stage_dir/exe-blueprint-cli"
+
+          "$stage_dir/exe-blueprint-cli" --version
+          tar -C "$stage_dir" -czf "$asset_dir/ExeBlueprint-$RELEASE_TAG-$ASSET_SUFFIX.tar.gz" .
+
+      - name: Package macOS
+        if: startsWith(matrix.rid, 'osx-')
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          TARGET_RID: ${{ matrix.rid }}
+          ASSET_SUFFIX: ${{ matrix.asset_suffix }}
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          stage_dir="$RUNNER_TEMP/stage-$TARGET_RID"
+          asset_dir="$RUNNER_TEMP/release-assets"
+          app_dir="$stage_dir/ExeBlueprint.app"
+          mkdir -p "$app_dir/Contents/MacOS" "$app_dir/Contents/Resources" "$asset_dir"
+          cp -R "$RUNNER_TEMP/desktop-$TARGET_RID/." "$app_dir/Contents/MacOS/"
+          cp "$RUNNER_TEMP/cli-$TARGET_RID/exe-blueprint" "$stage_dir/exe-blueprint-cli"
+          cp ./packaging/README-desktop.txt "$stage_dir/README.txt"
+          sed "s/__VERSION__/$version/g" ./packaging/macos/Info.plist > "$app_dir/Contents/Info.plist"
+          chmod +x "$app_dir/Contents/MacOS/ExeBlueprint" "$stage_dir/exe-blueprint-cli"
+
+          "$stage_dir/exe-blueprint-cli" --version
+          (cd "$stage_dir" && zip -qry "$asset_dir/ExeBlueprint-$RELEASE_TAG-$ASSET_SUFFIX.zip" .)
+
+      - name: Upload package
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.rid }}
+          path: ${{ runner.temp }}/release-assets/*
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    needs: package
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Download packages
+        uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          path: ${{ runner.temp }}/release-assets
+          merge-multiple: true
+
+      - name: Create checksums
+        shell: pwsh
+        run: |
+          $assetDir = Join-Path $env:RUNNER_TEMP 'release-assets'
+          $checksumLines = Get-ChildItem -LiteralPath $assetDir -File |
+              Sort-Object Name |
+              ForEach-Object {
+                  $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+                  "$hash  $($_.Name)"
+              }
+          [System.IO.File]::WriteAllLines(
+              (Join-Path $assetDir 'SHA256SUMS.txt'),
+              $checksumLines,
+              [System.Text.Encoding]::ASCII)
 
       - name: Create GitHub Release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
-          ASSET_DIR: ${{ steps.package.outputs.asset_dir }}
         run: |
           $notesPath = ".\docs\releases\$env:RELEASE_TAG.md"
-          $assets = Get-ChildItem -LiteralPath $env:ASSET_DIR -File |
+          $assetDir = Join-Path $env:RUNNER_TEMP 'release-assets'
+          $assets = Get-ChildItem -LiteralPath $assetDir -File |
               Sort-Object Name |
               Select-Object -ExpandProperty FullName
 

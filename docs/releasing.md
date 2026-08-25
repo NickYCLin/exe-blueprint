@@ -4,7 +4,7 @@ GitHub Release 由版本 tag 觸發，產物會在 GitHub Actions 的乾淨 Wind
 
 ## 發佈前
 
-1. 更新 `src/ExeBlueprint.Cli/ExeBlueprint.Cli.csproj` 的 `<Version>`。
+1. 更新 `Directory.Build.props` 的 `<Version>`。
 2. 新增 `docs/releases/v<版本>.md`，用繁體中文寫這一版的功能、限制和使用提醒。
 3. 執行完整驗證：
 
@@ -29,8 +29,11 @@ git push origin v0.2.0
 
 - 確認 tag、專案版本與版本說明檔一致。
 - 執行完整測試。
-- 發佈 Windows x64 自包含單檔程式。
-- 建立 EXE、ZIP 與 `SHA256SUMS.txt`。
+- 發佈 Windows x64、Linux x64、macOS Intel 與 Apple Silicon 自包含套件。
+- Windows 與 Linux 套件包含桌面程式和 CLI；macOS 另外整理成 `.app`。
+- 建立 ZIP、tar.gz 與 `SHA256SUMS.txt`。
 - 建立或更新同名 GitHub Release。
+
+Windows 與 macOS 產物目前沒有商業程式碼簽章，macOS 也沒有 Apple 公證。版本說明與套件內 README 都必須直接寫明，不可把這些產物稱為已簽章版本。
 
 若只是暫時性的網路或 GitHub 服務錯誤，可以重新執行原本的 workflow。若必須修改程式或 workflow，請提高修訂版號後建立新 tag；不要移動或刪掉已推送的版本 tag。

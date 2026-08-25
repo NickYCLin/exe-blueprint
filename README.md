@@ -2,17 +2,21 @@
 
 ExeBlueprint 用來整理 Windows 應用程式套件。它會掃描 EXE、DLL、設定檔和資源，產生可供後續重建使用的 `blueprint.json`，另外附上一份方便閱讀的 `REPORT.md`。
 
+現在有圖形介面可直接選檔案、資料夾和輸出位置，桌面版支援 Windows、macOS 與 Linux；原本的命令列工具也會繼續提供。
+
 目前版本只做靜態分析，不會執行輸入程式。
 
 ## 下載
 
-不想安裝 .NET SDK，可以直接到 [GitHub Releases](https://github.com/NickYCLin/exe-blueprint/releases/latest) 下載 Windows 64 位元自包含版本：
+不想安裝 .NET SDK，可以直接到 [GitHub Releases](https://github.com/NickYCLin/exe-blueprint/releases/latest) 下載自包含版本：
 
-- `exe-blueprint-v0.1.0-win-x64.exe`：可直接執行的單檔版。
-- `exe-blueprint-v0.1.0-win-x64.zip`：方便下載與保存的壓縮版。
+- `ExeBlueprint-v0.2.0-win-x64.zip`：Windows 10／11 64 位元，解壓縮後雙擊 `ExeBlueprint.exe`。
+- `ExeBlueprint-v0.2.0-macos-arm64.zip`：Apple Silicon Mac。
+- `ExeBlueprint-v0.2.0-macos-x64.zip`：Intel Mac。
+- `ExeBlueprint-v0.2.0-linux-x64.tar.gz`：Intel／AMD 64 位元 Linux 桌面版。
 - `SHA256SUMS.txt`：用來核對下載檔是否完整。
 
-目前執行檔尚未做程式碼簽章，Windows 可能顯示 SmartScreen 提醒。請只從本專案的 Releases 下載，並核對 SHA-256。
+每個套件也附上 `exe-blueprint-cli` 命令列版本。Windows 及 macOS 產物目前尚未做商業程式碼簽章，macOS 也未經 Apple 公證；第一次開啟的方式與 Linux 相依套件都寫在壓縮檔內的 `README.txt`。請只從本專案 Releases 下載，並核對 SHA-256。
 
 ## 目前能做什麼
 
@@ -46,23 +50,17 @@ ExeBlueprint 用來整理 Windows 應用程式套件。它會掃描 EXE、DLL、
 
 辨識結果會附上依據與可信度。看到某個語言名稱，不代表已經證明原始碼就是用該語言撰寫。
 
-## 下載現成版本（不用裝 SDK）
-
-到 [Releases](https://github.com/NickYCLin/exe-blueprint/releases) 下載 `...-win-x64.zip`，
-全部解壓縮到同一個資料夾後，**雙擊 `run.bat`**，或把要分析的 EXE／DLL／資料夾／ZIP **拖到 `run.bat` 上**。
-
-這是命令列工具、不是安裝程式，**不要直接雙擊 exe**（會閃一下就關）。想自己打指令就用 PowerShell：
-
-```powershell
-.\exe-blueprint.exe analyze .\你的程式.exe -o .\report
-```
-
-從網路下載的未簽章 exe 若被 Windows 擋（SmartScreen／封鎖／防毒隔離），
-解法都寫在 zip 內的 `README.txt`。
-
 ## 從原始碼執行
 
 需要 [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)。
+
+啟動桌面版：
+
+```powershell
+dotnet run --project .\src\ExeBlueprint.Desktop
+```
+
+命令列版本：
 
 ```powershell
 dotnet run --project .\src\ExeBlueprint.Cli -- analyze .\MyApplication
@@ -107,16 +105,17 @@ dotnet run --project .\src\ExeBlueprint.Cli -- analyze .\Native.exe --native
 
 輸出目錄已有報告時，程式預設不會覆寫。確定要覆寫可加上 `--force`。
 
-## 編譯成 Windows EXE
+## 自行發佈
 
 ```powershell
+dotnet publish .\src\ExeBlueprint.Desktop -c Release -r win-x64 --self-contained true
 dotnet publish .\src\ExeBlueprint.Cli -c Release -r win-x64 --self-contained true
 ```
 
-輸出位置：
+`-r` 可改成 `linux-x64`、`osx-x64` 或 `osx-arm64`。正式 Release 會另外把 macOS 產物整理成 `.app`。
 
 ```text
-src/ExeBlueprint.Cli/bin/Release/net10.0/win-x64/publish/exe-blueprint.exe
+src/ExeBlueprint.Desktop/bin/Release/net10.0/win-x64/publish/ExeBlueprint.exe
 ```
 
 ## 報告內容
@@ -142,7 +141,7 @@ src/ExeBlueprint.Cli/bin/Release/net10.0/win-x64/publish/exe-blueprint.exe
 - 優先支援易語言、VB6、Delphi 到 C# 的轉換
 - 讓 C++／Rust／Go 產生器也還原方法體、支援易語言（目前這三個語言只還原結構）
 - 比較原程式與重建版本的輸入、輸出和副作用
-- 製作可拖放檔案與資料夾的 Windows 桌面介面
+- 補上桌面版拖放操作、最近使用項目與安裝程式
 
 這些項目尚未完成，詳細分層可看 [架構說明](docs/architecture.md)。
 

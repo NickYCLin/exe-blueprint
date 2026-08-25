@@ -4,10 +4,6 @@
     <TargetFramework>net10.0</TargetFramework>
     <AssemblyName>exe-blueprint</AssemblyName>
     <RootNamespace>ExeBlueprint.Cli</RootNamespace>
-    <Version>0.1.0</Version>
-    <PublishSingleFile>true</PublishSingleFile>
-    <SelfContained>true</SelfContained>
-    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <InvariantGlobalization>false</InvariantGlobalization>
   </PropertyGroup>
   <ItemGroup>
