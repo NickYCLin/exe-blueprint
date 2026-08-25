@@ -10,10 +10,10 @@ ExeBlueprint 用來整理 Windows 應用程式套件。它會掃描 EXE、DLL、
 
 不想安裝 .NET SDK，可以直接到 [GitHub Releases](https://github.com/NickYCLin/exe-blueprint/releases/latest) 下載自包含版本：
 
-- `ExeBlueprint-v0.2.0-win-x64.zip`：Windows 10／11 64 位元，解壓縮後雙擊 `ExeBlueprint.exe`。
-- `ExeBlueprint-v0.2.0-macos-arm64.zip`：Apple Silicon Mac。
-- `ExeBlueprint-v0.2.0-macos-x64.zip`：Intel Mac。
-- `ExeBlueprint-v0.2.0-linux-x64.tar.gz`：Intel／AMD 64 位元 Linux 桌面版。
+- `ExeBlueprint-v0.2.1-win-x64.zip`：Windows 10／11 64 位元，解壓縮後雙擊 `ExeBlueprint.exe`。
+- `ExeBlueprint-v0.2.1-macos-arm64.zip`：Apple Silicon Mac。
+- `ExeBlueprint-v0.2.1-macos-x64.zip`：Intel Mac。
+- `ExeBlueprint-v0.2.1-linux-x64.tar.gz`：Intel／AMD 64 位元 Linux 桌面版。
 - `SHA256SUMS.txt`：用來核對下載檔是否完整。
 
 每個套件也附上 `exe-blueprint-cli` 命令列版本。Windows 及 macOS 產物目前尚未做商業程式碼簽章，macOS 也未經 Apple 公證；第一次開啟的方式與 Linux 相依套件都寫在壓縮檔內的 `README.txt`。請只從本專案 Releases 下載，並核對 SHA-256。

@@ -41,7 +41,7 @@ jobs:
               throw "Tag 版本 $($Matches.version) 與專案版本 $projectVersion 不一致。"
           }
 
-          $notesPath = ".\docs\releases\$env:RELEASE_TAG.md"
+          $notesPath = "./docs/releases/$env:RELEASE_TAG.md"
           if (-not (Test-Path -LiteralPath $notesPath)) {
               throw "找不到版本說明：$notesPath"
           }
@@ -229,7 +229,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          $notesPath = ".\docs\releases\$env:RELEASE_TAG.md"
+          $notesPath = "./docs/releases/$env:RELEASE_TAG.md"
           $assetDir = Join-Path $env:RUNNER_TEMP 'release-assets'
           $assets = Get-ChildItem -LiteralPath $assetDir -File |
               Sort-Object Name |
