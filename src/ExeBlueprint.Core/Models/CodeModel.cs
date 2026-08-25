@@ -19,6 +19,27 @@ public sealed record CodeModel
     public IReadOnlyList<TypeModel> Types { get; init; } = [];
 
     public IReadOnlyList<CallEdge> CallGraph { get; init; } = [];
+
+    public IReadOnlyList<ManagedResourceModel> Resources { get; init; } = [];
+}
+
+// .NET assembly 內嵌或連結的 manifest 資源（.resources、WPF BAML、內嵌設定檔或 DLL 等）。
+public sealed record ManagedResourceModel
+{
+    public required string Name { get; init; }
+
+    // "public" 代表其他組件可讀，"private" 只給自己用。
+    public required string Visibility { get; init; }
+
+    // "embedded"＝內嵌在這個檔；"file:<檔名>"＝放在套件內的另一個檔；"assembly:<名稱>"＝在別的組件。
+    public required string Location { get; init; }
+
+    // 依名稱判斷的用途，僅供參考。
+    public required string Kind { get; init; }
+
+    // 只有內嵌資源讀得到大小（位元組）。
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public long? Size { get; init; }
 }
 
 public sealed record TypeModel

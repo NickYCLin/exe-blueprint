@@ -697,6 +697,24 @@ public sealed class ManagedSymbolReaderTests
     }
 
     [Fact]
+    public async Task ReadsEmbeddedManifestResources()
+    {
+        var assemblyPath = typeof(ManagedSymbolReaderTests).Assembly.Location;
+        var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
+        var code = document.Files[0].Code!;
+
+        var resource = Assert.Single(
+            code.Resources,
+            resource => resource.Name == "ExeBlueprint.Core.Tests.Fixtures.settings.json");
+
+        Assert.Equal("embedded", resource.Location);
+        Assert.Equal("設定檔", resource.Kind);
+        // Fixtures\settings.json 內容固定為 27 個 ASCII 位元組。
+        Assert.Equal(27, resource.Size);
+        Assert.Contains(resource.Visibility, new[] { "public", "private" });
+    }
+
+    [Fact]
     public async Task SummaryAggregatesManagedTypeAndMethodCounts()
     {
         var assemblyPath = typeof(BlueprintAnalyzer).Assembly.Location;

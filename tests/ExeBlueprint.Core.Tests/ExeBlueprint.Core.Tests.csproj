@@ -15,4 +15,8 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\ExeBlueprint.Core\ExeBlueprint.Core.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <!-- 給 manifest 資源還原測試用的內嵌資源，固定 LogicalName 方便斷言。 -->
+    <EmbeddedResource Include="Fixtures\settings.json" LogicalName="ExeBlueprint.Core.Tests.Fixtures.settings.json" />
+  </ItemGroup>
 </Project>

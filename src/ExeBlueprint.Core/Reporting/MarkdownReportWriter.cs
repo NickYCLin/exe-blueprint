@@ -135,6 +135,7 @@ public static class MarkdownReportWriter
     private const int MaxTypesPerFile = 20;
     private const int MaxCallEdgesPerFile = 30;
     private const int MaxNativeFunctionsPerFile = 100;
+    private const int MaxResourcesPerFile = 30;
 
     private static void AppendNativeFunctions(StringBuilder builder, BlueprintDocument document)
     {
@@ -251,6 +252,27 @@ public static class MarkdownReportWriter
                 {
                     builder.AppendLine();
                     builder.AppendLine($"（僅列出前 {MaxCallEdgesPerFile} 筆，共 {code.CallGraph.Count} 筆呼叫關係，完整內容請看 blueprint.json）");
+                }
+            }
+
+            if (code.Resources.Count > 0)
+            {
+                builder.AppendLine();
+                builder.AppendLine($"內嵌資源（共 {code.Resources.Count} 筆）：");
+                builder.AppendLine();
+                builder.AppendLine("| 名稱 | 用途 | 位置 | 可見性 | 大小 |");
+                builder.AppendLine("| --- | --- | --- | --- | ---: |");
+                foreach (var resource in code.Resources.Take(MaxResourcesPerFile))
+                {
+                    var size = resource.Size is { } bytes ? FormatBytes(bytes) : "-";
+                    builder.AppendLine(
+                        $"| `{EscapeInline(resource.Name)}` | {EscapeCell(resource.Kind)} | {EscapeCell(resource.Location)} | {resource.Visibility} | {size} |");
+                }
+
+                if (code.Resources.Count > MaxResourcesPerFile)
+                {
+                    builder.AppendLine();
+                    builder.AppendLine($"（僅列出前 {MaxResourcesPerFile} 筆，共 {code.Resources.Count} 筆，完整內容請看 blueprint.json）");
                 }
             }
 

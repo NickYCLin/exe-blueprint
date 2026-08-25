@@ -175,8 +175,149 @@ internal static class ManagedSymbolReader
             CallEdgeCount = edges.Count,
             Truncated = truncated,
             Types = types,
-            CallGraph = edges
+            CallGraph = edges,
+            Resources = ReadManifestResources(peReader, metadata)
         };
+    }
+
+    private const int MaxResources = 2_000;
+
+    // 讀 assembly 的 manifest 資源清單：名稱、可見性、放在哪、內嵌的話再讀出大小。
+    private static IReadOnlyList<ManagedResourceModel> ReadManifestResources(
+        PEReader peReader,
+        MetadataReader metadata)
+    {
+        if (metadata.ManifestResources.Count == 0)
+        {
+            return [];
+        }
+
+        var resourcesDirectory = peReader.PEHeaders.CorHeader?.ResourcesDirectory;
+        var resources = new List<ManagedResourceModel>();
+
+        foreach (var handle in metadata.ManifestResources)
+        {
+            if (resources.Count >= MaxResources)
+            {
+                break;
+            }
+
+            var resource = metadata.GetManifestResource(handle);
+            var name = metadata.GetString(resource.Name);
+            var visibility = resource.Attributes.HasFlag(ManifestResourceAttributes.Public)
+                ? "public"
+                : "private";
+
+            var (location, size) = ResolveResourceLocation(peReader, metadata, resource, resourcesDirectory);
+
+            resources.Add(new ManagedResourceModel
+            {
+                Name = name,
+                Visibility = visibility,
+                Location = location,
+                Kind = ClassifyResourceKind(name),
+                Size = size
+            });
+        }
+
+        return resources;
+    }
+
+    private static (string Location, long? Size) ResolveResourceLocation(
+        PEReader peReader,
+        MetadataReader metadata,
+        ManifestResource resource,
+        DirectoryEntry? resourcesDirectory)
+    {
+        var implementation = resource.Implementation;
+
+        if (implementation.IsNil)
+        {
+            // 內嵌在本檔：從 CorHeader 的 resources 目錄按位移讀 4 byte 長度前綴。
+            var size = TryReadEmbeddedResourceSize(peReader, resource.Offset, resourcesDirectory);
+            return ("embedded", size);
+        }
+
+        return implementation.Kind switch
+        {
+            HandleKind.AssemblyFile => ($"file:{ReadAssemblyFileName(metadata, (AssemblyFileHandle)implementation)}", null),
+            HandleKind.AssemblyReference => ($"assembly:{ReadAssemblyReferenceName(metadata, (AssemblyReferenceHandle)implementation)}", null),
+            _ => ("external", null)
+        };
+    }
+
+    private static long? TryReadEmbeddedResourceSize(
+        PEReader peReader,
+        long offset,
+        DirectoryEntry? resourcesDirectory)
+    {
+        if (resourcesDirectory is not { Size: > 0 } directory)
+        {
+            return null;
+        }
+
+        try
+        {
+            var block = peReader.GetSectionData(directory.RelativeVirtualAddress);
+            if (offset < 0 || offset + sizeof(int) > directory.Size || offset + sizeof(int) > block.Length)
+            {
+                return null;
+            }
+
+            var reader = block.GetReader((int)offset, sizeof(int));
+            var length = reader.ReadInt32();
+            return length >= 0 ? length : null;
+        }
+        catch (Exception exception) when (exception is BadImageFormatException or ArgumentOutOfRangeException)
+        {
+            return null;
+        }
+    }
+
+    private static string ReadAssemblyFileName(MetadataReader metadata, AssemblyFileHandle handle)
+    {
+        var file = metadata.GetAssemblyFile(handle);
+        return metadata.GetString(file.Name);
+    }
+
+    private static string ReadAssemblyReferenceName(MetadataReader metadata, AssemblyReferenceHandle handle)
+    {
+        var reference = metadata.GetAssemblyReference(handle);
+        return metadata.GetString(reference.Name);
+    }
+
+    // 依副檔名／慣例判斷資源用途，僅供閱讀，不保證精確。
+    private static string ClassifyResourceKind(string name)
+    {
+        if (name.EndsWith(".g.resources", StringComparison.OrdinalIgnoreCase))
+        {
+            return "WPF 資源集";
+        }
+
+        if (name.EndsWith(".baml", StringComparison.OrdinalIgnoreCase))
+        {
+            return "WPF BAML";
+        }
+
+        if (name.EndsWith(".resources", StringComparison.OrdinalIgnoreCase))
+        {
+            return ".NET 資源表";
+        }
+
+        if (name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)
+            || name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+        {
+            return "內嵌組件";
+        }
+
+        if (name.EndsWith(".config", StringComparison.OrdinalIgnoreCase)
+            || name.EndsWith(".json", StringComparison.OrdinalIgnoreCase)
+            || name.EndsWith(".xml", StringComparison.OrdinalIgnoreCase))
+        {
+            return "設定檔";
+        }
+
+        return "內嵌資料";
     }
 
     private static (MethodDefinitionHandle Handle, string? FullName) ResolveEntryPoint(
