@@ -399,9 +399,7 @@ internal static class BamlSummaryReader
         }
 
         public string? ResolveRootElementType() =>
-            RootElementTypeId is { } id && _types.TryGetValue(id, out var declaration)
-                ? declaration.Name
-                : null;
+            RootElementTypeId is { } id ? ResolveTypeName(id) : null;
 
         public IReadOnlyList<BamlTypeUsageModel> BuildElementTypes() =>
             _elementTypes
@@ -409,11 +407,16 @@ internal static class BamlSummaryReader
                 .ThenBy(pair => pair.Key)
                 .Select(pair =>
                 {
-                    _types.TryGetValue(pair.Key, out var declaration);
+                    TypeDeclaration? declaration = null;
+                    if (pair.Key >= 0)
+                    {
+                        _types.TryGetValue(pair.Key, out declaration);
+                    }
+
                     return new BamlTypeUsageModel
                     {
                         Id = pair.Key,
-                        Name = declaration?.Name,
+                        Name = ResolveTypeName(pair.Key),
                         Assembly = declaration is { } type
                             && _assemblies.TryGetValue(type.AssemblyId, out var assembly)
                                 ? assembly
@@ -429,19 +432,39 @@ internal static class BamlSummaryReader
                 .ThenBy(pair => pair.Key)
                 .Select(pair =>
                 {
-                    _attributes.TryGetValue(pair.Key, out var declaration);
+                    AttributeDeclaration? declaration = null;
+                    if (pair.Key >= 0)
+                    {
+                        _attributes.TryGetValue(pair.Key, out declaration);
+                    }
+
+                    var name = declaration?.Name;
+                    var ownerType = declaration is { } attribute
+                        ? ResolveTypeName(attribute.OwnerTypeId)
+                        : null;
+                    if (declaration is null
+                        && WpfBamlKnownIds.TryGetProperty(pair.Key, out var knownOwnerType, out var knownName))
+                    {
+                        name = knownName;
+                        ownerType = knownOwnerType;
+                    }
+
                     return new BamlPropertyUsageModel
                     {
                         Id = pair.Key,
-                        Name = declaration?.Name,
-                        OwnerType = declaration is { } attribute
-                            && _types.TryGetValue(attribute.OwnerTypeId, out var owner)
-                                ? owner.Name
-                                : null,
+                        Name = name,
+                        OwnerType = ownerType,
                         Count = pair.Value
                     };
                 })
                 .ToArray();
+
+        private string? ResolveTypeName(short id) =>
+            id < 0
+                ? WpfBamlKnownIds.GetTypeName(id)
+                : _types.TryGetValue(id, out var declaration)
+                    ? declaration.Name
+                    : null;
 
         private bool TryReadAssembly(ReadOnlySpan<byte> payload, out string? error)
         {

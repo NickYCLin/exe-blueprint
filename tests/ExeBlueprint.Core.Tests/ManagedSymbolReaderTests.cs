@@ -758,10 +758,19 @@ public sealed class ManagedSymbolReaderTests
         Assert.StartsWith("BamlFixture, Version=1.0.0.0", customElement.Assembly, StringComparison.Ordinal);
         Assert.Equal(1, customElement.Count);
         var builtInElement = Assert.Single(bamlEntry.Baml.ElementTypes, item => item.Id == -254);
-        Assert.Null(builtInElement.Name);
+        Assert.Equal("Grid", builtInElement.Name);
         var titleProperty = Assert.Single(bamlEntry.Baml.Properties, item => item.Id == 0);
         Assert.Equal("Title", titleProperty.Name);
-        Assert.Null(titleProperty.OwnerType);
+        Assert.Equal("Window", titleProperty.OwnerType);
+        var widthProperty = Assert.Single(bamlEntry.Baml.Properties, item => item.Id == -57);
+        Assert.Equal("Width", widthProperty.Name);
+        Assert.Equal("FrameworkElement", widthProperty.OwnerType);
+        var heightProperty = Assert.Single(bamlEntry.Baml.Properties, item => item.Id == -47);
+        Assert.Equal("Height", heightProperty.Name);
+        Assert.Equal("FrameworkElement", heightProperty.OwnerType);
+        var contentProperty = Assert.Single(bamlEntry.Baml.Properties, item => item.Id == -14);
+        Assert.Equal("Content", contentProperty.Name);
+        Assert.Equal("ContentControl", contentProperty.OwnerType);
         Assert.Equal(4, bamlEntry.Baml.Properties.Count);
 
         await using var temp = new TemporaryDirectory();
@@ -789,6 +798,13 @@ public sealed class ManagedSymbolReaderTests
         Assert.Equal("BamlFixture.MainWindow", bamlJson.GetProperty("rootElementType").GetString());
         Assert.Equal(2, bamlJson.GetProperty("elementTypes").GetArrayLength());
         Assert.Equal(4, bamlJson.GetProperty("properties").GetArrayLength());
+        Assert.Equal(
+            "Grid",
+            bamlJson.GetProperty("elementTypes")
+                .EnumerateArray()
+                .Single(item => item.GetProperty("id").GetInt32() == -254)
+                .GetProperty("name")
+                .GetString());
     }
 
     [Fact]
@@ -907,6 +923,47 @@ public sealed class ManagedSymbolReaderTests
         Assert.Equal(2_001, boundedSymbols.ElementCount);
         Assert.Equal(2_000, boundedSymbols.ElementTypes.Count);
         Assert.True(boundedSymbols.SymbolsTruncated);
+    }
+
+    [Fact]
+    public void ResolvesWpfBuiltInBamlIdsWithoutLoadingWpf()
+    {
+        Assert.Equal("AccessText", WpfBamlKnownIds.GetTypeName(-1));
+        Assert.Equal("Grid", WpfBamlKnownIds.GetTypeName(-254));
+        Assert.Equal("ZoomPercentageConverter", WpfBamlKnownIds.GetTypeName(-759));
+        Assert.Null(WpfBamlKnownIds.GetTypeName(0));
+        Assert.Null(WpfBamlKnownIds.GetTypeName(-760));
+        Assert.Null(WpfBamlKnownIds.GetTypeName(short.MinValue));
+
+        Assert.True(WpfBamlKnownIds.TryGetProperty(-1, out var accessTextOwner, out var accessTextName));
+        Assert.Equal("AccessText", accessTextOwner);
+        Assert.Equal("Text", accessTextName);
+        Assert.True(WpfBamlKnownIds.TryGetProperty(-57, out var widthOwner, out var widthName));
+        Assert.Equal("FrameworkElement", widthOwner);
+        Assert.Equal("Width", widthName);
+        Assert.True(WpfBamlKnownIds.TryGetProperty(-270, out var richTextBoxOwner, out var richTextBoxName));
+        Assert.Equal("RichTextBox", richTextBoxOwner);
+        Assert.Equal("IsReadOnly", richTextBoxName);
+        Assert.False(WpfBamlKnownIds.TryGetProperty(-137, out _, out _));
+        Assert.False(WpfBamlKnownIds.TryGetProperty(-271, out _, out _));
+        Assert.False(WpfBamlKnownIds.TryGetProperty(0, out _, out _));
+
+        using var stream = new MemoryStream();
+        stream.Write(CreateBamlHeader());
+        using (var writer = new BinaryWriter(stream, System.Text.Encoding.UTF8, leaveOpen: true))
+        {
+            writer.Write((byte)3);
+            writer.Write((short)-254);
+            writer.Write((byte)0);
+            writer.Write((byte)4);
+            writer.Write((byte)2);
+        }
+
+        var summary = BamlSummaryReader.Read(stream.ToArray());
+        Assert.Equal("parsed", summary.Status);
+        Assert.Equal(-254, summary.RootElementTypeId);
+        Assert.Equal("Grid", summary.RootElementType);
+        Assert.Equal("Grid", Assert.Single(summary.ElementTypes).Name);
     }
 
     [Fact]
