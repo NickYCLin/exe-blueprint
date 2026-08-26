@@ -41,9 +41,9 @@ Blueprint 中介資料
 - `technologies`：語言、runtime、框架和工具鏈判斷
 - `warnings`：略過或無法分析的項目
 
-`.resources` 內的鍵值會放在 manifest 資源的 `entries`。字串、數字、布林、字元、日期與時間可轉成文字；一般位元組陣列和 stream 只記大小，檔名為 `.baml` 時會另外整理 MSBAML 檔頭版本、record 總數與各類型數量。BAML 分析只掃描位元組邊界，不載入 WPF assembly、不解析屬性值，也不建立 UI 物件。自訂資源型別不會反序列化，只保留完整型別名稱與原始資料大小。單一 assembly 最多保留 5,000 筆鍵值、單一文字值最多保留 4,096 字元；BAML 最多掃描 100,000 筆 record，截斷狀態和解析錯誤都會明確記錄。
+`.resources` 內的鍵值會放在 manifest 資源的 `entries`。字串、數字、布林、字元、日期與時間可轉成文字；一般位元組陣列和 stream 只記大小，檔名為 `.baml` 時會另外整理 MSBAML 檔頭版本、record 總數、各類型數量、element／property 使用次數，並用 BAML 檔案自行宣告的 assembly、type、attribute 對照表解析使用中的 ID。WPF 內建的負值 ID 若沒有檔內宣告，會保留數字而不猜名稱。BAML 分析只掃描位元組，不載入 WPF assembly、不解析屬性值，也不建立 UI 物件。自訂資源型別不會反序列化，只保留完整型別名稱與原始資料大小。單一 assembly 最多保留 5,000 筆鍵值、單一文字值最多保留 4,096 字元；BAML 最多掃描 100,000 筆 record、每類最多保留 2,000 個 symbol，每個 metadata 字串最多讀取 8,192 bytes，截斷狀態和解析錯誤都會明確記錄。
 
-後續加入可還原 UI 的 BAML 型別／屬性內容和更細的控制流程時會再提升 schema 版本，舊欄位維持相容。
+後續補齊 WPF 內建 ID 名稱、可還原 UI 的 BAML 屬性內容和更細的控制流程時會再提升 schema 版本，舊欄位維持相容。
 
 ## 分析器分層
 

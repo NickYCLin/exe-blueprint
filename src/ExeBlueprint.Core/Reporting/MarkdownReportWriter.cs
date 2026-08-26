@@ -344,10 +344,33 @@ public static class MarkdownReportWriter
                 var version = baml.WriterVersion ?? baml.ReaderVersion;
                 var versionText = version is null ? string.Empty : $" {version}";
                 var sizeText = entry.DataSize is { } bamlSize ? $"，{FormatBytes(bamlSize)}" : string.Empty;
+                var structureParts = new List<string>();
+                if (baml.ElementCount > 0)
+                {
+                    structureParts.Add($"{baml.ElementCount} 個 element");
+                }
+
+                if (baml.PropertyCount > 0)
+                {
+                    structureParts.Add($"{baml.PropertyCount} 個 property");
+                }
+
+                if (baml.RootElementType is { } rootElementType)
+                {
+                    structureParts.Add($"根節點 {EscapeCell(rootElementType)}");
+                }
+                else if (baml.RootElementTypeId is { } rootElementTypeId)
+                {
+                    structureParts.Add($"根節點 type ID {rootElementTypeId}");
+                }
+
+                var structureText = structureParts.Count == 0
+                    ? string.Empty
+                    : $"，{string.Join("／", structureParts)}";
                 return baml.Status switch
                 {
-                    "parsed" => $"BAML{versionText}，{baml.RecordCount} 筆 record{sizeText}",
-                    "partial" => $"BAML{versionText}，已讀 {baml.RecordCount} 筆 record（摘要不完整）{sizeText}",
+                    "parsed" => $"BAML{versionText}，{baml.RecordCount} 筆 record{structureText}{sizeText}",
+                    "partial" => $"BAML{versionText}，已讀 {baml.RecordCount} 筆 record（摘要不完整）{structureText}{sizeText}",
                     _ => $"BAML（格式無效）{sizeText}"
                 };
             }

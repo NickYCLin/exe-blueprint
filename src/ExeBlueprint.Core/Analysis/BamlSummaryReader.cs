@@ -4,13 +4,17 @@ using ExeBlueprint.Models;
 
 namespace ExeBlueprint.Analysis;
 
-// 只讀 BAML 檔頭與 record 邊界，不解析屬性值，也不載入 WPF assembly。
+// 只讀 BAML 檔頭、record 邊界及檔案內宣告的型別／屬性 ID，不解析屬性值，也不載入 WPF assembly。
 internal static class BamlSummaryReader
 {
     private const int HeaderSize = 28;
     private const int MaxRecords = 100_000;
+    private const int MaxSymbols = 2_000;
+    private const int MaxMetadataStringBytes = 8_192;
     private const int VariableRecord = -1;
     private const int UnsupportedRecord = -2;
+
+    private static readonly UTF8Encoding StrictUtf8 = new(false, true);
 
     private static readonly string[] RecordTypeNames =
     [
@@ -109,6 +113,7 @@ internal static class BamlSummaryReader
 
         var position = HeaderSize;
         var recordCounts = new Dictionary<byte, int>();
+        var symbols = new SymbolTable();
         while (position < data.Length && recordCounts.Values.Sum() < MaxRecords)
         {
             var recordOffset = position;
@@ -155,6 +160,19 @@ internal static class BamlSummaryReader
                         $"BAML record {GetRecordName(recordType)} ({recordType}) 的長度超出資料範圍。");
                 }
 
+                if (!symbols.TryReadRecord(recordType, data[position..(int)nextPosition], out var symbolError))
+                {
+                    return Partial(
+                        signature,
+                        readerVersion,
+                        updaterVersion,
+                        writerVersion,
+                        recordCounts,
+                        false,
+                        $"BAML record {GetRecordName(recordType)} ({recordType}) 的型別／屬性資料無效：{symbolError}",
+                        symbols);
+                }
+
                 position = (int)nextPosition;
             }
             else
@@ -171,7 +189,21 @@ internal static class BamlSummaryReader
                         $"BAML record {GetRecordName(recordType)} ({recordType}) 的內容已截斷。");
                 }
 
-                position += payloadSize;
+                var nextPosition = position + payloadSize;
+                if (!symbols.TryReadRecord(recordType, data[position..nextPosition], out var symbolError))
+                {
+                    return Partial(
+                        signature,
+                        readerVersion,
+                        updaterVersion,
+                        writerVersion,
+                        recordCounts,
+                        false,
+                        $"BAML record {GetRecordName(recordType)} ({recordType}) 的型別／屬性資料無效：{symbolError}",
+                        symbols);
+                }
+
+                position = nextPosition;
             }
 
             recordCounts[recordType] = recordCounts.GetValueOrDefault(recordType) + 1;
@@ -187,7 +219,14 @@ internal static class BamlSummaryReader
             WriterVersion = writerVersion,
             RecordCount = recordCounts.Values.Sum(),
             RecordTypes = BuildRecordCounts(recordCounts),
+            ElementCount = symbols.ElementCount,
+            PropertyCount = symbols.PropertyCount,
+            RootElementTypeId = symbols.RootElementTypeId,
+            RootElementType = symbols.ResolveRootElementType(),
+            ElementTypes = symbols.BuildElementTypes(),
+            Properties = symbols.BuildProperties(),
             RecordsTruncated = truncated,
+            SymbolsTruncated = symbols.Truncated,
             Error = truncated ? $"BAML record 超過 {MaxRecords:N0} 筆安全解析上限。" : null
         };
     }
@@ -261,7 +300,8 @@ internal static class BamlSummaryReader
         string writerVersion,
         IReadOnlyDictionary<byte, int> recordCounts,
         bool recordsTruncated,
-        string error) =>
+        string error,
+        SymbolTable? symbols = null) =>
         new()
         {
             Status = "partial",
@@ -271,7 +311,14 @@ internal static class BamlSummaryReader
             WriterVersion = writerVersion,
             RecordCount = recordCounts.Values.Sum(),
             RecordTypes = BuildRecordCounts(recordCounts),
+            ElementCount = symbols?.ElementCount ?? 0,
+            PropertyCount = symbols?.PropertyCount ?? 0,
+            RootElementTypeId = symbols?.RootElementTypeId,
+            RootElementType = symbols?.ResolveRootElementType(),
+            ElementTypes = symbols?.BuildElementTypes() ?? [],
+            Properties = symbols?.BuildProperties() ?? [],
             RecordsTruncated = recordsTruncated,
+            SymbolsTruncated = symbols?.Truncated ?? false,
             Error = error
         };
 
@@ -282,4 +329,237 @@ internal static class BamlSummaryReader
             Signature = signature,
             Error = error
         };
+
+    private static bool TryReadInt16(ReadOnlySpan<byte> data, ref int position, out short value)
+    {
+        if (position > data.Length - sizeof(short))
+        {
+            value = default;
+            return false;
+        }
+
+        value = BinaryPrimitives.ReadInt16LittleEndian(data[position..]);
+        position += sizeof(short);
+        return true;
+    }
+
+    private static bool TryReadString(ReadOnlySpan<byte> data, ref int position, out string value)
+    {
+        value = string.Empty;
+        if (!TryRead7BitEncodedInt(data, ref position, out var byteLength)
+            || byteLength < 0
+            || byteLength > MaxMetadataStringBytes
+            || byteLength > data.Length - position)
+        {
+            return false;
+        }
+
+        try
+        {
+            value = StrictUtf8.GetString(data.Slice(position, byteLength));
+            position += byteLength;
+            return true;
+        }
+        catch (DecoderFallbackException)
+        {
+            return false;
+        }
+    }
+
+    private sealed class SymbolTable
+    {
+        private readonly Dictionary<short, string> _assemblies = [];
+        private readonly Dictionary<short, TypeDeclaration> _types = [];
+        private readonly Dictionary<short, AttributeDeclaration> _attributes = [];
+        private readonly Dictionary<short, int> _elementTypes = [];
+        private readonly Dictionary<short, int> _properties = [];
+
+        public int ElementCount { get; private set; }
+
+        public int PropertyCount { get; private set; }
+
+        public short? RootElementTypeId { get; private set; }
+
+        public bool Truncated { get; private set; }
+
+        public bool TryReadRecord(byte recordType, ReadOnlySpan<byte> payload, out string? error)
+        {
+            error = null;
+            return recordType switch
+            {
+                3 => TryReadElement(payload, out error),
+                28 => TryReadAssembly(payload, out error),
+                29 => TryReadType(payload, hasSerializer: false, out error),
+                30 => TryReadType(payload, hasSerializer: true, out error),
+                31 => TryReadAttribute(payload, out error),
+                5 or 6 or 7 or 9 or 11 or 13 or 18 or 33 or 34 or 35 or 36 or 46 or 56
+                    => TryReadProperty(payload, out error),
+                _ => true
+            };
+        }
+
+        public string? ResolveRootElementType() =>
+            RootElementTypeId is { } id && _types.TryGetValue(id, out var declaration)
+                ? declaration.Name
+                : null;
+
+        public IReadOnlyList<BamlTypeUsageModel> BuildElementTypes() =>
+            _elementTypes
+                .OrderByDescending(pair => pair.Value)
+                .ThenBy(pair => pair.Key)
+                .Select(pair =>
+                {
+                    _types.TryGetValue(pair.Key, out var declaration);
+                    return new BamlTypeUsageModel
+                    {
+                        Id = pair.Key,
+                        Name = declaration?.Name,
+                        Assembly = declaration is { } type
+                            && _assemblies.TryGetValue(type.AssemblyId, out var assembly)
+                                ? assembly
+                                : null,
+                        Count = pair.Value
+                    };
+                })
+                .ToArray();
+
+        public IReadOnlyList<BamlPropertyUsageModel> BuildProperties() =>
+            _properties
+                .OrderByDescending(pair => pair.Value)
+                .ThenBy(pair => pair.Key)
+                .Select(pair =>
+                {
+                    _attributes.TryGetValue(pair.Key, out var declaration);
+                    return new BamlPropertyUsageModel
+                    {
+                        Id = pair.Key,
+                        Name = declaration?.Name,
+                        OwnerType = declaration is { } attribute
+                            && _types.TryGetValue(attribute.OwnerTypeId, out var owner)
+                                ? owner.Name
+                                : null,
+                        Count = pair.Value
+                    };
+                })
+                .ToArray();
+
+        private bool TryReadAssembly(ReadOnlySpan<byte> payload, out string? error)
+        {
+            var position = 0;
+            if (!TryReadInt16(payload, ref position, out var id)
+                || !TryReadString(payload, ref position, out var name))
+            {
+                error = "assembly 對照表已截斷或字串格式錯誤。";
+                return false;
+            }
+
+            AddDeclaration(_assemblies, id, name);
+            error = null;
+            return true;
+        }
+
+        private bool TryReadType(ReadOnlySpan<byte> payload, bool hasSerializer, out string? error)
+        {
+            var position = 0;
+            if (!TryReadInt16(payload, ref position, out var id)
+                || !TryReadInt16(payload, ref position, out var assemblyAndFlags)
+                || !TryReadString(payload, ref position, out var name)
+                || (hasSerializer && !TryReadInt16(payload, ref position, out _)))
+            {
+                error = "type 對照表已截斷或字串格式錯誤。";
+                return false;
+            }
+
+            var assemblyId = (short)(assemblyAndFlags & 0x0FFF);
+            AddDeclaration(_types, id, new TypeDeclaration(name, assemblyId));
+            error = null;
+            return true;
+        }
+
+        private bool TryReadAttribute(ReadOnlySpan<byte> payload, out string? error)
+        {
+            var position = 0;
+            if (!TryReadInt16(payload, ref position, out var id)
+                || !TryReadInt16(payload, ref position, out var ownerTypeId)
+                || position >= payload.Length)
+            {
+                error = "attribute 對照表已截斷。";
+                return false;
+            }
+
+            position++;
+            if (!TryReadString(payload, ref position, out var name))
+            {
+                error = "attribute 對照表的名稱格式錯誤。";
+                return false;
+            }
+
+            AddDeclaration(_attributes, id, new AttributeDeclaration(name, ownerTypeId));
+            error = null;
+            return true;
+        }
+
+        private bool TryReadElement(ReadOnlySpan<byte> payload, out string? error)
+        {
+            var position = 0;
+            if (!TryReadInt16(payload, ref position, out var typeId))
+            {
+                error = "element type ID 已截斷。";
+                return false;
+            }
+
+            RootElementTypeId ??= typeId;
+            ElementCount++;
+            AddUsage(_elementTypes, typeId);
+            error = null;
+            return true;
+        }
+
+        private bool TryReadProperty(ReadOnlySpan<byte> payload, out string? error)
+        {
+            var position = 0;
+            if (!TryReadInt16(payload, ref position, out var attributeId))
+            {
+                error = "property attribute ID 已截斷。";
+                return false;
+            }
+
+            PropertyCount++;
+            AddUsage(_properties, attributeId);
+            error = null;
+            return true;
+        }
+
+        private void AddDeclaration<T>(Dictionary<short, T> declarations, short id, T value)
+        {
+            if (declarations.ContainsKey(id) || declarations.Count < MaxSymbols)
+            {
+                declarations[id] = value;
+            }
+            else
+            {
+                Truncated = true;
+            }
+        }
+
+        private void AddUsage(Dictionary<short, int> usages, short id)
+        {
+            if (usages.TryGetValue(id, out var count))
+            {
+                usages[id] = count + 1;
+            }
+            else if (usages.Count < MaxSymbols)
+            {
+                usages[id] = 1;
+            }
+            else
+            {
+                Truncated = true;
+            }
+        }
+
+        private sealed record TypeDeclaration(string Name, short AssemblyId);
+
+        private sealed record AttributeDeclaration(string Name, short OwnerTypeId);
+    }
 }

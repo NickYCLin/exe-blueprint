@@ -99,7 +99,23 @@ public sealed record BamlSummaryModel
 
     public IReadOnlyList<BamlRecordCountModel> RecordTypes { get; init; } = [];
 
+    public int ElementCount { get; init; }
+
+    public int PropertyCount { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public int? RootElementTypeId { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? RootElementType { get; init; }
+
+    public IReadOnlyList<BamlTypeUsageModel> ElementTypes { get; init; } = [];
+
+    public IReadOnlyList<BamlPropertyUsageModel> Properties { get; init; } = [];
+
     public bool RecordsTruncated { get; init; }
+
+    public bool SymbolsTruncated { get; init; }
 
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     public string? Error { get; init; }
@@ -110,6 +126,32 @@ public sealed record BamlRecordCountModel
     public required int Code { get; init; }
 
     public required string Name { get; init; }
+
+    public required int Count { get; init; }
+}
+
+public sealed record BamlTypeUsageModel
+{
+    public required int Id { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? Name { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? Assembly { get; init; }
+
+    public required int Count { get; init; }
+}
+
+public sealed record BamlPropertyUsageModel
+{
+    public required int Id { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? Name { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? OwnerType { get; init; }
 
     public required int Count { get; init; }
 }

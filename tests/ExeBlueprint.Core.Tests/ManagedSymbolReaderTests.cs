@@ -743,11 +743,26 @@ public sealed class ManagedSymbolReaderTests
         Assert.Equal("0.96", bamlEntry.Baml.UpdaterVersion);
         Assert.Equal("0.96", bamlEntry.Baml.WriterVersion);
         Assert.Equal(24, bamlEntry.Baml.RecordCount);
+        Assert.Equal(2, bamlEntry.Baml.ElementCount);
+        Assert.Equal(4, bamlEntry.Baml.PropertyCount);
+        Assert.Equal(0, bamlEntry.Baml.RootElementTypeId);
+        Assert.Equal("BamlFixture.MainWindow", bamlEntry.Baml.RootElementType);
         Assert.False(bamlEntry.Baml.RecordsTruncated);
+        Assert.False(bamlEntry.Baml.SymbolsTruncated);
         Assert.Null(bamlEntry.Baml.Error);
         Assert.Equal(6, Assert.Single(bamlEntry.Baml.RecordTypes, item => item.Name == "AssemblyInfo").Count);
         Assert.Equal(2, Assert.Single(bamlEntry.Baml.RecordTypes, item => item.Name == "ElementStart").Count);
         Assert.Equal(1, Assert.Single(bamlEntry.Baml.RecordTypes, item => item.Name == "DocumentEnd").Count);
+        var customElement = Assert.Single(bamlEntry.Baml.ElementTypes, item => item.Id == 0);
+        Assert.Equal("BamlFixture.MainWindow", customElement.Name);
+        Assert.StartsWith("BamlFixture, Version=1.0.0.0", customElement.Assembly, StringComparison.Ordinal);
+        Assert.Equal(1, customElement.Count);
+        var builtInElement = Assert.Single(bamlEntry.Baml.ElementTypes, item => item.Id == -254);
+        Assert.Null(builtInElement.Name);
+        var titleProperty = Assert.Single(bamlEntry.Baml.Properties, item => item.Id == 0);
+        Assert.Equal("Title", titleProperty.Name);
+        Assert.Null(titleProperty.OwnerType);
+        Assert.Equal(4, bamlEntry.Baml.Properties.Count);
 
         await using var temp = new TemporaryDirectory();
         var outputPath = Path.Combine(temp.Path, "blueprint.json");
@@ -769,6 +784,11 @@ public sealed class ManagedSymbolReaderTests
         Assert.Equal("parsed", bamlJson.GetProperty("status").GetString());
         Assert.Equal(24, bamlJson.GetProperty("recordCount").GetInt32());
         Assert.Equal(11, bamlJson.GetProperty("recordTypes").GetArrayLength());
+        Assert.Equal(2, bamlJson.GetProperty("elementCount").GetInt32());
+        Assert.Equal(4, bamlJson.GetProperty("propertyCount").GetInt32());
+        Assert.Equal("BamlFixture.MainWindow", bamlJson.GetProperty("rootElementType").GetString());
+        Assert.Equal(2, bamlJson.GetProperty("elementTypes").GetArrayLength());
+        Assert.Equal(4, bamlJson.GetProperty("properties").GetArrayLength());
     }
 
     [Fact]
@@ -861,6 +881,32 @@ public sealed class ManagedSymbolReaderTests
         Assert.Equal("partial", truncated.Status);
         Assert.Equal(0, truncated.RecordCount);
         Assert.NotNull(truncated.Error);
+
+        var invalidTypeMap = CreateBamlHeader()
+            .Concat(new byte[] { 29, 2, 0 })
+            .ToArray();
+        var invalidMap = BamlSummaryReader.Read(invalidTypeMap);
+        Assert.Equal("partial", invalidMap.Status);
+        Assert.Equal(0, invalidMap.RecordCount);
+        Assert.Contains("type 對照表", invalidMap.Error);
+
+        using var manyElements = new MemoryStream();
+        manyElements.Write(CreateBamlHeader());
+        using (var writer = new BinaryWriter(manyElements, System.Text.Encoding.UTF8, leaveOpen: true))
+        {
+            for (short typeId = 0; typeId <= 2_000; typeId++)
+            {
+                writer.Write((byte)3);
+                writer.Write(typeId);
+                writer.Write((byte)0);
+            }
+        }
+
+        var boundedSymbols = BamlSummaryReader.Read(manyElements.ToArray());
+        Assert.Equal("parsed", boundedSymbols.Status);
+        Assert.Equal(2_001, boundedSymbols.ElementCount);
+        Assert.Equal(2_000, boundedSymbols.ElementTypes.Count);
+        Assert.True(boundedSymbols.SymbolsTruncated);
     }
 
     [Fact]
