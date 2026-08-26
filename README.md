@@ -1,10 +1,25 @@
 # ExeBlueprint
 
-ExeBlueprint 用來整理 Windows 應用程式套件。它會掃描 EXE、DLL、設定檔和資源，產生可供後續重建使用的 `blueprint.json`，另外附上一份方便閱讀的 `REPORT.md`。
+[繁體中文](README.md)｜[English](README.en.md)
+
+[![CI](https://github.com/NickYCLin/exe-blueprint/actions/workflows/ci.yml/badge.svg)](https://github.com/NickYCLin/exe-blueprint/actions/workflows/ci.yml)
+[![GitHub Release](https://img.shields.io/github/v/release/NickYCLin/exe-blueprint)](https://github.com/NickYCLin/exe-blueprint/releases/latest)
+
+ExeBlueprint 是跨平台的 Windows EXE、DLL 與應用程式套件靜態分析工具。它會整理 PE、.NET metadata、IL、相依關係與內嵌資源，產生可供盤點、重建或後續自動化處理的 `blueprint.json`，另外附上一份方便閱讀的 `REPORT.md`。
 
 現在有圖形介面可直接選擇或拖放檔案與資料夾，也能指定輸出位置並重選最近分析成功的來源；桌面版支援 Windows、macOS 與 Linux，原本的命令列工具也會繼續提供。
 
 目前版本只做靜態分析，不會執行輸入程式。
+
+## 適合什麼情境
+
+- 想先盤點陌生或老舊的 Windows 應用程式，不希望直接執行來源不明的 EXE
+- 要查 PE imports、.NET assembly references、框架、資源與套件內相依關係
+- 在系統移轉或軟體考古前，先整理 .NET 型別、IL、呼叫圖與 WPF BAML 結構
+- 要把分析結果交給腳本、CI 或大型語言模型接著比對、分類與規劃重建工作
+- 需要 JSON 資料做後續工具鏈輸入，也需要 Markdown 報告供工程師快速閱讀
+
+ExeBlueprint 不是動態沙箱，也不是能完整還原所有原始碼的反編譯器。原生程式的函式分析可選配 Ghidra；目前較完整的程式結構還原集中在 .NET assembly。
 
 ## 下載
 
