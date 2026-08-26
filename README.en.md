@@ -4,6 +4,7 @@
 
 [![CI](https://github.com/NickYCLin/exe-blueprint/actions/workflows/ci.yml/badge.svg)](https://github.com/NickYCLin/exe-blueprint/actions/workflows/ci.yml)
 [![GitHub Release](https://img.shields.io/github/v/release/NickYCLin/exe-blueprint)](https://github.com/NickYCLin/exe-blueprint/releases/latest)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 ExeBlueprint is a cross-platform static analyzer for Windows EXE, DLL, folder, and ZIP application packages. It inspects PE files, .NET metadata and IL, dependencies, embedded resources, and WPF BAML, then exports a machine-readable software blueprint plus a readable Markdown report.
 
@@ -105,3 +106,7 @@ If Ghidra is unavailable, the rest of the analysis continues and the report reco
 - Detection and reconstructed code must be reviewed by an engineer before use.
 
 See the [architecture notes](docs/architecture.md), [contribution guide](CONTRIBUTING.md), and [security policy](SECURITY.md) for more details.
+
+## License
+
+ExeBlueprint is available under the [MIT License](LICENSE).

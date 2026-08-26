@@ -4,6 +4,7 @@
 
 [![CI](https://github.com/NickYCLin/exe-blueprint/actions/workflows/ci.yml/badge.svg)](https://github.com/NickYCLin/exe-blueprint/actions/workflows/ci.yml)
 [![GitHub Release](https://img.shields.io/github/v/release/NickYCLin/exe-blueprint)](https://github.com/NickYCLin/exe-blueprint/releases/latest)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 ExeBlueprint 是跨平台的 Windows EXE、DLL 與應用程式套件靜態分析工具。它會整理 PE、.NET metadata、IL、相依關係與內嵌資源，產生可供盤點、重建或後續自動化處理的 `blueprint.json`，另外附上一份方便閱讀的 `REPORT.md`。
 
@@ -185,4 +186,4 @@ Commit message 採用：
 
 ## 授權
 
-目前尚未指定開源授權。在授權檔加入 repository 前，請勿把程式碼當成可任意再散布或商用的開源套件。
+本專案採用 [MIT License](LICENSE)。
