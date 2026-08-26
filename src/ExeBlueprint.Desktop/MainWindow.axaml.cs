@@ -1,7 +1,9 @@
 using System.Diagnostics;
 using System.Reflection;
 using Avalonia.Controls;
+using Avalonia.Input;
 using Avalonia.Interactivity;
+using Avalonia.Media;
 using Avalonia.Platform.Storage;
 using ExeBlueprint.Application;
 
@@ -14,12 +16,18 @@ public sealed partial class MainWindow : Window
     private string? _lastOutputDirectory;
     private bool _settingSuggestedOutput;
     private bool _outputWasEdited;
+    private bool _inputDropZoneActive;
 
     public MainWindow()
     {
         InitializeComponent();
         var version = Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "0.2.0";
         VersionText.Text = $"桌面版 {version}";
+        DragDrop.SetAllowDrop(InputDropZone, true);
+        DragDrop.AddDragEnterHandler(InputDropZone, OnInputDragEnter);
+        DragDrop.AddDragLeaveHandler(InputDropZone, OnInputDragLeave);
+        DragDrop.AddDragOverHandler(InputDropZone, OnInputDragOver);
+        DragDrop.AddDropHandler(InputDropZone, OnInputDrop);
         OutputPathBox.TextChanged += (_, _) =>
         {
             if (!_settingSuggestedOutput)
@@ -92,6 +100,74 @@ public sealed partial class MainWindow : Window
             GhidraPathBox.Text = path;
             NativeCheckBox.IsChecked = true;
         }
+    }
+
+    private void OnInputDragEnter(object? sender, DragEventArgs e)
+    {
+        var canAccept = CanAcceptInputDrop(e);
+        e.DragEffects = canAccept ? DragDropEffects.Copy : DragDropEffects.None;
+        e.Handled = true;
+        SetInputDropZoneActive(canAccept);
+    }
+
+    private void OnInputDragLeave(object? sender, DragEventArgs e)
+    {
+        e.Handled = true;
+        SetInputDropZoneActive(false);
+    }
+
+    private void OnInputDragOver(object? sender, DragEventArgs e)
+    {
+        var canAccept = CanAcceptInputDrop(e);
+        e.DragEffects = canAccept ? DragDropEffects.Copy : DragDropEffects.None;
+        e.Handled = true;
+        SetInputDropZoneActive(canAccept);
+    }
+
+    private void OnInputDrop(object? sender, DragEventArgs e)
+    {
+        SetInputDropZoneActive(false);
+        e.Handled = true;
+
+        if (!CanAcceptInputDrop(e))
+        {
+            e.DragEffects = DragDropEffects.None;
+            return;
+        }
+
+        var localPaths = e.DataTransfer.TryGetFiles()?
+            .Select(item => item.TryGetLocalPath())
+            .ToArray() ?? [];
+        var selection = DroppedInputSelector.Select(localPaths);
+        if (selection.ErrorMessage is not null)
+        {
+            e.DragEffects = DragDropEffects.None;
+            ShowError(selection.ErrorMessage);
+            return;
+        }
+
+        SetInputPath(selection.Path);
+        StatusTitleText.Text = "已選擇分析來源";
+        StatusDetailText.Text = selection.Path;
+        SummaryText.IsVisible = false;
+        e.DragEffects = DragDropEffects.Copy;
+    }
+
+    private bool CanAcceptInputDrop(DragEventArgs e) =>
+        _analysisCancellation is null && e.DataTransfer.Formats.Contains(DataFormat.File);
+
+    private void SetInputDropZoneActive(bool active)
+    {
+        if (_inputDropZoneActive == active)
+        {
+            return;
+        }
+
+        _inputDropZoneActive = active;
+        InputDropZone.Background = new SolidColorBrush(Color.Parse(active ? "#EFF6FF" : "#F8FAFC"));
+        InputDropZone.BorderBrush = new SolidColorBrush(Color.Parse(active ? "#2563EB" : "#CBD5E1"));
+        InputDropTitleText.Foreground = new SolidColorBrush(Color.Parse(active ? "#1D4ED8" : "#334155"));
+        InputDropTitleText.Text = active ? "放開即可選擇這個來源" : "把檔案或資料夾拖到這裡";
     }
 
     private void OnInputPathChanged(object? sender, TextChangedEventArgs e)
@@ -250,6 +326,8 @@ public sealed partial class MainWindow : Window
 
     private void SetBusy(bool busy)
     {
+        DragDrop.SetAllowDrop(InputDropZone, !busy);
+        SetInputDropZoneActive(false);
         InputPathBox.IsEnabled = !busy;
         OutputPathBox.IsEnabled = !busy;
         GhidraPathBox.IsEnabled = !busy;

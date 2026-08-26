@@ -3,4 +3,5 @@
   <Project Path="src/ExeBlueprint.Cli/ExeBlueprint.Cli.csproj" />
   <Project Path="src/ExeBlueprint.Desktop/ExeBlueprint.Desktop.csproj" />
   <Project Path="tests/ExeBlueprint.Core.Tests/ExeBlueprint.Core.Tests.csproj" />
+  <Project Path="tests/ExeBlueprint.Desktop.Tests/ExeBlueprint.Desktop.Tests.csproj" />
 </Solution>

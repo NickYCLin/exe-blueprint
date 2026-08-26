@@ -2,7 +2,7 @@
 
 ExeBlueprint 用來整理 Windows 應用程式套件。它會掃描 EXE、DLL、設定檔和資源，產生可供後續重建使用的 `blueprint.json`，另外附上一份方便閱讀的 `REPORT.md`。
 
-現在有圖形介面可直接選檔案、資料夾和輸出位置，桌面版支援 Windows、macOS 與 Linux；原本的命令列工具也會繼續提供。
+現在有圖形介面可直接選擇或拖放檔案與資料夾，也能指定輸出位置；桌面版支援 Windows、macOS 與 Linux，原本的命令列工具也會繼續提供。
 
 目前版本只做靜態分析，不會執行輸入程式。
 
@@ -141,7 +141,7 @@ src/ExeBlueprint.Desktop/bin/Release/net10.0/win-x64/publish/ExeBlueprint.exe
 - 優先支援易語言、VB6、Delphi 到 C# 的轉換
 - 讓 C++／Rust／Go 產生器也還原方法體、支援易語言（目前這三個語言只還原結構）
 - 比較原程式與重建版本的輸入、輸出和副作用
-- 補上桌面版拖放操作、最近使用項目與安裝程式
+- 補上桌面版最近使用項目與安裝程式（拖放輸入已完成）
 
 這些項目尚未完成，詳細分層可看 [架構說明](docs/architecture.md)。
 

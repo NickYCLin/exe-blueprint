@@ -32,6 +32,13 @@
       <Setter Property="Foreground" Value="#64748B" />
       <Setter Property="TextWrapping" Value="Wrap" />
     </Style>
+    <Style Selector="Border.dropZone">
+      <Setter Property="Background" Value="#F8FAFC" />
+      <Setter Property="BorderBrush" Value="#CBD5E1" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="10" />
+      <Setter Property="Padding" Value="14" />
+    </Style>
     <Style Selector="Button">
       <Setter Property="MinHeight" Value="38" />
       <Setter Property="Padding" Value="16,8" />
@@ -91,6 +98,31 @@
               <TextBlock Classes="hint"
                          Text="程式只做靜態分析，不會執行你選擇的 EXE 或 DLL。" />
             </StackPanel>
+
+            <Border x:Name="InputDropZone" Classes="dropZone">
+              <Grid ColumnDefinitions="Auto,*" ColumnSpacing="12">
+                <Border Width="36"
+                        Height="36"
+                        Background="#E8F0FF"
+                        CornerRadius="18">
+                  <TextBlock Text="↓"
+                             FontSize="20"
+                             FontWeight="Bold"
+                             Foreground="#2563EB"
+                             HorizontalAlignment="Center"
+                             VerticalAlignment="Center" />
+                </Border>
+                <StackPanel Grid.Column="1" Spacing="3" VerticalAlignment="Center">
+                  <TextBlock x:Name="InputDropTitleText"
+                             Text="把檔案或資料夾拖到這裡"
+                             FontSize="14"
+                             FontWeight="SemiBold"
+                             Foreground="#334155" />
+                  <TextBlock Classes="hint"
+                             Text="一次接受一個 EXE、DLL、ZIP 或資料夾" />
+                </StackPanel>
+              </Grid>
+            </Border>
 
             <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="10">
               <StackPanel>
