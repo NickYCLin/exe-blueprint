@@ -6,6 +6,7 @@ using System.Reflection.Emit;
 using System.Reflection.Metadata;
 using System.Reflection.Metadata.Ecma335;
 using System.Reflection.PortableExecutable;
+using System.Resources;
 using ExeBlueprint.Models;
 
 namespace ExeBlueprint.Analysis;
@@ -181,6 +182,9 @@ internal static class ManagedSymbolReader
     }
 
     private const int MaxResources = 2_000;
+    private const int MaxResourceEntries = 5_000;
+    private const int MaxResourceTableBytes = 32 * 1024 * 1024;
+    private const int MaxResourceValueLength = 4_096;
 
     // 讀 assembly 的 manifest 資源清單：名稱、可見性、放在哪、內嵌的話再讀出大小。
     private static IReadOnlyList<ManagedResourceModel> ReadManifestResources(
@@ -194,6 +198,7 @@ internal static class ManagedSymbolReader
 
         var resourcesDirectory = peReader.PEHeaders.CorHeader?.ResourcesDirectory;
         var resources = new List<ManagedResourceModel>();
+        var remainingResourceEntries = MaxResourceEntries;
 
         foreach (var handle in metadata.ManifestResources)
         {
@@ -209,6 +214,22 @@ internal static class ManagedSymbolReader
                 : "private";
 
             var (location, size) = ResolveResourceLocation(peReader, metadata, resource, resourcesDirectory);
+            var entries = Array.Empty<ManagedResourceEntryModel>();
+            var entriesTruncated = false;
+            string? entriesError = null;
+            if (location == "embedded" && name.EndsWith(".resources", StringComparison.OrdinalIgnoreCase))
+            {
+                var table = ReadEmbeddedResourceTable(
+                    peReader,
+                    resource.Offset,
+                    size,
+                    resourcesDirectory,
+                    remainingResourceEntries);
+                entries = table.Entries.ToArray();
+                entriesTruncated = table.Truncated;
+                entriesError = table.Error;
+                remainingResourceEntries -= entries.Length;
+            }
 
             resources.Add(new ManagedResourceModel
             {
@@ -216,7 +237,10 @@ internal static class ManagedSymbolReader
                 Visibility = visibility,
                 Location = location,
                 Kind = ClassifyResourceKind(name),
-                Size = size
+                Size = size,
+                Entries = entries,
+                EntriesTruncated = entriesTruncated,
+                EntriesError = entriesError
             });
         }
 
@@ -273,6 +297,224 @@ internal static class ManagedSymbolReader
             return null;
         }
     }
+
+    private static ResourceTableReadResult ReadEmbeddedResourceTable(
+        PEReader peReader,
+        long offset,
+        long? size,
+        DirectoryEntry? resourcesDirectory,
+        int entryLimit)
+    {
+        if (entryLimit <= 0)
+        {
+            return new([], true, null);
+        }
+
+        if (size is null)
+        {
+            return new([], false, "找不到完整的內嵌資源資料。");
+        }
+
+        if (size > MaxResourceTableBytes)
+        {
+            return new([], false, $"資源表超過 {MaxResourceTableBytes / 1024 / 1024} MB 安全解析上限。");
+        }
+
+        var data = TryReadEmbeddedResourceData(peReader, offset, (int)size.Value, resourcesDirectory);
+        if (data is null)
+        {
+            return new([], false, "找不到完整的內嵌資源資料。");
+        }
+
+        try
+        {
+            using var stream = new MemoryStream(data, writable: false);
+            using var reader = new ResourceReader(stream);
+            var enumerator = reader.GetEnumerator();
+            var entries = new List<ManagedResourceEntryModel>();
+            var truncated = false;
+
+            while (enumerator.MoveNext())
+            {
+                if (entries.Count >= entryLimit)
+                {
+                    truncated = true;
+                    break;
+                }
+
+                if (enumerator.Key is not string key)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    reader.GetResourceData(key, out var type, out var resourceData);
+                    entries.Add(DecodeResourceEntry(key, type, resourceData));
+                }
+                catch (Exception exception) when (exception is ArgumentException or BadImageFormatException or FormatException or InvalidOperationException or IOException)
+                {
+                    entries.Add(new ManagedResourceEntryModel
+                    {
+                        Name = key,
+                        Type = "unknown",
+                        Status = "invalid",
+                        Error = "無法讀取這筆資源的型別與原始資料。"
+                    });
+                }
+            }
+
+            return new(
+                entries.OrderBy(entry => entry.Name, StringComparer.Ordinal).ToArray(),
+                truncated,
+                null);
+        }
+        catch (Exception exception) when (exception is ArgumentException or BadImageFormatException or FormatException or InvalidOperationException or IOException or OverflowException)
+        {
+            return new([], false, "資源表格式損壞或不受支援。");
+        }
+    }
+
+    private static byte[]? TryReadEmbeddedResourceData(
+        PEReader peReader,
+        long offset,
+        int size,
+        DirectoryEntry? resourcesDirectory)
+    {
+        if (resourcesDirectory is not { Size: > 0 } directory || size < 0)
+        {
+            return null;
+        }
+
+        try
+        {
+            var block = peReader.GetSectionData(directory.RelativeVirtualAddress);
+            var dataOffset = offset + sizeof(int);
+            if (offset < 0
+                || dataOffset + size > directory.Size
+                || dataOffset + size > block.Length)
+            {
+                return null;
+            }
+
+            return block.GetReader((int)dataOffset, size).ReadBytes(size);
+        }
+        catch (Exception exception) when (exception is BadImageFormatException or ArgumentOutOfRangeException)
+        {
+            return null;
+        }
+    }
+
+    internal static ManagedResourceEntryModel DecodeResourceEntry(string name, string type, byte[] data)
+    {
+        const string prefix = "ResourceTypeCode.";
+        if (!type.StartsWith(prefix, StringComparison.Ordinal))
+        {
+            return new ManagedResourceEntryModel
+            {
+                Name = name,
+                Type = type,
+                Status = "unsupported",
+                DataSize = data.Length,
+                Error = "自訂資源型別未反序列化，僅保留型別與原始資料大小。"
+            };
+        }
+
+        try
+        {
+            using var stream = new MemoryStream(data, writable: false);
+            using var reader = new BinaryReader(stream);
+            var typeCode = type[prefix.Length..];
+
+            return typeCode switch
+            {
+                "Null" => CreateDecodedResourceEntry(name, type, null),
+                "String" => CreateDecodedResourceEntry(name, type, reader.ReadString()),
+                "Boolean" => CreateDecodedResourceEntry(name, type, reader.ReadBoolean() ? "true" : "false"),
+                "Char" => CreateDecodedResourceEntry(name, type, FormatResourceChar(reader.ReadChar())),
+                "Byte" => CreateDecodedResourceEntry(name, type, reader.ReadByte().ToString(CultureInfo.InvariantCulture)),
+                "SByte" => CreateDecodedResourceEntry(name, type, reader.ReadSByte().ToString(CultureInfo.InvariantCulture)),
+                "Int16" => CreateDecodedResourceEntry(name, type, reader.ReadInt16().ToString(CultureInfo.InvariantCulture)),
+                "UInt16" => CreateDecodedResourceEntry(name, type, reader.ReadUInt16().ToString(CultureInfo.InvariantCulture)),
+                "Int32" => CreateDecodedResourceEntry(name, type, reader.ReadInt32().ToString(CultureInfo.InvariantCulture)),
+                "UInt32" => CreateDecodedResourceEntry(name, type, reader.ReadUInt32().ToString(CultureInfo.InvariantCulture)),
+                "Int64" => CreateDecodedResourceEntry(name, type, reader.ReadInt64().ToString(CultureInfo.InvariantCulture)),
+                "UInt64" => CreateDecodedResourceEntry(name, type, reader.ReadUInt64().ToString(CultureInfo.InvariantCulture)),
+                "Single" => CreateDecodedResourceEntry(name, type, reader.ReadSingle().ToString("R", CultureInfo.InvariantCulture)),
+                "Double" => CreateDecodedResourceEntry(name, type, reader.ReadDouble().ToString("R", CultureInfo.InvariantCulture)),
+                "Decimal" => CreateDecodedResourceEntry(name, type, reader.ReadDecimal().ToString(CultureInfo.InvariantCulture)),
+                "DateTime" => CreateDecodedResourceEntry(
+                    name,
+                    type,
+                    DateTime.FromBinary(reader.ReadInt64()).ToString("O", CultureInfo.InvariantCulture)),
+                "TimeSpan" => CreateDecodedResourceEntry(
+                    name,
+                    type,
+                    TimeSpan.FromTicks(reader.ReadInt64()).ToString("c", CultureInfo.InvariantCulture)),
+                "ByteArray" or "Stream" => CreateBinaryResourceEntry(name, type, ReadBinaryResourceLength(reader)),
+                _ => new ManagedResourceEntryModel
+                {
+                    Name = name,
+                    Type = type,
+                    Status = "unsupported",
+                    DataSize = data.Length,
+                    Error = "這個 ResourceTypeCode 尚未支援，僅保留原始資料大小。"
+                }
+            };
+        }
+        catch (Exception exception) when (exception is ArgumentException or FormatException or InvalidDataException or IOException or OverflowException)
+        {
+            return new ManagedResourceEntryModel
+            {
+                Name = name,
+                Type = type,
+                Status = "invalid",
+                DataSize = data.Length,
+                Error = "資料格式與宣告的資源型別不一致。"
+            };
+        }
+    }
+
+    private static ManagedResourceEntryModel CreateDecodedResourceEntry(string name, string type, string? value)
+    {
+        var truncated = value is { Length: > MaxResourceValueLength };
+        return new ManagedResourceEntryModel
+        {
+            Name = name,
+            Type = type,
+            Status = "decoded",
+            Value = truncated ? value![..MaxResourceValueLength] : value,
+            ValueTruncated = truncated
+        };
+    }
+
+    private static ManagedResourceEntryModel CreateBinaryResourceEntry(string name, string type, int size) =>
+        new()
+        {
+            Name = name,
+            Type = type,
+            Status = "binary",
+            DataSize = size
+        };
+
+    private static int ReadBinaryResourceLength(BinaryReader reader)
+    {
+        var length = reader.ReadInt32();
+        if (length < 0 || length > reader.BaseStream.Length - reader.BaseStream.Position)
+        {
+            throw new InvalidDataException("Invalid binary resource length.");
+        }
+
+        return length;
+    }
+
+    private static string FormatResourceChar(char value) =>
+        char.IsControl(value) ? $"\\u{(int)value:X4}" : value.ToString();
+
+    private readonly record struct ResourceTableReadResult(
+        IReadOnlyList<ManagedResourceEntryModel> Entries,
+        bool Truncated,
+        string? Error);
 
     private static string ReadAssemblyFileName(MetadataReader metadata, AssemblyFileHandle handle)
     {

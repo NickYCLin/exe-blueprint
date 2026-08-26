@@ -36,12 +36,14 @@ Blueprint 中介資料
 - `input`：輸入類型、檔案數與總大小
 - `summary`：PE、assembly、型別、方法、資源和相依關係數量
 - `files`：每個檔案的格式、雜湊和分析資料，受管組件另含 `code`
-- `files[].code`：.NET 型別、巢狀宣告與 ref-like 關係、欄位、屬性、事件、方法簽章與 dispatch 旗標、入口點、方法層級呼叫圖與各方法反組譯出的 IL
+- `files[].code`：.NET 型別、巢狀宣告與 ref-like 關係、欄位、屬性、事件、方法簽章與 dispatch 旗標、入口點、方法層級呼叫圖、manifest 資源與各方法反組譯出的 IL
 - `dependencies`：PE imports 與 assembly references
 - `technologies`：語言、runtime、框架和工具鏈判斷
 - `warnings`：略過或無法分析的項目
 
-後續加入 UI、資源和更細的控制流程時會再提升 schema 版本，舊欄位維持相容。
+`.resources` 內的鍵值會放在 manifest 資源的 `entries`。字串、數字、布林、字元、日期與時間可轉成文字；位元組陣列和 stream 只記大小；自訂型別不會反序列化，只保留完整型別名稱與原始資料大小。單一 assembly 最多保留 5,000 筆鍵值、單一文字值最多保留 4,096 字元，截斷狀態和解析錯誤都會明確記錄。
+
+後續加入 UI、BAML 內容和更細的控制流程時會再提升 schema 版本，舊欄位維持相容。
 
 ## 分析器分層
 
@@ -95,7 +97,7 @@ IL `switch` 跳表可還原直接 return／throw 的分支，也能處理各 cas
 含回跳、會產生陳述式或不規則控制分支的 filter，以及非標準例外區域目前仍會退回反組譯 IL 註解加 `NotImplementedException`。
 重建採全有或全無：遇到無法結構化的跳轉、參照編譯器產生的名稱或任何不支援的指令，就整個方法放棄，
 寧可不還原也不產出語意錯誤的程式碼。enum 會保留底層整數型別與各成員原始數值；
-型別引用已保留完整命名空間，但套件外依賴與泛型限制仍可能需要手動補齊，因此不保證可直接編譯。
+型別引用已保留完整命名空間，但套件外依賴與泛型限制仍可能需要手動補齊，因此不保證可直接編譯。資源解析不會具現化或反序列化自訂型別，以免分析不可信檔案時執行非預期程式碼。
 
 另外也有 `CppSkeletonGenerator`、`RustSkeletonGenerator`、`GoSkeletonGenerator`，
 共用 `SkeletonSupport` 挑型別與 `LanguageTypeMap` 做基本型別對應，各自輸出該語言的型別與方法簽章骨架

@@ -1,4 +1,6 @@
 using ExeBlueprint.Analysis;
+using ExeBlueprint.Reporting;
+using System.Text.Json;
 
 namespace ExeBlueprint.Core.Tests;
 
@@ -715,6 +717,88 @@ public sealed class ManagedSymbolReaderTests
     }
 
     [Fact]
+    public async Task ReadsStandardResourceTableKeysAndValues()
+    {
+        var assemblyPath = typeof(ManagedSymbolReaderTests).Assembly.Location;
+        var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
+        var code = document.Files[0].Code!;
+
+        var resource = Assert.Single(
+            code.Resources,
+            resource => resource.Name == "ExeBlueprint.Core.Tests.Fixtures.sample.resources");
+
+        Assert.Null(resource.EntriesError);
+        Assert.False(resource.EntriesTruncated);
+        Assert.Single(resource.Entries);
+        AssertResourceEntry(resource, "Greeting", "String", "哈囉 ExeBlueprint");
+
+        await using var temp = new TemporaryDirectory();
+        var outputPath = Path.Combine(temp.Path, "blueprint.json");
+        await BlueprintJsonWriter.WriteAsync(document, outputPath);
+        using var json = JsonDocument.Parse(await File.ReadAllTextAsync(outputPath));
+        var resourceJson = json.RootElement
+            .GetProperty("files")[0]
+            .GetProperty("code")
+            .GetProperty("resources")
+            .EnumerateArray()
+            .Single(item => item.GetProperty("name").GetString() == resource.Name);
+        Assert.Equal(1, resourceJson.GetProperty("entries").GetArrayLength());
+        Assert.False(resourceJson.GetProperty("entriesTruncated").GetBoolean());
+    }
+
+    [Fact]
+    public void DecodesStandardResourceValueFormats()
+    {
+        AssertDecodedResource("Boolean", WriteResourceData(writer => writer.Write(true)), "true");
+        AssertDecodedResource("Int32", WriteResourceData(writer => writer.Write(3)), "3");
+        AssertDecodedResource("Double", WriteResourceData(writer => writer.Write(1.25)), "1.25");
+        AssertDecodedResource(
+            "TimeSpan",
+            WriteResourceData(writer => writer.Write(TimeSpan.FromSeconds(90).Ticks)),
+            "00:01:30");
+
+        var binary = WriteResourceData(writer =>
+        {
+            writer.Write(3);
+            writer.Write(new byte[] { 1, 2, 3 });
+        });
+        var binaryEntry = ManagedSymbolReader.DecodeResourceEntry(
+            "Payload",
+            "ResourceTypeCode.ByteArray",
+            binary);
+        Assert.Equal("binary", binaryEntry.Status);
+        Assert.Equal(3, binaryEntry.DataSize);
+        Assert.Null(binaryEntry.Value);
+
+        var unsupported = ManagedSymbolReader.DecodeResourceEntry(
+            "Custom",
+            "Example.Widget, Example",
+            [1, 2, 3]);
+        Assert.Equal("unsupported", unsupported.Status);
+        Assert.Equal(3, unsupported.DataSize);
+        Assert.NotNull(unsupported.Error);
+
+        var longText = new string('x', 4_097);
+        var truncated = ManagedSymbolReader.DecodeResourceEntry(
+            "LongText",
+            "ResourceTypeCode.String",
+            WriteResourceData(writer => writer.Write(longText)));
+        Assert.True(truncated.ValueTruncated);
+        Assert.Equal(4_096, truncated.Value!.Length);
+
+        var invalidBinary = ManagedSymbolReader.DecodeResourceEntry(
+            "InvalidPayload",
+            "ResourceTypeCode.ByteArray",
+            WriteResourceData(writer =>
+            {
+                writer.Write(4);
+                writer.Write(new byte[] { 1, 2 });
+            }));
+        Assert.Equal("invalid", invalidBinary.Status);
+        Assert.NotNull(invalidBinary.Error);
+    }
+
+    [Fact]
     public async Task SummaryAggregatesManagedTypeAndMethodCounts()
     {
         var assemblyPath = typeof(BlueprintAnalyzer).Assembly.Location;
@@ -757,6 +841,43 @@ public sealed class ManagedSymbolReaderTests
 
             return ValueTask.CompletedTask;
         }
+    }
+
+    private static void AssertResourceEntry(
+        ExeBlueprint.Models.ManagedResourceModel resource,
+        string name,
+        string typeSuffix,
+        string value)
+    {
+        var entry = Assert.Single(resource.Entries, entry => entry.Name == name);
+        Assert.EndsWith(typeSuffix, entry.Type, StringComparison.Ordinal);
+        Assert.Equal("decoded", entry.Status);
+        Assert.Equal(value, entry.Value);
+        Assert.False(entry.ValueTruncated);
+        Assert.Null(entry.Error);
+    }
+
+    private static void AssertDecodedResource(string typeCode, byte[] data, string expectedValue)
+    {
+        var entry = ManagedSymbolReader.DecodeResourceEntry(
+            "Value",
+            $"ResourceTypeCode.{typeCode}",
+            data);
+
+        Assert.Equal("decoded", entry.Status);
+        Assert.Equal(expectedValue, entry.Value);
+        Assert.Null(entry.Error);
+    }
+
+    private static byte[] WriteResourceData(Action<BinaryWriter> write)
+    {
+        using var stream = new MemoryStream();
+        using (var writer = new BinaryWriter(stream, System.Text.Encoding.UTF8, leaveOpen: true))
+        {
+            write(writer);
+        }
+
+        return stream.ToArray();
     }
 }
 

@@ -136,6 +136,7 @@ public static class MarkdownReportWriter
     private const int MaxCallEdgesPerFile = 30;
     private const int MaxNativeFunctionsPerFile = 100;
     private const int MaxResourcesPerFile = 30;
+    private const int MaxResourceEntriesPerFile = 50;
 
     private static void AppendNativeFunctions(StringBuilder builder, BlueprintDocument document)
     {
@@ -274,6 +275,37 @@ public static class MarkdownReportWriter
                     builder.AppendLine();
                     builder.AppendLine($"（僅列出前 {MaxResourcesPerFile} 筆，共 {code.Resources.Count} 筆，完整內容請看 blueprint.json）");
                 }
+
+                var resourceEntries = code.Resources
+                    .SelectMany(resource => resource.Entries.Select(entry => (Resource: resource.Name, Entry: entry)))
+                    .Take(MaxResourceEntriesPerFile)
+                    .ToArray();
+                if (resourceEntries.Length > 0)
+                {
+                    builder.AppendLine();
+                    builder.AppendLine("資源表鍵值：");
+                    builder.AppendLine();
+                    builder.AppendLine("| 資源 | 鍵 | 型別 | 內容 |");
+                    builder.AppendLine("| --- | --- | --- | --- |");
+                    foreach (var item in resourceEntries)
+                    {
+                        builder.AppendLine(
+                            $"| `{EscapeInline(item.Resource)}` | `{EscapeInline(item.Entry.Name)}` | `{EscapeInline(item.Entry.Type)}` | {FormatResourceEntry(item.Entry)} |");
+                    }
+                }
+
+                var totalResourceEntries = code.Resources.Sum(resource => resource.Entries.Count);
+                if (totalResourceEntries > MaxResourceEntriesPerFile || code.Resources.Any(resource => resource.EntriesTruncated))
+                {
+                    builder.AppendLine();
+                    builder.AppendLine($"（報告最多列出 {MaxResourceEntriesPerFile} 筆資源鍵值，完整內容與截斷狀態請看 blueprint.json）");
+                }
+
+                foreach (var resource in code.Resources.Where(resource => resource.EntriesError is not null))
+                {
+                    builder.AppendLine();
+                    builder.AppendLine($"- `{EscapeInline(resource.Name)}`：{EscapeCell(resource.EntriesError!)}");
+                }
             }
 
             builder.AppendLine();
@@ -286,6 +318,36 @@ public static class MarkdownReportWriter
     private static string EscapeCell(string value) => value.Replace("|", "\\|", StringComparison.Ordinal).ReplaceLineEndings(" ");
 
     private static string EscapeInline(string value) => value.Replace("`", "'", StringComparison.Ordinal).ReplaceLineEndings(" ");
+
+    private static string FormatResourceEntry(ManagedResourceEntryModel entry)
+    {
+        if (entry.Status == "decoded")
+        {
+            if (entry.Value is null)
+            {
+                return "`null`";
+            }
+
+            if (entry.Value.Length == 0)
+            {
+                return "（空字串）";
+            }
+
+            var suffix = entry.ValueTruncated ? "…（已截斷）" : string.Empty;
+            return $"`{EscapeInline(EscapeCell(entry.Value))}`{suffix}";
+        }
+
+        if (entry.Status == "binary")
+        {
+            return entry.DataSize is { } binarySize
+                ? $"二進位，{FormatBytes(binarySize)}"
+                : "二進位";
+        }
+
+        var size = entry.DataSize is { } dataSize ? $"，原始資料 {FormatBytes(dataSize)}" : string.Empty;
+        var error = entry.Error is null ? string.Empty : $"：{EscapeCell(entry.Error)}";
+        return $"{(entry.Status == "invalid" ? "無法解碼" : "未解碼")}{size}{error}";
+    }
 
     private static string FormatBytes(long bytes)
     {

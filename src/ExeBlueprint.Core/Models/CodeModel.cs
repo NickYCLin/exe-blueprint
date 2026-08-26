@@ -40,6 +40,38 @@ public sealed record ManagedResourceModel
     // 只有內嵌資源讀得到大小（位元組）。
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     public long? Size { get; init; }
+
+    // .resources 資源表內安全讀出的鍵值；其他 manifest resource 保持空集合。
+    public IReadOnlyList<ManagedResourceEntryModel> Entries { get; init; } = [];
+
+    // 達到單一 assembly 的鍵值數量上限時為 true。
+    public bool EntriesTruncated { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? EntriesError { get; init; }
+}
+
+public sealed record ManagedResourceEntryModel
+{
+    public required string Name { get; init; }
+
+    // ResourceReader 回傳的 ResourceTypeCode 或自訂型別完整名稱。
+    public required string Type { get; init; }
+
+    // decoded、binary、unsupported 或 invalid。
+    public required string Status { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? Value { get; init; }
+
+    public bool ValueTruncated { get; init; }
+
+    // binary 為內容長度；unsupported／invalid 為尚未解碼的原始資料長度。
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public int? DataSize { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? Error { get; init; }
 }
 
 public sealed record TypeModel

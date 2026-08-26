@@ -1,5 +1,6 @@
 using ExeBlueprint.Models;
 using ExeBlueprint.Reporting;
+using ExeBlueprint.Analysis;
 
 namespace ExeBlueprint.Core.Tests;
 
@@ -26,5 +27,18 @@ public sealed class MarkdownReportWriterTests
         Assert.Contains("# ExeBlueprint 分析報告", report);
         Assert.Contains("靜態分析", report, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("AI 驅動", report, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task BuildListsDecodedResourceTableEntries()
+    {
+        var assemblyPath = typeof(MarkdownReportWriterTests).Assembly.Location;
+        var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
+
+        var report = MarkdownReportWriter.Build(document);
+
+        Assert.Contains("資源表鍵值：", report);
+        Assert.Contains("`Greeting`", report);
+        Assert.Contains("`哈囉 ExeBlueprint`", report);
     }
 }
