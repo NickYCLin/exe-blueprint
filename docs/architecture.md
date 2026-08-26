@@ -27,7 +27,7 @@ Blueprint 中介資料
 `ExeBlueprint.Application.BlueprintExportService` 負責串接分析、JSON、Markdown 與各語言骨架輸出。
 `ExeBlueprint.Cli` 和 Avalonia 製作的 `ExeBlueprint.Desktop` 都呼叫這個服務，所以兩種入口的分析結果與覆寫保護一致。
 
-桌面版只放檔案／資料夾選擇與拖放、選項、進度與狀態，不在 UI 專案裡重做分析器。拖放操作只接受一個本機檔案或資料夾，並沿用既有輸入與輸出路徑邏輯。Avalonia 使用同一份 XAML 在 Windows、macOS 與 Linux 顯示，平台差異集中在檔案選擇器與 Release 包裝。
+桌面版只放檔案／資料夾選擇與拖放、最近使用項目、選項、進度與狀態，不在 UI 專案裡重做分析器。拖放操作只接受一個本機檔案或資料夾，並沿用既有輸入與輸出路徑邏輯。最近使用項目只在分析成功後記錄，最多保留八筆本機路徑，資料放在作業系統的 Local Application Data。Avalonia 使用同一份 XAML 在 Windows、macOS 與 Linux 顯示，平台差異集中在檔案選擇器與 Release 包裝。
 
 ## Blueprint 資料
 

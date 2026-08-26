@@ -12,6 +12,8 @@ namespace ExeBlueprint.Desktop;
 public sealed partial class MainWindow : Window
 {
     private readonly BlueprintExportService _exportService = new();
+    private readonly RecentInputStore _recentInputStore = RecentInputStore.CreateDefault();
+    private readonly List<string> _recentInputPaths = [];
     private CancellationTokenSource? _analysisCancellation;
     private string? _lastOutputDirectory;
     private bool _settingSuggestedOutput;
@@ -28,6 +30,7 @@ public sealed partial class MainWindow : Window
         DragDrop.AddDragLeaveHandler(InputDropZone, OnInputDragLeave);
         DragDrop.AddDragOverHandler(InputDropZone, OnInputDragOver);
         DragDrop.AddDropHandler(InputDropZone, OnInputDrop);
+        LoadRecentInputs();
         OutputPathBox.TextChanged += (_, _) =>
         {
             if (!_settingSuggestedOutput)
@@ -78,6 +81,37 @@ public sealed partial class MainWindow : Window
     private async void OnChooseFolder(object? sender, RoutedEventArgs e)
     {
         SetInputPath(await PickFolderAsync("選擇要分析的資料夾"));
+    }
+
+    private void OnRecentInputSelected(object? sender, SelectionChangedEventArgs e)
+    {
+        if (RecentInputComboBox.SelectedItem is not string path)
+        {
+            return;
+        }
+
+        SetInputPath(path);
+        StatusTitleText.Text = "已選擇最近使用項目";
+        StatusDetailText.Text = path;
+        SummaryText.IsVisible = false;
+        RecentInputComboBox.SelectedIndex = -1;
+    }
+
+    private void OnClearRecentInputs(object? sender, RoutedEventArgs e)
+    {
+        try
+        {
+            _recentInputStore.Save([]);
+            _recentInputPaths.Clear();
+            RefreshRecentInputs();
+            StatusTitleText.Text = "已清除最近使用項目";
+            StatusDetailText.Text = "之後完成分析的來源會重新出現在這裡。";
+            SummaryText.IsVisible = false;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or NotSupportedException)
+        {
+            ShowError($"無法清除最近使用項目：{exception.Message}");
+        }
     }
 
     private async void OnChooseOutput(object? sender, RoutedEventArgs e)
@@ -241,6 +275,10 @@ public sealed partial class MainWindow : Window
             SummaryText.Text = BuildSummary(result);
             SummaryText.IsVisible = true;
             OpenOutputButton.IsEnabled = true;
+            if (!TryRememberRecentInput(inputPath))
+            {
+                StatusDetailText.Text += "（未能儲存最近使用紀錄）";
+            }
         }
         catch (OperationCanceledException)
         {
@@ -324,6 +362,37 @@ public sealed partial class MainWindow : Window
         }
     }
 
+    private void LoadRecentInputs()
+    {
+        _recentInputPaths.AddRange(_recentInputStore.Load());
+        RefreshRecentInputs();
+    }
+
+    private bool TryRememberRecentInput(string path)
+    {
+        try
+        {
+            var fullPath = Path.GetFullPath(path);
+            var updated = RecentInputStore.PutFirst(_recentInputPaths, fullPath);
+            _recentInputStore.Save(updated);
+            _recentInputPaths.Clear();
+            _recentInputPaths.AddRange(updated);
+            RefreshRecentInputs();
+            return true;
+        }
+        catch (Exception exception) when (exception is ArgumentException or IOException or UnauthorizedAccessException or NotSupportedException)
+        {
+            return false;
+        }
+    }
+
+    private void RefreshRecentInputs()
+    {
+        RecentInputComboBox.ItemsSource = _recentInputPaths.ToArray();
+        RecentInputComboBox.IsEnabled = _analysisCancellation is null && _recentInputPaths.Count > 0;
+        ClearRecentInputsButton.IsEnabled = _analysisCancellation is null && _recentInputPaths.Count > 0;
+    }
+
     private void SetBusy(bool busy)
     {
         DragDrop.SetAllowDrop(InputDropZone, !busy);
@@ -333,6 +402,8 @@ public sealed partial class MainWindow : Window
         GhidraPathBox.IsEnabled = !busy;
         ChooseFileButton.IsEnabled = !busy;
         ChooseFolderButton.IsEnabled = !busy;
+        RecentInputComboBox.IsEnabled = !busy && _recentInputPaths.Count > 0;
+        ClearRecentInputsButton.IsEnabled = !busy && _recentInputPaths.Count > 0;
         ChooseOutputButton.IsEnabled = !busy;
         ChooseGhidraButton.IsEnabled = !busy;
         ReportCheckBox.IsEnabled = !busy;
