@@ -72,6 +72,46 @@ public sealed record ManagedResourceEntryModel
 
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     public string? Error { get; init; }
+
+    // 僅做靜態位元組摘要，不載入 WPF 型別，也不建立任何 UI 物件。
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public BamlSummaryModel? Baml { get; init; }
+}
+
+public sealed record BamlSummaryModel
+{
+    // parsed、partial 或 invalid。
+    public required string Status { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? Signature { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? ReaderVersion { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? UpdaterVersion { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? WriterVersion { get; init; }
+
+    public int RecordCount { get; init; }
+
+    public IReadOnlyList<BamlRecordCountModel> RecordTypes { get; init; } = [];
+
+    public bool RecordsTruncated { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? Error { get; init; }
+}
+
+public sealed record BamlRecordCountModel
+{
+    public required int Code { get; init; }
+
+    public required string Name { get; init; }
+
+    public required int Count { get; init; }
 }
 
 public sealed record TypeModel

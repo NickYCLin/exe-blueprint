@@ -729,8 +729,25 @@ public sealed class ManagedSymbolReaderTests
 
         Assert.Null(resource.EntriesError);
         Assert.False(resource.EntriesTruncated);
-        Assert.Single(resource.Entries);
+        Assert.Equal(2, resource.Entries.Count);
         AssertResourceEntry(resource, "Greeting", "String", "哈囉 ExeBlueprint");
+
+        var bamlEntry = Assert.Single(resource.Entries, entry => entry.Name == "mainwindow.baml");
+        Assert.EndsWith("ByteArray", bamlEntry.Type, StringComparison.Ordinal);
+        Assert.Equal("binary", bamlEntry.Status);
+        Assert.Equal(1_009, bamlEntry.DataSize);
+        Assert.NotNull(bamlEntry.Baml);
+        Assert.Equal("parsed", bamlEntry.Baml.Status);
+        Assert.Equal("MSBAML", bamlEntry.Baml.Signature);
+        Assert.Equal("0.96", bamlEntry.Baml.ReaderVersion);
+        Assert.Equal("0.96", bamlEntry.Baml.UpdaterVersion);
+        Assert.Equal("0.96", bamlEntry.Baml.WriterVersion);
+        Assert.Equal(24, bamlEntry.Baml.RecordCount);
+        Assert.False(bamlEntry.Baml.RecordsTruncated);
+        Assert.Null(bamlEntry.Baml.Error);
+        Assert.Equal(6, Assert.Single(bamlEntry.Baml.RecordTypes, item => item.Name == "AssemblyInfo").Count);
+        Assert.Equal(2, Assert.Single(bamlEntry.Baml.RecordTypes, item => item.Name == "ElementStart").Count);
+        Assert.Equal(1, Assert.Single(bamlEntry.Baml.RecordTypes, item => item.Name == "DocumentEnd").Count);
 
         await using var temp = new TemporaryDirectory();
         var outputPath = Path.Combine(temp.Path, "blueprint.json");
@@ -742,8 +759,16 @@ public sealed class ManagedSymbolReaderTests
             .GetProperty("resources")
             .EnumerateArray()
             .Single(item => item.GetProperty("name").GetString() == resource.Name);
-        Assert.Equal(1, resourceJson.GetProperty("entries").GetArrayLength());
+        Assert.Equal(2, resourceJson.GetProperty("entries").GetArrayLength());
         Assert.False(resourceJson.GetProperty("entriesTruncated").GetBoolean());
+        var bamlJson = resourceJson
+            .GetProperty("entries")
+            .EnumerateArray()
+            .Single(item => item.GetProperty("name").GetString() == "mainwindow.baml")
+            .GetProperty("baml");
+        Assert.Equal("parsed", bamlJson.GetProperty("status").GetString());
+        Assert.Equal(24, bamlJson.GetProperty("recordCount").GetInt32());
+        Assert.Equal(11, bamlJson.GetProperty("recordTypes").GetArrayLength());
     }
 
     [Fact]
@@ -796,6 +821,46 @@ public sealed class ManagedSymbolReaderTests
             }));
         Assert.Equal("invalid", invalidBinary.Status);
         Assert.NotNull(invalidBinary.Error);
+    }
+
+    [Fact]
+    public void KeepsInvalidAndUnsupportedBamlSummariesBounded()
+    {
+        var invalidHeader = ManagedSymbolReader.DecodeResourceEntry(
+            "broken.baml",
+            "ResourceTypeCode.ByteArray",
+            WriteResourceData(writer =>
+            {
+                writer.Write(28);
+                writer.Write(new byte[28]);
+            }));
+        Assert.Equal("binary", invalidHeader.Status);
+        Assert.Equal("invalid", invalidHeader.Baml!.Status);
+        Assert.NotNull(invalidHeader.Baml.Error);
+
+        var unsupportedVersion = CreateBamlHeader(readerMinor: 97)
+            .Concat(new byte[] { 2 })
+            .ToArray();
+        var unsupported = ManagedSymbolReader.DecodeResourceEntry(
+            "future.baml",
+            "ResourceTypeCode.Stream",
+            WriteResourceData(writer =>
+            {
+                writer.Write(unsupportedVersion.Length);
+                writer.Write(unsupportedVersion);
+            }));
+        Assert.Equal("partial", unsupported.Baml!.Status);
+        Assert.Equal("0.97", unsupported.Baml.ReaderVersion);
+        Assert.Equal(0, unsupported.Baml.RecordCount);
+        Assert.NotNull(unsupported.Baml.Error);
+
+        var truncatedRecord = CreateBamlHeader()
+            .Concat(new byte[] { 1, 0 })
+            .ToArray();
+        var truncated = BamlSummaryReader.Read(truncatedRecord);
+        Assert.Equal("partial", truncated.Status);
+        Assert.Equal(0, truncated.RecordCount);
+        Assert.NotNull(truncated.Error);
     }
 
     [Fact]
@@ -875,6 +940,24 @@ public sealed class ManagedSymbolReaderTests
         using (var writer = new BinaryWriter(stream, System.Text.Encoding.UTF8, leaveOpen: true))
         {
             write(writer);
+        }
+
+        return stream.ToArray();
+    }
+
+    private static byte[] CreateBamlHeader(short readerMinor = 96)
+    {
+        using var stream = new MemoryStream();
+        using (var writer = new BinaryWriter(stream, System.Text.Encoding.Unicode, leaveOpen: true))
+        {
+            writer.Write(12);
+            writer.Write(System.Text.Encoding.Unicode.GetBytes("MSBAML"));
+            writer.Write((short)0);
+            writer.Write(readerMinor);
+            writer.Write((short)0);
+            writer.Write((short)96);
+            writer.Write((short)0);
+            writer.Write((short)96);
         }
 
         return stream.ToArray();

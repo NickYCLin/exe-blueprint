@@ -451,7 +451,7 @@ internal static class ManagedSymbolReader
                     name,
                     type,
                     TimeSpan.FromTicks(reader.ReadInt64()).ToString("c", CultureInfo.InvariantCulture)),
-                "ByteArray" or "Stream" => CreateBinaryResourceEntry(name, type, ReadBinaryResourceLength(reader)),
+                "ByteArray" or "Stream" => CreateBinaryResourceEntry(name, type, data, reader),
                 _ => new ManagedResourceEntryModel
                 {
                     Name = name,
@@ -488,14 +488,27 @@ internal static class ManagedSymbolReader
         };
     }
 
-    private static ManagedResourceEntryModel CreateBinaryResourceEntry(string name, string type, int size) =>
-        new()
+    private static ManagedResourceEntryModel CreateBinaryResourceEntry(
+        string name,
+        string type,
+        byte[] data,
+        BinaryReader reader)
+    {
+        var size = ReadBinaryResourceLength(reader);
+        var payloadOffset = checked((int)reader.BaseStream.Position);
+        var baml = name.EndsWith(".baml", StringComparison.OrdinalIgnoreCase)
+            ? BamlSummaryReader.Read(data.AsSpan(payloadOffset, size))
+            : null;
+
+        return new ManagedResourceEntryModel
         {
             Name = name,
             Type = type,
             Status = "binary",
-            DataSize = size
+            DataSize = size,
+            Baml = baml
         };
+    }
 
     private static int ReadBinaryResourceLength(BinaryReader reader)
     {

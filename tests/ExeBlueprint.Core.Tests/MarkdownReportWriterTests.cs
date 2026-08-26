@@ -40,5 +40,6 @@ public sealed class MarkdownReportWriterTests
         Assert.Contains("資源表鍵值：", report);
         Assert.Contains("`Greeting`", report);
         Assert.Contains("`哈囉 ExeBlueprint`", report);
+        Assert.Contains("BAML 0.96，24 筆 record，1009 B", report);
     }
 }

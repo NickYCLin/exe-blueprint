@@ -339,6 +339,19 @@ public static class MarkdownReportWriter
 
         if (entry.Status == "binary")
         {
+            if (entry.Baml is { } baml)
+            {
+                var version = baml.WriterVersion ?? baml.ReaderVersion;
+                var versionText = version is null ? string.Empty : $" {version}";
+                var sizeText = entry.DataSize is { } bamlSize ? $"，{FormatBytes(bamlSize)}" : string.Empty;
+                return baml.Status switch
+                {
+                    "parsed" => $"BAML{versionText}，{baml.RecordCount} 筆 record{sizeText}",
+                    "partial" => $"BAML{versionText}，已讀 {baml.RecordCount} 筆 record（摘要不完整）{sizeText}",
+                    _ => $"BAML（格式無效）{sizeText}"
+                };
+            }
+
             return entry.DataSize is { } binarySize
                 ? $"二進位，{FormatBytes(binarySize)}"
                 : "二進位";
