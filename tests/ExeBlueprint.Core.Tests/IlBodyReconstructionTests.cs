@@ -172,6 +172,19 @@ public sealed class IlBodyReconstructionTests
     }
 
     [Fact]
+    public void CastsIntegerLiteralReturnedAsEnum()
+    {
+        byte[] il = [0x19, 0x2A]; // ldc.i4.3; ret
+
+        Assert.Equal(
+            ["return unchecked((System.Reflection.FieldAttributes)3);"],
+            Reconstruct(il, isInstance: false, returnType: "System.Reflection.FieldAttributes"));
+        Assert.Equal(
+            ["return 3;"],
+            Reconstruct(il, isInstance: false, returnType: "int"));
+    }
+
+    [Fact]
     public void NormalizesUnsignedReferenceNullComparison()
     {
         byte[] il = [0x02, 0x14, 0xFE, 0x03, 0x2A];

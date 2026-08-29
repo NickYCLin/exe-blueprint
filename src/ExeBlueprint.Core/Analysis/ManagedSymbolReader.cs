@@ -2902,6 +2902,10 @@ internal static class ManagedSymbolReader
                     {
                         value = value == "1" ? "true" : "false";
                     }
+                    else if (IsPotentialEnumType(context.ReturnType) && IsIntegerLiteral(value))
+                    {
+                        value = $"unchecked(({context.ReturnType}){value})";
+                    }
 
                     statements.Add($"return {value};");
                 }
