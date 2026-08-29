@@ -31,13 +31,13 @@ Blueprint 中介資料
 
 ## Blueprint 資料
 
-目前 schema 版本是 `0.8`，主要欄位包括：
+目前 schema 版本是 `0.9`，主要欄位包括：
 
 - `input`：輸入類型、檔案數與總大小
 - `summary`：PE、assembly、型別、方法、資源和相依關係數量
 - `files`：每個檔案的格式、雜湊、來源資訊（provenance）和分析資料，受管組件另含 `code`
 - `files[].origin`：`direct`、`directory`、`zip` 或 `asar` 來源；需要時保存直接容器、容器內項目與展開深度，讓 staging 實體路徑不會外洩或取代邏輯路徑
-- `files[].code`：.NET 型別、巢狀宣告與 ref-like 關係、欄位、含 index parameters 的屬性、事件、方法簽章與 dispatch 旗標、入口點、方法層級呼叫圖、manifest 資源與各方法反組譯出的 IL
+- `files[].code`：.NET 型別、巢狀宣告與 ref-like 關係、泛型名稱與 additive constraint 明細、欄位、含 index parameters 的屬性、事件、方法簽章與 dispatch 旗標、入口點、方法層級呼叫圖、manifest 資源與各方法反組譯出的 IL
 - `archives`：每次 ASAR 展開的容器路徑、深度、header 大小、節點與 packed／unpacked／link 數量，以及 `complete`／`error` 狀態
 - `dependencies`：PE imports 與 assembly references
 - `technologies`：語言、runtime、框架和工具鏈判斷
@@ -97,6 +97,8 @@ auto-property 的隱藏欄位會還原成屬性名稱，運算子方法還原成
 一般 property accessor 會輸出成成員存取，帶索引參數的 instance accessor 則會還原成 `target[index]` getter 或 setter，避免顯式呼叫 C# 禁止的 `get_*`／`set_*` 方法。
 具現化 class 與原本就有 instance constructor 的 struct，其非 constant field 與 auto-property 會加上 `default!` skeleton initializer，明確表達尚未還原 constructor 初始化流程的佔位值；interface、abstract property、沒有 instance constructor 的 struct 與 ref-like computed property 不會套用。
 方法簽章會讀取 parameter 與 return parameter 的 `NullableAttribute`，並依 method／declaring type 的 `NullableContextAttribute` 還原最外層 `?`；若 compiler-generated `Equals(object)` 使用 oblivious metadata，則依 `System.Object.Equals(object?)` override contract 補回 nullable 標記。
+type 與 method generic parameter 會另外保存 position、raw flags、variance、special constraints、`allows ref struct`、完整 nullable flag vector、constraint rows 與 `modreq`／`modopt`。`notnull` 只採用 generic parameter 本身的 `NullableAttribute(1)` 作為 Roslyn convention 證據，不會把 owner context fallback 猜成 constraint；`unmanaged` 只有在 `IsUnmanagedAttribute`、`ValueType modreq(UnmanagedType)` 與 special flags 一致時才視為完整。外部 TypeRef 無法在不載入 dependency 的前提下證明 class/interface、metadata 衝突或資料超限時，會保留原始型別並標示 `complete=false` 與原因。舊的 `genericParameters` 名稱陣列仍保留相容性；C# `where` clause 由後續 generator 階段依合法順序輸出。
+泛型讀取另有 assembly 與 owner 共用的 parameter row、constraint row、保留字元預算；單一 TypeSpec 的 bytes／節點／深度／arity、qualified-name bytes、modifier 數量與 modifier 輸出也各自受限。達到任一上限時會停止保留後續資料，透過 owner 的 `genericParametersComplete=false`／`genericParametersError` 與 `code.truncated` 明示不完整；因此極端情況下該 owner 的明細陣列可以是空的，不會把缺資料誤報為完整，並避免少量惡意 metadata 放大成巨量記憶體或 JSON。
 控制流程合併前必須預先宣告的 reference local 會使用 `default!` skeleton 佔位值；compiler-generated record 對 nullable value 呼叫 `EqualityComparer<T>.GetHashCode` 時也會保留 null-forgiving 語意，避免產生與原始程式無關的 nullable warning。
 呼叫時會依正式參數型別，把 IL 整數常值還原成 bool、char 或具明確轉型的 enum 引數；區域變數會依方法的 local signature 用實際型別宣告。
 重建 context 也會追蹤參數、區域變數、欄位、運算式與呼叫回傳型別；`brtrue`／`brfalse` 遇到參考型別時會輸出 `is null`／`is not null`，避免把物件直接當成 C# bool 條件。

@@ -499,6 +499,192 @@ public sealed class ManagedSymbolReaderTests
     }
 
     [Fact]
+    public async Task ExtractsAndSerializesGenericParameterMetadataAndConstraints()
+    {
+        var assemblyPath = typeof(GenericConstraintFixture<,,,,,>).Assembly.Location;
+        var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
+        var types = document.Files[0].Code!.Types;
+
+        var variance = Assert.Single(
+            types,
+            type => type.FullName == "ExeBlueprint.Core.Tests.IGenericVarianceFixture");
+        Assert.Equal(["TOut", "TIn"], variance.GenericParameters);
+        Assert.Collection(
+            variance.GenericParameterDetails,
+            parameter =>
+            {
+                Assert.Equal(0, parameter.Position);
+                Assert.Equal(1, parameter.RawAttributes);
+                Assert.Equal("out", parameter.Variance);
+                Assert.True(parameter.Complete);
+            },
+            parameter =>
+            {
+                Assert.Equal(1, parameter.Position);
+                Assert.Equal(2, parameter.RawAttributes);
+                Assert.Equal("in", parameter.Variance);
+                Assert.True(parameter.Complete);
+            });
+        var varianceDelegate = Assert.Single(
+            types,
+            type => type.FullName == "ExeBlueprint.Core.Tests.GenericVarianceDelegateFixture");
+        Assert.Equal(["out", "in"], varianceDelegate.GenericParameterDetails.Select(parameter => parameter.Variance));
+        Assert.All(varianceDelegate.GenericParameterDetails, parameter => Assert.True(parameter.Complete));
+        var constrainedType = Assert.Single(
+            types,
+            type => type.FullName == "ExeBlueprint.Core.Tests.GenericConstraintFixture");
+        Assert.True(constrainedType.GenericParametersComplete);
+        var parameters = constrainedType.GenericParameterDetails.ToDictionary(parameter => parameter.Name);
+
+        Assert.True(parameters["TClass"].ReferenceTypeConstraint);
+        Assert.Equal("not-annotated", parameters["TClass"].Nullability);
+        Assert.Equal(new byte[] { 1 }, parameters["TClass"].NullableFlags);
+        Assert.True(parameters["TNullableClass"].ReferenceTypeConstraint);
+        Assert.Equal("annotated", parameters["TNullableClass"].Nullability);
+        Assert.Equal(new byte[] { 2 }, parameters["TNullableClass"].NullableFlags);
+
+        var structParameter = parameters["TStruct"];
+        Assert.Equal(24, structParameter.RawAttributes);
+        Assert.True(structParameter.NotNullableValueTypeConstraint);
+        Assert.True(structParameter.DefaultConstructorConstraint);
+        var structMarker = Assert.Single(structParameter.TypeConstraints);
+        Assert.Equal("System.ValueType", structMarker.Type);
+        Assert.Equal("value-type-marker", structMarker.Kind);
+        Assert.Empty(structMarker.RequiredModifiers);
+        Assert.True(structParameter.Complete);
+
+        var unmanagedParameter = parameters["TUnmanaged"];
+        Assert.True(unmanagedParameter.HasUnmanagedAttribute);
+        var unmanagedMarker = Assert.Single(unmanagedParameter.TypeConstraints);
+        Assert.Equal("value-type-marker", unmanagedMarker.Kind);
+        Assert.Equal(
+            ["System.Runtime.InteropServices.UnmanagedType"],
+            unmanagedMarker.RequiredModifiers);
+        Assert.Empty(unmanagedMarker.OptionalModifiers);
+        Assert.True(unmanagedParameter.Complete);
+
+        Assert.Equal(0, parameters["TNotNull"].RawAttributes);
+        Assert.Equal("not-annotated", parameters["TNotNull"].Nullability);
+        Assert.True(parameters["TNotNull"].NotNullConstraint);
+        Assert.False(parameters["TClass"].NotNullConstraint);
+        Assert.False(parameters["TConstructed"].NotNullConstraint);
+        var constructedParameter = parameters["TConstructed"];
+        Assert.True(constructedParameter.DefaultConstructorConstraint);
+        Assert.Collection(
+            constructedParameter.TypeConstraints,
+            constraint => Assert.Equal("class", constraint.Kind),
+            constraint => Assert.Equal("interface", constraint.Kind));
+        Assert.True(constructedParameter.Complete);
+
+        var method = Assert.Single(constrainedType.Methods, method => method.Name == "Method");
+        Assert.Equal(
+            ["TMethodClass", "TMethodNullable", "TMethodNew", "TMethodLink"],
+            method.GenericParameters);
+        Assert.Equal([0, 1, 2, 3], method.GenericParameterDetails.Select(parameter => parameter.Position));
+        var methodParameters = method.GenericParameterDetails.ToDictionary(parameter => parameter.Name);
+        Assert.Equal("not-annotated", methodParameters["TMethodClass"].Nullability);
+        Assert.Equal("annotated", methodParameters["TMethodNullable"].Nullability);
+        Assert.True(methodParameters["TMethodNew"].DefaultConstructorConstraint);
+        Assert.Equal("interface", Assert.Single(methodParameters["TMethodNew"].TypeConstraints).Kind);
+        var linkedConstraint = Assert.Single(methodParameters["TMethodLink"].TypeConstraints);
+        Assert.Equal("!4", linkedConstraint.Type);
+        Assert.Equal("type-parameter", linkedConstraint.Kind);
+
+        var nested = Assert.Single(
+            types,
+            type => type.FullName == "ExeBlueprint.Core.Tests.GenericConstraintFixture.Nested");
+        Assert.Equal(6, nested.InheritedGenericParameterCount);
+        Assert.Equal(7, nested.GenericParameterDetails.Count);
+        Assert.All(nested.GenericParameterDetails.Take(6), parameter => Assert.True(parameter.Complete));
+        Assert.Equal(new byte[] { 1 }, nested.GenericParameterDetails[4].NullableFlags);
+        var nestedParameter = nested.GenericParameterDetails[^1];
+        Assert.Equal("TNested", nestedParameter.Name);
+        Assert.Equal("!4", Assert.Single(nestedParameter.TypeConstraints).Type);
+        Assert.True(nested.GenericParametersComplete);
+
+        var byRefLike = Assert.Single(
+            types,
+            type => type.FullName == "ExeBlueprint.Core.Tests.IAllowsRefStructFixture");
+        var byRefLikeParameter = Assert.Single(byRefLike.GenericParameterDetails);
+        Assert.Equal(32, byRefLikeParameter.RawAttributes);
+        Assert.True(byRefLikeParameter.AllowsRefStruct);
+        Assert.True(byRefLikeParameter.Complete);
+
+        var genericAttributeTarget = Assert.Single(
+            types,
+            type => type.FullName == "ExeBlueprint.Core.Tests.GenericAttributeTarget");
+        Assert.True(genericAttributeTarget.GenericParametersComplete);
+        var attributedParameter = Assert.Single(genericAttributeTarget.GenericParameterDetails);
+        Assert.Equal("T", attributedParameter.Name);
+        Assert.True(attributedParameter.Complete);
+
+        var nullableConstraints = Assert.Single(
+            types,
+            type => type.FullName == "ExeBlueprint.Core.Tests.NullableTypeConstraintFixture");
+        var nullableParameters = nullableConstraints.GenericParameterDetails.ToDictionary(parameter => parameter.Name);
+        Assert.Equal(
+            "annotated",
+            Assert.Single(nullableParameters["TBase"].TypeConstraints).Nullability);
+        Assert.Equal(
+            "annotated",
+            Assert.Single(nullableParameters["TInterface"].TypeConstraints).Nullability);
+        var constructedConstraint = Assert.Single(nullableParameters["TConstructed"].TypeConstraints);
+        Assert.Equal("System.Collections.Generic.IEnumerable<string>", constructedConstraint.Type);
+        Assert.Equal("unknown", constructedConstraint.Kind);
+        Assert.Equal(new byte[] { 1, 2 }, constructedConstraint.NullableFlags);
+        Assert.False(constructedConstraint.Complete);
+        Assert.False(nullableParameters["TConstructed"].Complete);
+        Assert.NotNull(nullableParameters["TConstructed"].Error);
+        Assert.False(nullableConstraints.GenericParametersComplete);
+        Assert.NotNull(nullableConstraints.GenericParametersError);
+
+        await using var temp = new TemporaryDirectory();
+        var outputPath = Path.Combine(temp.Path, "blueprint.json");
+        await BlueprintJsonWriter.WriteAsync(document, outputPath);
+        using var json = JsonDocument.Parse(await File.ReadAllTextAsync(outputPath));
+        Assert.Equal("0.9", json.RootElement.GetProperty("schemaVersion").GetString());
+        var constraintTypeJson = json.RootElement
+            .GetProperty("files")[0]
+            .GetProperty("code")
+            .GetProperty("types")
+            .EnumerateArray()
+            .Single(type =>
+                type.GetProperty("fullName").GetString() ==
+                "ExeBlueprint.Core.Tests.GenericConstraintFixture");
+        Assert.Equal(6, constraintTypeJson.GetProperty("genericParameters").GetArrayLength());
+        var unmanagedJson = constraintTypeJson
+            .GetProperty("genericParameterDetails")
+            .EnumerateArray()
+            .Single(parameter => parameter.GetProperty("name").GetString() == "TUnmanaged");
+        Assert.Equal(24, unmanagedJson.GetProperty("rawAttributes").GetInt32());
+        Assert.True(unmanagedJson.GetProperty("hasUnmanagedAttribute").GetBoolean());
+        Assert.Equal(
+            "System.Runtime.InteropServices.UnmanagedType",
+            unmanagedJson
+                .GetProperty("typeConstraints")[0]
+                .GetProperty("requiredModifiers")[0]
+                .GetString());
+        var notNullJson = constraintTypeJson
+            .GetProperty("genericParameterDetails")
+            .EnumerateArray()
+            .Single(parameter => parameter.GetProperty("name").GetString() == "TNotNull");
+        Assert.True(notNullJson.GetProperty("notNullConstraint").GetBoolean());
+        var nullableTypeJson = json.RootElement
+            .GetProperty("files")[0]
+            .GetProperty("code")
+            .GetProperty("types")
+            .EnumerateArray()
+            .Single(type =>
+                type.GetProperty("fullName").GetString() ==
+                "ExeBlueprint.Core.Tests.NullableTypeConstraintFixture");
+        var nullableFlagsJson = nullableTypeJson
+            .GetProperty("genericParameterDetails")[2]
+            .GetProperty("typeConstraints")[0]
+            .GetProperty("nullableFlags");
+        Assert.Equal([1, 2], nullableFlagsJson.EnumerateArray().Select(flag => flag.GetByte()));
+    }
+
+    [Fact]
     public void DistributesGenericArgumentsAcrossNestedTypeSegments()
     {
         var provider = SignatureTypeNameProvider.Instance;
@@ -1671,7 +1857,7 @@ public sealed class ManagedSymbolReaderTests
         var assemblyPath = typeof(BlueprintAnalyzer).Assembly.Location;
         var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
 
-        Assert.Equal("0.8", document.SchemaVersion);
+        Assert.Equal("0.9", document.SchemaVersion);
         Assert.True(document.Summary.TypeCount > 0);
         Assert.True(document.Summary.MethodCount > 0);
         Assert.Equal(document.Files[0].Code!.TypeCount, document.Summary.TypeCount);

@@ -53,7 +53,7 @@ exe-blueprint-output/<input-name>-<timestamp>/
 └─ REPORT.md
 ```
 
-`blueprint.json` schema 0.8 records each file's direct, directory, ZIP, or ASAR provenance and an `archives` list with ASAR expansion counts, completeness, and errors. `REPORT.md` is a Traditional Chinese summary for human review.
+`blueprint.json` schema 0.9 records each file's direct, directory, ZIP, or ASAR provenance, generic parameter and constraint metadata for managed code, and an `archives` list with ASAR expansion counts, completeness, and errors. `REPORT.md` is a Traditional Chinese summary for human review.
 
 Optional generators can also create structural starting points under:
 

@@ -361,6 +361,14 @@ public sealed record TypeModel
 
     public IReadOnlyList<string> GenericParameters { get; init; } = [];
 
+    // 保留 GenericParameters 的相容名稱陣列，另以 additive 明細保存 metadata flags 與 constraints。
+    public IReadOnlyList<GenericParameterModel> GenericParameterDetails { get; init; } = [];
+
+    public bool GenericParametersComplete { get; init; } = true;
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? GenericParametersError { get; init; }
+
     public IReadOnlyList<FieldModel> Fields { get; init; } = [];
 
     public IReadOnlyList<PropertyModel> Properties { get; init; } = [];
@@ -472,6 +480,13 @@ public sealed record MethodModel
 
     public IReadOnlyList<string> GenericParameters { get; init; } = [];
 
+    public IReadOnlyList<GenericParameterModel> GenericParameterDetails { get; init; } = [];
+
+    public bool GenericParametersComplete { get; init; } = true;
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? GenericParametersError { get; init; }
+
     public IReadOnlyList<ParameterModel> Parameters { get; init; } = [];
 
     public IReadOnlyList<string> Il { get; init; } = [];
@@ -481,6 +496,65 @@ public sealed record MethodModel
     public IReadOnlyList<string> Body { get; init; } = [];
 
     public bool BodyReconstructed { get; init; }
+}
+
+public sealed record GenericParameterModel
+{
+    public int Position { get; init; }
+
+    public required string Name { get; init; }
+
+    public int RawAttributes { get; init; }
+
+    // none、out、in 或 invalid。
+    public required string Variance { get; init; }
+
+    public bool ReferenceTypeConstraint { get; init; }
+
+    public bool NotNullableValueTypeConstraint { get; init; }
+
+    // Roslyn 以 generic parameter 上的直接 NullableAttribute(1) 表示 notnull；context fallback 不算。
+    public bool NotNullConstraint { get; init; }
+
+    public bool DefaultConstructorConstraint { get; init; }
+
+    public bool AllowsRefStruct { get; init; }
+
+    // oblivious、not-annotated、annotated 或 invalid。
+    public required string Nullability { get; init; }
+
+    // 保留 NullableAttribute 的完整 flags；context fallback 為單一 flag。
+    public IReadOnlyList<byte> NullableFlags { get; init; } = [];
+
+    public bool HasUnmanagedAttribute { get; init; }
+
+    public IReadOnlyList<GenericTypeConstraintModel> TypeConstraints { get; init; } = [];
+
+    public bool Complete { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? Error { get; init; }
+}
+
+public sealed record GenericTypeConstraintModel
+{
+    public required string Type { get; init; }
+
+    // class、interface、type-parameter、value-type-marker、unknown 或 unsupported。
+    public required string Kind { get; init; }
+
+    public required string Nullability { get; init; }
+
+    public IReadOnlyList<byte> NullableFlags { get; init; } = [];
+
+    public IReadOnlyList<string> RequiredModifiers { get; init; } = [];
+
+    public IReadOnlyList<string> OptionalModifiers { get; init; } = [];
+
+    public bool Complete { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? Error { get; init; }
 }
 
 public sealed record ParameterModel

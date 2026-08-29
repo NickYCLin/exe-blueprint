@@ -19,6 +19,21 @@ internal static class ManagedSymbolReader
     private const int MaxTypes = 5_000;
     private const int MaxCallEdges = 50_000;
     private const int MaxIlInstructions = 400;
+    private const int MaxGenericParametersPerOwner = 256;
+    private const int MaxGenericConstraintsPerParameter = 256;
+    private const int MaxConstraintModifiers = 64;
+    private const int MaxGenericParameterRows = 65_536;
+    private const int MaxGenericConstraintRows = 16_384;
+    private const int MaxGenericMetadataCharacters = 4 * 1_024 * 1_024;
+    private const int MaxGenericConstraintRowsPerOwner = 4_096;
+    private const int MaxGenericMetadataCharactersPerOwner = 256 * 1_024;
+    private const int MaxGenericParameterNameCharacters = 1_024;
+    private const int MaxGenericParameterNameUtf8Bytes = MaxGenericParameterNameCharacters * 4;
+    private const int MaxGenericCustomAttributesPerTarget = 64;
+    private const int MaxGenericAttributeTypeNameCharacters = 1_024;
+    private const int MaxGenericAttributeTypeNameUtf8Bytes = MaxGenericAttributeTypeNameCharacters * 4;
+    private const int MaxGenericAttributeTypeNameDepth = 64;
+    private const int MaxGenericDeclaringTypeDepth = 64;
 
     public static async Task<CodeModel?> TryReadAsync(string path, CancellationToken cancellationToken)
     {
@@ -53,6 +68,8 @@ internal static class ManagedSymbolReader
         var types = new List<TypeModel>();
         var edges = new List<CallEdge>();
         var seenEdges = new HashSet<(string, string, string)>();
+        var genericMetadataBudget = new GenericMetadataBudget();
+        var typeGenericParameterResolver = new TypeGenericParameterResolver(metadata, genericMetadataBudget);
         var methodCount = 0;
         var truncated = false;
 
@@ -77,10 +94,16 @@ internal static class ManagedSymbolReader
             namespaces.Add(namespaceName);
             var fullName = GetTypeDefinitionFullName(metadata, typeHandle);
             var declaringTypeHandle = definition.GetDeclaringType();
+            var inheritedGenericParameterCount = declaringTypeHandle.IsNil
+                ? 0
+                : metadata.GetTypeDefinition(declaringTypeHandle).GetGenericParameters().Count;
             var declaringTypeName = declaringTypeHandle.IsNil
                 ? null
                 : GetTypeDefinitionFullName(metadata, declaringTypeHandle);
             var baseTypeName = GetTypeName(metadata, definition.BaseType);
+            var genericParameterResult = typeGenericParameterResolver.Read(typeHandle);
+            var genericParameterDetails = genericParameterResult.Parameters;
+            var genericParametersComplete = genericParameterResult.Complete;
             var methods = new List<MethodModel>();
 
             foreach (var methodHandle in definition.GetMethods())
@@ -93,7 +116,14 @@ internal static class ManagedSymbolReader
                 var localTypes = hasBody ? TryReadLocalTypes(peReader, method) : [];
                 var exceptionRegions = hasBody ? TryReadExceptionRegions(peReader, metadata, method) : [];
 
-                var model = BuildMethod(metadata, methodHandle, method, methodName, hasBody, entryPointMethod.Handle);
+                var model = BuildMethod(
+                    metadata,
+                    methodHandle,
+                    method,
+                    methodName,
+                    hasBody,
+                    entryPointMethod.Handle,
+                    genericMetadataBudget);
                 if (il is { Length: > 0 })
                 {
                     var (instructions, ilTruncated) = Disassemble(metadata, il);
@@ -156,10 +186,15 @@ internal static class ManagedSymbolReader
                 DeclaringType = declaringTypeName,
                 InheritedGenericParameterCount = declaringTypeHandle.IsNil
                     ? 0
-                    : metadata.GetTypeDefinition(declaringTypeHandle).GetGenericParameters().Count,
+                    : inheritedGenericParameterCount,
                 BaseType = baseTypeName,
                 Interfaces = ReadInterfaces(metadata, definition),
-                GenericParameters = ReadTypeGenericParameters(metadata, definition),
+                GenericParameters = genericParameterDetails.Select(parameter => parameter.Name).ToArray(),
+                GenericParameterDetails = genericParameterDetails,
+                GenericParametersComplete = genericParametersComplete,
+                GenericParametersError = genericParametersComplete
+                    ? null
+                    : "泛型參數 metadata 不完整；請檢查 genericParameterDetails 與 code.truncated",
                 Fields = ReadFields(metadata, definition),
                 Properties = ReadProperties(metadata, definition),
                 Events = ReadEvents(metadata, definition),
@@ -175,7 +210,7 @@ internal static class ManagedSymbolReader
             TypeCount = types.Count,
             MethodCount = methodCount,
             CallEdgeCount = edges.Count,
-            Truncated = truncated,
+            Truncated = truncated || genericMetadataBudget.Truncated,
             Types = types,
             CallGraph = edges,
             Resources = ReadManifestResources(peReader, metadata)
@@ -4047,11 +4082,23 @@ internal static class ManagedSymbolReader
         MethodDefinition method,
         string methodName,
         bool hasBody,
-        MethodDefinitionHandle entryPointHandle)
+        MethodDefinitionHandle entryPointHandle,
+        GenericMetadataBudget genericMetadataBudget)
     {
         var returnType = "void";
         var parameters = new List<ParameterModel>();
         var signatureText = $"{methodName}(...)";
+        var genericParameterHandles = method.GetGenericParameters();
+        var genericParameterDetails = ReadGenericParameters(
+            metadata,
+            genericParameterHandles,
+            methodHandle,
+            genericMetadataBudget,
+            inheritedParameterCount: 0,
+            inheritedParameters: null);
+        var genericParametersComplete =
+            genericParameterDetails.Count == genericParameterHandles.Count &&
+            genericParameterDetails.All(parameter => parameter.Complete);
 
         try
         {
@@ -4109,7 +4156,12 @@ internal static class ManagedSymbolReader
             IsConstructor = methodName is ".ctor" or ".cctor",
             IsEntryPoint = methodHandle == entryPointHandle,
             HasBody = hasBody,
-            GenericParameters = ReadMethodGenericParameters(metadata, method),
+            GenericParameters = genericParameterDetails.Select(parameter => parameter.Name).ToArray(),
+            GenericParameterDetails = genericParameterDetails,
+            GenericParametersComplete = genericParametersComplete,
+            GenericParametersError = genericParametersComplete
+                ? null
+                : "泛型參數 metadata 不完整；請檢查 genericParameterDetails 與 code.truncated",
             Parameters = parameters
         };
     }
@@ -4262,30 +4314,1357 @@ internal static class ManagedSymbolReader
         return names;
     }
 
-    private static IReadOnlyList<string> ReadMethodGenericParameters(MetadataReader metadata, MethodDefinition method)
+    internal sealed record TypeGenericParameterReadResult(
+        IReadOnlyList<GenericParameterModel> Parameters,
+        bool Complete,
+        int DeclaringTypeDepth);
+
+    internal sealed class TypeGenericParameterResolver(
+        MetadataReader metadata,
+        GenericMetadataBudget sharedBudget)
     {
-        var handles = method.GetGenericParameters();
-        if (handles.Count == 0)
+        private readonly Dictionary<TypeDefinitionHandle, TypeGenericParameterReadResult> _cache = [];
+
+        public TypeGenericParameterReadResult Read(TypeDefinitionHandle handle)
         {
-            return [];
+            if (_cache.TryGetValue(handle, out var cached))
+            {
+                return cached;
+            }
+
+            var path = new List<TypeDefinitionHandle>(MaxGenericDeclaringTypeDepth);
+            var visited = new HashSet<TypeDefinitionHandle>();
+            var current = handle;
+            TypeGenericParameterReadResult? declaringResult = null;
+            while (true)
+            {
+                if (_cache.TryGetValue(current, out declaringResult))
+                {
+                    break;
+                }
+
+                if (!visited.Add(current) || path.Count >= MaxGenericDeclaringTypeDepth)
+                {
+                    return ReadWithoutDeclaringContext(handle);
+                }
+
+                path.Add(current);
+                var declaringType = metadata.GetTypeDefinition(current).GetDeclaringType();
+                if (declaringType.IsNil)
+                {
+                    break;
+                }
+
+                current = declaringType;
+            }
+
+            for (var index = path.Count - 1; index >= 0; index--)
+            {
+                var owner = path[index];
+                var definition = metadata.GetTypeDefinition(owner);
+                var declaringType = definition.GetDeclaringType();
+                var inheritedParameterCount = declaringType.IsNil
+                    ? 0
+                    : metadata.GetTypeDefinition(declaringType).GetGenericParameters().Count;
+                var declaringTypeDepth = declaringType.IsNil
+                    ? 0
+                    : Math.Min(
+                        MaxGenericDeclaringTypeDepth,
+                        (declaringResult?.DeclaringTypeDepth ?? MaxGenericDeclaringTypeDepth) + 1);
+                var declaringContextComplete = declaringType.IsNil ||
+                                               declaringResult?.Complete == true;
+                if (declaringTypeDepth >= MaxGenericDeclaringTypeDepth)
+                {
+                    sharedBudget.MarkTruncated();
+                    declaringContextComplete = false;
+                }
+
+                var handles = definition.GetGenericParameters();
+                var parameters = ReadGenericParameters(
+                    metadata,
+                    handles,
+                    owner,
+                    sharedBudget,
+                    inheritedParameterCount,
+                    declaringContextComplete ? declaringResult?.Parameters : null);
+                var result = new TypeGenericParameterReadResult(
+                    parameters,
+                    declaringContextComplete &&
+                    parameters.Count == handles.Count &&
+                    parameters.Count >= inheritedParameterCount &&
+                    parameters.All(parameter => parameter.Complete),
+                    declaringTypeDepth);
+                _cache[owner] = result;
+                declaringResult = result;
+            }
+
+            return _cache[handle];
         }
 
-        return handles
-            .Select(handle => metadata.GetString(metadata.GetGenericParameter(handle).Name))
-            .ToArray();
+        private TypeGenericParameterReadResult ReadWithoutDeclaringContext(TypeDefinitionHandle handle)
+        {
+            sharedBudget.MarkTruncated();
+            var definition = metadata.GetTypeDefinition(handle);
+            var declaringType = definition.GetDeclaringType();
+            var inheritedParameterCount = declaringType.IsNil
+                ? 0
+                : metadata.GetTypeDefinition(declaringType).GetGenericParameters().Count;
+            var parameters = ReadGenericParameters(
+                metadata,
+                definition.GetGenericParameters(),
+                handle,
+                sharedBudget,
+                inheritedParameterCount,
+                inheritedParameters: null);
+            var result = new TypeGenericParameterReadResult(
+                parameters,
+                Complete: false,
+                DeclaringTypeDepth: MaxGenericDeclaringTypeDepth);
+            _cache[handle] = result;
+            return result;
+        }
     }
 
-    private static IReadOnlyList<string> ReadTypeGenericParameters(MetadataReader metadata, TypeDefinition definition)
+    internal static IReadOnlyList<GenericParameterModel> ReadGenericParameters(
+        MetadataReader metadata,
+        GenericParameterHandleCollection handles,
+        EntityHandle expectedOwner,
+        GenericMetadataBudget sharedBudget,
+        int inheritedParameterCount,
+        IReadOnlyList<GenericParameterModel>? inheritedParameters)
     {
-        var handles = definition.GetGenericParameters();
         if (handles.Count == 0)
         {
             return [];
         }
 
-        return handles
-            .Select(handle => metadata.GetString(metadata.GetGenericParameter(handle).Name))
-            .ToArray();
+        var genericContext = CreateConstraintGenericContext(metadata, expectedOwner, handles);
+        var budget = sharedBudget.BeginOwner();
+        var parameters = new List<GenericParameterModel>(Math.Min(handles.Count, MaxGenericParametersPerOwner));
+        var ordinal = 0;
+        foreach (var handle in handles)
+        {
+            if (parameters.Count >= MaxGenericParametersPerOwner)
+            {
+                break;
+            }
+
+            if (!budget.TryConsumeParameterRow())
+            {
+                if (parameters.Count > 0)
+                {
+                    parameters[^1] = MarkGenericParameterIncomplete(
+                        parameters[^1],
+                        "泛型 metadata 的 assembly parameter row 預算已用盡");
+                }
+
+                break;
+            }
+
+            parameters.Add(ReadGenericParameter(
+                metadata,
+                handle,
+                expectedOwner,
+                genericContext,
+                budget,
+                inheritedParameterCount,
+                ordinal));
+            ordinal++;
+        }
+
+        parameters.Sort((left, right) => left.Position.CompareTo(right.Position));
+        for (var index = 0; index < parameters.Count; index++)
+        {
+            if (parameters[index].Position != index)
+            {
+                parameters[index] = MarkGenericParameterIncomplete(
+                    parameters[index],
+                    "泛型參數 position 不連續或重複");
+            }
+        }
+
+        for (var index = 0; index < parameters.Count && index < inheritedParameterCount; index++)
+        {
+            var parameter = parameters[index];
+            if (inheritedParameters is null ||
+                inheritedParameters.Count != inheritedParameterCount ||
+                index >= inheritedParameters.Count ||
+                !InheritedGenericParametersMatch(parameter, inheritedParameters[index]))
+            {
+                parameters[index] = MarkGenericParameterIncomplete(
+                    parameter,
+                    "inherited 泛型參數與 declaring type 的完整 metadata 不一致或無法取得");
+            }
+        }
+
+        if (handles.Count > MaxGenericParametersPerOwner && parameters.Count > 0)
+        {
+            budget.MarkTruncated();
+            parameters[^1] = MarkGenericParameterIncomplete(
+                parameters[^1],
+                $"泛型參數超過每個 owner 的 {MaxGenericParametersPerOwner} 筆限制");
+        }
+
+        return parameters;
+    }
+
+    private static bool InheritedGenericParametersMatch(
+        GenericParameterModel current,
+        GenericParameterModel declaring)
+    {
+        if (!current.Complete ||
+            !declaring.Complete ||
+            current.Position != declaring.Position ||
+            current.Name != declaring.Name ||
+            current.RawAttributes != declaring.RawAttributes ||
+            current.Variance != declaring.Variance ||
+            current.ReferenceTypeConstraint != declaring.ReferenceTypeConstraint ||
+            current.NotNullableValueTypeConstraint != declaring.NotNullableValueTypeConstraint ||
+            current.NotNullConstraint != declaring.NotNullConstraint ||
+            current.DefaultConstructorConstraint != declaring.DefaultConstructorConstraint ||
+            current.AllowsRefStruct != declaring.AllowsRefStruct ||
+            current.Nullability != declaring.Nullability ||
+            !current.NullableFlags.SequenceEqual(declaring.NullableFlags) ||
+            current.HasUnmanagedAttribute != declaring.HasUnmanagedAttribute ||
+            current.TypeConstraints.Count != declaring.TypeConstraints.Count)
+        {
+            return false;
+        }
+
+        for (var index = 0; index < current.TypeConstraints.Count; index++)
+        {
+            var left = current.TypeConstraints[index];
+            var right = declaring.TypeConstraints[index];
+            if (!left.Complete ||
+                !right.Complete ||
+                left.Type != right.Type ||
+                left.Kind != right.Kind ||
+                left.Nullability != right.Nullability ||
+                !left.NullableFlags.SequenceEqual(right.NullableFlags) ||
+                !left.RequiredModifiers.SequenceEqual(right.RequiredModifiers) ||
+                !left.OptionalModifiers.SequenceEqual(right.OptionalModifiers))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static ConstraintGenericContext CreateConstraintGenericContext(
+        MetadataReader metadata,
+        EntityHandle owner,
+        GenericParameterHandleCollection ownerHandles)
+    {
+        var ownerDomain = ReadGenericParameterDomain(metadata, ownerHandles, owner);
+        if (owner.Kind == HandleKind.TypeDefinition)
+        {
+            return new ConstraintGenericContext(
+                ownerDomain.Count,
+                0,
+                AllowsMethodParameters: false,
+                TypeParameterPositions: ownerDomain.Positions,
+                MethodParameterPositions: default,
+                TypeParameterPositionsComplete: ownerDomain.Complete,
+                MethodParameterPositionsComplete: true);
+        }
+
+        if (owner.Kind == HandleKind.MethodDefinition)
+        {
+            var method = metadata.GetMethodDefinition((MethodDefinitionHandle)owner);
+            var declaringType = method.GetDeclaringType();
+            var typeDomain = declaringType.IsNil
+                ? new GenericParameterDomain(0, [], true)
+                : ReadGenericParameterDomain(
+                    metadata,
+                    metadata.GetTypeDefinition(declaringType).GetGenericParameters(),
+                    declaringType);
+            return new ConstraintGenericContext(
+                typeDomain.Count,
+                ownerDomain.Count,
+                AllowsMethodParameters: true,
+                TypeParameterPositions: typeDomain.Positions,
+                MethodParameterPositions: ownerDomain.Positions,
+                TypeParameterPositionsComplete: typeDomain.Complete,
+                MethodParameterPositionsComplete: ownerDomain.Complete);
+        }
+
+        return new ConstraintGenericContext(0, 0, AllowsMethodParameters: false);
+    }
+
+    private static GenericParameterDomain ReadGenericParameterDomain(
+        MetadataReader metadata,
+        GenericParameterHandleCollection handles,
+        EntityHandle expectedOwner)
+    {
+        var count = Math.Min(handles.Count, MaxGenericParametersPerOwner);
+        var positions = new List<int>(count);
+        var complete = handles.Count <= MaxGenericParametersPerOwner;
+        foreach (var handle in handles)
+        {
+            if (positions.Count >= MaxGenericParametersPerOwner)
+            {
+                break;
+            }
+
+            try
+            {
+                var parameter = metadata.GetGenericParameter(handle);
+                complete &= parameter.Parent == expectedOwner;
+                positions.Add(parameter.Index);
+            }
+            catch (Exception exception) when (
+                exception is BadImageFormatException or ArgumentException or InvalidOperationException)
+            {
+                complete = false;
+            }
+        }
+
+        positions.Sort();
+        complete &= positions.Count == count;
+        for (var index = 0; index < positions.Count; index++)
+        {
+            complete &= positions[index] == index;
+        }
+
+        return new GenericParameterDomain(count, [.. positions], complete);
+    }
+
+    private readonly record struct GenericParameterDomain(
+        int Count,
+        ImmutableArray<int> Positions,
+        bool Complete);
+
+    internal sealed class GenericMetadataBudget
+    {
+        private readonly int _ownerConstraintRows;
+        private readonly long _ownerCharacters;
+        private int _remainingParameterRows;
+        private int _remainingConstraintRows;
+        private long _remainingCharacters;
+
+        public GenericMetadataBudget(
+            int parameterRows = MaxGenericParameterRows,
+            int constraintRows = MaxGenericConstraintRows,
+            long characters = MaxGenericMetadataCharacters,
+            int ownerConstraintRows = MaxGenericConstraintRowsPerOwner,
+            long ownerCharacters = MaxGenericMetadataCharactersPerOwner)
+        {
+            ArgumentOutOfRangeException.ThrowIfNegative(parameterRows);
+            ArgumentOutOfRangeException.ThrowIfNegative(constraintRows);
+            ArgumentOutOfRangeException.ThrowIfNegative(characters);
+            ArgumentOutOfRangeException.ThrowIfNegative(ownerConstraintRows);
+            ArgumentOutOfRangeException.ThrowIfNegative(ownerCharacters);
+            _remainingParameterRows = parameterRows;
+            _remainingConstraintRows = constraintRows;
+            _remainingCharacters = characters;
+            _ownerConstraintRows = ownerConstraintRows;
+            _ownerCharacters = ownerCharacters;
+        }
+
+        public bool Truncated { get; private set; }
+
+        public GenericMetadataOwnerBudget BeginOwner() =>
+            new(this, _ownerConstraintRows, _ownerCharacters);
+
+        public bool TryConsumeParameterRow()
+        {
+            if (_remainingParameterRows <= 0)
+            {
+                Truncated = true;
+                return false;
+            }
+
+            _remainingParameterRows--;
+            return true;
+        }
+
+        public bool TryConsumeConstraintRow()
+        {
+            if (_remainingConstraintRows <= 0)
+            {
+                Truncated = true;
+                return false;
+            }
+
+            _remainingConstraintRows--;
+            return true;
+        }
+
+        public bool TryRetainCharacters(long characters)
+        {
+            if (characters < 0 || characters > _remainingCharacters)
+            {
+                Truncated = true;
+                return false;
+            }
+
+            _remainingCharacters -= characters;
+            return true;
+        }
+
+        public void MarkTruncated() => Truncated = true;
+    }
+
+    internal sealed class GenericMetadataOwnerBudget(
+        GenericMetadataBudget shared,
+        int ownerConstraintRows,
+        long ownerCharacters)
+    {
+        private int _remainingConstraintRows = ownerConstraintRows;
+        private long _remainingCharacters = ownerCharacters;
+
+        public bool TryConsumeParameterRow() => shared.TryConsumeParameterRow();
+
+        public void MarkTruncated() => shared.MarkTruncated();
+
+        public bool TryConsumeConstraintRow()
+        {
+            if (_remainingConstraintRows <= 0 || !shared.TryConsumeConstraintRow())
+            {
+                shared.MarkTruncated();
+                return false;
+            }
+
+            _remainingConstraintRows--;
+            return true;
+        }
+
+        public bool TryRetainCharacters(long characters)
+        {
+            if (characters < 0 ||
+                characters > _remainingCharacters ||
+                !shared.TryRetainCharacters(characters))
+            {
+                shared.MarkTruncated();
+                return false;
+            }
+
+            _remainingCharacters -= characters;
+            return true;
+        }
+
+        public bool TryRetainConstraint(GenericTypeConstraintModel constraint)
+        {
+            long characters = constraint.Type.Length +
+                              constraint.Kind.Length +
+                              constraint.Nullability.Length +
+                              constraint.NullableFlags.Count +
+                              (constraint.Error?.Length ?? 0);
+            foreach (var modifier in constraint.RequiredModifiers)
+            {
+                characters += modifier.Length;
+            }
+
+            foreach (var modifier in constraint.OptionalModifiers)
+            {
+                characters += modifier.Length;
+            }
+
+            return TryRetainCharacters(characters);
+        }
+    }
+
+    private static GenericParameterModel ReadGenericParameter(
+        MetadataReader metadata,
+        GenericParameterHandle handle,
+        EntityHandle expectedOwner,
+        ConstraintGenericContext genericContext,
+        GenericMetadataOwnerBudget budget,
+        int inheritedParameterCount,
+        int fallbackPosition)
+    {
+        try
+        {
+            var parameter = metadata.GetGenericParameter(handle);
+            var attributes = parameter.Attributes;
+            var rawAttributes = (int)attributes;
+            var errors = new List<string>();
+            var nameComplete = TryReadBoundedGenericParameterName(metadata, parameter.Name, out var decodedName);
+            var name = nameComplete
+                ? decodedName
+                : $"!invalid{fallbackPosition}";
+            if (!nameComplete)
+            {
+                budget.MarkTruncated();
+                AddGenericMetadataError(errors, "泛型參數名稱超過長度限制");
+            }
+            else if (!budget.TryRetainCharacters((long)name.Length * 2))
+            {
+                name = $"!invalid{fallbackPosition}";
+                AddGenericMetadataError(errors, "泛型 metadata 的字元預算已用盡");
+            }
+
+            if (parameter.Parent != expectedOwner)
+            {
+                AddGenericMetadataError(errors, "泛型參數 owner 與宣告不一致");
+            }
+
+            var isInheritedParameter = parameter.Index >= 0 && parameter.Index < inheritedParameterCount;
+
+            var knownAttributes = GenericParameterAttributes.VarianceMask |
+                                  GenericParameterAttributes.SpecialConstraintMask |
+                                  GenericParameterAttributes.AllowByRefLike;
+            if ((attributes & ~knownAttributes) != 0)
+            {
+                AddGenericMetadataError(errors, $"泛型參數含未知 flags 0x{rawAttributes:X}");
+            }
+
+            var variance = (attributes & GenericParameterAttributes.VarianceMask) switch
+            {
+                GenericParameterAttributes.None => "none",
+                GenericParameterAttributes.Covariant => "out",
+                GenericParameterAttributes.Contravariant => "in",
+                _ => "invalid"
+            };
+            if (variance == "invalid")
+            {
+                AddGenericMetadataError(errors, "泛型參數 variance flags 衝突");
+            }
+
+            if (expectedOwner.Kind == HandleKind.MethodDefinition && variance != "none")
+            {
+                AddGenericMetadataError(errors, "方法泛型參數不可宣告 variance");
+            }
+            else if (!isInheritedParameter &&
+                     expectedOwner.Kind == HandleKind.TypeDefinition &&
+                     variance != "none")
+            {
+                var ownerDefinition = metadata.GetTypeDefinition((TypeDefinitionHandle)expectedOwner);
+                var ownerBaseType = GetTypeName(metadata, ownerDefinition.BaseType);
+                if (!ownerDefinition.Attributes.HasFlag(TypeAttributes.Interface) &&
+                    ownerBaseType is not ("System.Delegate" or "System.MulticastDelegate"))
+                {
+                    AddGenericMetadataError(errors, "只有 interface 或 delegate 型別可宣告 variance");
+                }
+            }
+
+            var referenceTypeConstraint = attributes.HasFlag(GenericParameterAttributes.ReferenceTypeConstraint);
+            var valueTypeConstraint = attributes.HasFlag(GenericParameterAttributes.NotNullableValueTypeConstraint);
+            if (referenceTypeConstraint && valueTypeConstraint)
+            {
+                AddGenericMetadataError(errors, "reference 與 value-type special constraints 衝突");
+            }
+
+            var nullable = ReadEffectiveNullableFlag(metadata, parameter.GetCustomAttributes(), expectedOwner);
+            if (!nullable.Complete && nullable.Error is not null)
+            {
+                AddGenericMetadataError(errors, nullable.Error);
+            }
+
+            var unmanaged = ReadMarkerAttribute(
+                metadata,
+                parameter.GetCustomAttributes(),
+                "System.Runtime.CompilerServices.IsUnmanagedAttribute");
+            if (!unmanaged.Complete && unmanaged.Error is not null)
+            {
+                AddGenericMetadataError(errors, unmanaged.Error);
+            }
+
+            var constraints = ReadGenericTypeConstraints(
+                metadata,
+                handle,
+                parameter,
+                expectedOwner,
+                genericContext,
+                budget,
+                errors);
+            if (constraints.Any(constraint => !constraint.Complete))
+            {
+                AddGenericMetadataError(errors, "一或多個型別 constraint 不完整");
+            }
+
+            var unmanagedMarker = constraints.Any(constraint =>
+                constraint.Kind == "value-type-marker" &&
+                constraint.RequiredModifiers.Contains(
+                    "System.Runtime.InteropServices.UnmanagedType",
+                    StringComparer.Ordinal));
+            var valueTypeMarker = constraints.Any(constraint => constraint.Kind == "value-type-marker");
+            if (valueTypeMarker != valueTypeConstraint)
+            {
+                AddGenericMetadataError(errors, "ValueType marker 與 value-type special flag 不一致");
+            }
+
+            if (unmanaged.Found != unmanagedMarker ||
+                (unmanaged.Found &&
+                 (!valueTypeConstraint ||
+                  !attributes.HasFlag(GenericParameterAttributes.DefaultConstructorConstraint))))
+            {
+                AddGenericMetadataError(errors, "unmanaged attribute、ValueType modreq 與 special flags 不一致");
+            }
+
+            return new GenericParameterModel
+            {
+                Position = parameter.Index,
+                Name = name,
+                RawAttributes = rawAttributes,
+                Variance = variance,
+                ReferenceTypeConstraint = referenceTypeConstraint,
+                NotNullableValueTypeConstraint = valueTypeConstraint,
+                NotNullConstraint = !referenceTypeConstraint &&
+                                    !valueTypeConstraint &&
+                                    nullable.FromDirectAttribute &&
+                                    nullable.Complete &&
+                                    nullable.Flags.Count == 1 &&
+                                    nullable.Flags[0] == 1,
+                DefaultConstructorConstraint = attributes.HasFlag(GenericParameterAttributes.DefaultConstructorConstraint),
+                AllowsRefStruct = attributes.HasFlag(GenericParameterAttributes.AllowByRefLike),
+                Nullability = nullable.Nullability,
+                NullableFlags = nullable.Flags,
+                HasUnmanagedAttribute = unmanaged.Found,
+                TypeConstraints = constraints,
+                Complete = errors.Count == 0 && constraints.All(constraint => constraint.Complete),
+                Error = errors.Count == 0 ? null : string.Join("；", errors)
+            };
+        }
+        catch (Exception exception) when (exception is BadImageFormatException or ArgumentException or InvalidOperationException)
+        {
+            return new GenericParameterModel
+            {
+                Position = fallbackPosition,
+                Name = $"!invalid{fallbackPosition}",
+                RawAttributes = 0,
+                Variance = "invalid",
+                Nullability = "invalid",
+                Complete = false,
+                Error = $"無法讀取泛型參數 metadata：{exception.GetType().Name}"
+            };
+        }
+    }
+
+    private static IReadOnlyList<GenericTypeConstraintModel> ReadGenericTypeConstraints(
+        MetadataReader metadata,
+        GenericParameterHandle parameterHandle,
+        GenericParameter parameter,
+        EntityHandle owner,
+        ConstraintGenericContext genericContext,
+        GenericMetadataOwnerBudget budget,
+        List<string> parameterErrors)
+    {
+        var handles = parameter.GetConstraints();
+        var constraints = new List<GenericTypeConstraintModel>(
+            Math.Min(handles.Count, MaxGenericConstraintsPerParameter));
+        foreach (var handle in handles)
+        {
+            if (constraints.Count >= MaxGenericConstraintsPerParameter)
+            {
+                budget.MarkTruncated();
+                AddGenericMetadataError(
+                    parameterErrors,
+                    $"型別 constraints 超過每個泛型參數的 {MaxGenericConstraintsPerParameter} 筆限制");
+                break;
+            }
+
+            if (!budget.TryConsumeConstraintRow())
+            {
+                AddGenericMetadataError(
+                    parameterErrors,
+                    "泛型 metadata 的 constraint row 預算已用盡");
+                break;
+            }
+
+            var decoded = ReadGenericTypeConstraint(
+                metadata,
+                handle,
+                parameterHandle,
+                owner,
+                genericContext);
+            if (!budget.TryRetainConstraint(decoded))
+            {
+                AddGenericMetadataError(
+                    parameterErrors,
+                    "泛型 metadata 的 constraint 字元預算已用盡");
+                break;
+            }
+
+            constraints.Add(decoded);
+        }
+
+        return constraints;
+    }
+
+    private static GenericTypeConstraintModel ReadGenericTypeConstraint(
+        MetadataReader metadata,
+        GenericParameterConstraintHandle handle,
+        GenericParameterHandle expectedParameter,
+        EntityHandle owner,
+        ConstraintGenericContext genericContext)
+    {
+        try
+        {
+            var constraint = metadata.GetGenericParameterConstraint(handle);
+            var decoded = ConstraintSignatureTypeProvider.Decode(
+                metadata,
+                constraint.Type,
+                genericContext,
+                MaxConstraintModifiers);
+            var nullable = ReadEffectiveNullableFlag(metadata, constraint.GetCustomAttributes(), owner);
+            var errors = new List<string>();
+            if (constraint.Parameter != expectedParameter)
+            {
+                AddGenericMetadataError(errors, "constraint parent 與泛型參數不一致");
+            }
+
+            if (!decoded.Complete && decoded.Error is not null)
+            {
+                AddGenericMetadataError(errors, decoded.Error);
+            }
+
+            if (!nullable.Complete && nullable.Error is not null)
+            {
+                AddGenericMetadataError(errors, nullable.Error);
+            }
+
+            if (decoded.Kind is "unknown" or "unsupported")
+            {
+                AddGenericMetadataError(errors, "constraint kind 無法由目前 assembly metadata 證明");
+            }
+
+            return new GenericTypeConstraintModel
+            {
+                Type = decoded.Type,
+                Kind = decoded.Kind,
+                Nullability = nullable.Nullability,
+                NullableFlags = nullable.Flags,
+                RequiredModifiers = decoded.RequiredModifiers,
+                OptionalModifiers = decoded.OptionalModifiers,
+                Complete = errors.Count == 0,
+                Error = errors.Count == 0 ? null : string.Join("；", errors)
+            };
+        }
+        catch (Exception exception) when (exception is BadImageFormatException or ArgumentException or InvalidOperationException)
+        {
+            return new GenericTypeConstraintModel
+            {
+                Type = "<invalid>",
+                Kind = "unsupported",
+                Nullability = "invalid",
+                Complete = false,
+                Error = $"無法讀取 constraint metadata：{exception.GetType().Name}"
+            };
+        }
+    }
+
+    private static GenericParameterModel MarkGenericParameterIncomplete(
+        GenericParameterModel parameter,
+        string error) =>
+        parameter with
+        {
+            Complete = false,
+            Error = string.IsNullOrEmpty(parameter.Error) ? error : $"{parameter.Error}；{error}"
+        };
+
+    private static bool TryReadBoundedGenericParameterName(
+        MetadataReader metadata,
+        StringHandle handle,
+        out string name)
+    {
+        if (handle.IsNil)
+        {
+            name = string.Empty;
+            return true;
+        }
+
+        var bytes = metadata.GetBlobReader(handle);
+        if (bytes.Length > MaxGenericParameterNameUtf8Bytes)
+        {
+            name = string.Empty;
+            return false;
+        }
+
+        name = metadata.GetString(handle);
+        return name.Length <= MaxGenericParameterNameCharacters;
+    }
+
+    private static void AddGenericMetadataError(List<string> errors, string error)
+    {
+        if (errors.Count < 8 && !errors.Contains(error, StringComparer.Ordinal))
+        {
+            errors.Add(error);
+        }
+    }
+
+    private readonly record struct NullableMetadataResult(
+        string Nullability,
+        IReadOnlyList<byte> Flags,
+        bool FromDirectAttribute,
+        bool Complete,
+        string? Error);
+
+    internal readonly record struct AttributeByteResult(
+        bool Found,
+        IReadOnlyList<byte> Values,
+        bool Complete,
+        string? Error);
+
+    private readonly record struct AttributeMarkerResult(
+        bool Found,
+        bool Complete,
+        string? Error);
+
+    internal static bool TryGetBoundedGenericAttributeTypeName(
+        MetadataReader metadata,
+        CustomAttribute attribute,
+        out string? fullName,
+        out string error)
+    {
+        EntityHandle typeHandle;
+        switch (attribute.Constructor.Kind)
+        {
+            case HandleKind.MethodDefinition:
+                typeHandle = metadata.GetMethodDefinition(
+                    (MethodDefinitionHandle)attribute.Constructor).GetDeclaringType();
+                break;
+            case HandleKind.MemberReference:
+                typeHandle = metadata.GetMemberReference(
+                    (MemberReferenceHandle)attribute.Constructor).Parent;
+                break;
+            default:
+                fullName = null;
+                error = $"custom attribute constructor kind 不受支援：{attribute.Constructor.Kind}";
+                return false;
+        }
+
+        return typeHandle.Kind switch
+        {
+            HandleKind.TypeDefinition => TryGetBoundedGenericAttributeTypeDefinitionName(
+                metadata,
+                (TypeDefinitionHandle)typeHandle,
+                out fullName,
+                out error),
+            HandleKind.TypeReference => TryGetBoundedGenericAttributeTypeReferenceName(
+                metadata,
+                (TypeReferenceHandle)typeHandle,
+                out fullName,
+                out error),
+            HandleKind.TypeSpecification => TryGetBoundedGenericAttributeTypeSpecificationName(
+                metadata,
+                (TypeSpecificationHandle)typeHandle,
+                out fullName,
+                out error),
+            _ => FailGenericAttributeTypeName(
+                $"custom attribute type handle kind 不受支援：{typeHandle.Kind}",
+                out fullName,
+                out error)
+        };
+    }
+
+    private static bool TryGetBoundedGenericAttributeTypeSpecificationName(
+        MetadataReader metadata,
+        TypeSpecificationHandle handle,
+        out string? fullName,
+        out string error)
+    {
+        var decoded = ConstraintSignatureTypeProvider.Decode(
+            metadata,
+            handle,
+            new ConstraintGenericContext(0, 0, AllowsMethodParameters: false),
+            maxModifiers: MaxConstraintModifiers);
+        if (!decoded.Complete)
+        {
+            return FailGenericAttributeTypeName(
+                $"custom attribute TypeSpec 無法安全解析：{decoded.Error}",
+                out fullName,
+                out error);
+        }
+
+        fullName = decoded.Type;
+        error = string.Empty;
+        return true;
+    }
+
+    private static bool TryGetBoundedGenericAttributeTypeDefinitionName(
+        MetadataReader metadata,
+        TypeDefinitionHandle handle,
+        out string? fullName,
+        out string error)
+    {
+        var visited = new HashSet<TypeDefinitionHandle>();
+        var segments = new List<string>();
+        var current = handle;
+        var namespaceName = string.Empty;
+        var characters = 0;
+        while (!current.IsNil)
+        {
+            if (MetadataTokens.GetRowNumber(current) > metadata.GetTableRowCount(TableIndex.TypeDef) ||
+                !visited.Add(current) ||
+                visited.Count > MaxGenericAttributeTypeNameDepth)
+            {
+                return FailGenericAttributeTypeName(
+                    "custom attribute TypeDef 宣告鏈循環、過深或超出 metadata 範圍",
+                    out fullName,
+                    out error);
+            }
+
+            var definition = metadata.GetTypeDefinition(current);
+            if (!TryReadBoundedGenericAttributeName(metadata, definition.Name, out var name) ||
+                !TryReserveGenericAttributeTypeName(name, segments.Count > 0, ref characters))
+            {
+                return FailGenericAttributeTypeName(
+                    "custom attribute TypeDef name 超過長度限制",
+                    out fullName,
+                    out error);
+            }
+
+            segments.Add(name);
+            var declaringType = definition.GetDeclaringType();
+            if (declaringType.IsNil)
+            {
+                if (!TryReadBoundedGenericAttributeName(metadata, definition.Namespace, out namespaceName) ||
+                    (!string.IsNullOrEmpty(namespaceName) &&
+                     !TryReserveGenericAttributeTypeName(namespaceName, true, ref characters)))
+                {
+                    return FailGenericAttributeTypeName(
+                        "custom attribute TypeDef namespace 超過長度限制",
+                        out fullName,
+                        out error);
+                }
+
+                break;
+            }
+
+            current = declaringType;
+        }
+
+        segments.Reverse();
+        var nestedName = string.Join('.', segments);
+        fullName = string.IsNullOrEmpty(namespaceName) ? nestedName : $"{namespaceName}.{nestedName}";
+        error = string.Empty;
+        return true;
+    }
+
+    private static bool TryGetBoundedGenericAttributeTypeReferenceName(
+        MetadataReader metadata,
+        TypeReferenceHandle handle,
+        out string? fullName,
+        out string error)
+    {
+        var visited = new HashSet<TypeReferenceHandle>();
+        var segments = new List<string>();
+        var current = handle;
+        var namespaceName = string.Empty;
+        var characters = 0;
+        while (!current.IsNil)
+        {
+            if (MetadataTokens.GetRowNumber(current) > metadata.GetTableRowCount(TableIndex.TypeRef) ||
+                !visited.Add(current) ||
+                visited.Count > MaxGenericAttributeTypeNameDepth)
+            {
+                return FailGenericAttributeTypeName(
+                    "custom attribute TypeRef scope 鏈循環、過深或超出 metadata 範圍",
+                    out fullName,
+                    out error);
+            }
+
+            var reference = metadata.GetTypeReference(current);
+            if (!TryReadBoundedGenericAttributeName(metadata, reference.Name, out var name) ||
+                !TryReserveGenericAttributeTypeName(name, segments.Count > 0, ref characters))
+            {
+                return FailGenericAttributeTypeName(
+                    "custom attribute TypeRef name 超過長度限制",
+                    out fullName,
+                    out error);
+            }
+
+            segments.Add(name);
+            if (reference.ResolutionScope.Kind != HandleKind.TypeReference)
+            {
+                if (!TryReadBoundedGenericAttributeName(metadata, reference.Namespace, out namespaceName) ||
+                    (!string.IsNullOrEmpty(namespaceName) &&
+                     !TryReserveGenericAttributeTypeName(namespaceName, true, ref characters)))
+                {
+                    return FailGenericAttributeTypeName(
+                        "custom attribute TypeRef namespace 超過長度限制",
+                        out fullName,
+                        out error);
+                }
+
+                break;
+            }
+
+            current = (TypeReferenceHandle)reference.ResolutionScope;
+        }
+
+        segments.Reverse();
+        var nestedName = string.Join('.', segments);
+        fullName = string.IsNullOrEmpty(namespaceName) ? nestedName : $"{namespaceName}.{nestedName}";
+        error = string.Empty;
+        return true;
+    }
+
+    private static bool TryReadBoundedGenericAttributeName(
+        MetadataReader metadata,
+        StringHandle handle,
+        out string name)
+    {
+        if (handle.IsNil)
+        {
+            name = string.Empty;
+            return true;
+        }
+
+        if (metadata.GetBlobReader(handle).Length > MaxGenericAttributeTypeNameUtf8Bytes)
+        {
+            name = string.Empty;
+            return false;
+        }
+
+        name = metadata.GetString(handle);
+        return name.Length <= MaxGenericAttributeTypeNameCharacters;
+    }
+
+    private static bool TryReserveGenericAttributeTypeName(
+        string segment,
+        bool needsSeparator,
+        ref int characters)
+    {
+        var required = (long)segment.Length + (needsSeparator ? 1 : 0);
+        if (required > MaxGenericAttributeTypeNameCharacters - characters)
+        {
+            return false;
+        }
+
+        characters += (int)required;
+        return true;
+    }
+
+    private static bool FailGenericAttributeTypeName(
+        string failure,
+        out string? fullName,
+        out string error)
+    {
+        fullName = null;
+        error = failure;
+        return false;
+    }
+
+    private static NullableMetadataResult ReadEffectiveNullableFlag(
+        MetadataReader metadata,
+        CustomAttributeHandleCollection directAttributes,
+        EntityHandle owner)
+    {
+        var direct = ReadNullableAttributeFlag(metadata, directAttributes);
+        if (direct.Found)
+        {
+            return ToNullableMetadataResult(direct, fromDirectAttribute: true);
+        }
+
+        if (!direct.Complete)
+        {
+            return new NullableMetadataResult("invalid", direct.Values, true, false, direct.Error);
+        }
+
+        var context = ReadGenericNullableContext(metadata, owner);
+        return context.Found
+            ? ToNullableMetadataResult(context)
+            : context.Complete
+                ? new NullableMetadataResult("oblivious", [], false, true, null)
+                : new NullableMetadataResult("invalid", context.Values, false, false, context.Error);
+    }
+
+    private static NullableMetadataResult ToNullableMetadataResult(
+        AttributeByteResult result,
+        bool fromDirectAttribute = false)
+    {
+        if (!result.Complete || result.Values.Count == 0 || result.Values.Any(value => value > 2))
+        {
+            return new NullableMetadataResult(
+                "invalid",
+                result.Values,
+                fromDirectAttribute,
+                false,
+                result.Error ?? "nullable flag 不在 0、1、2 範圍內");
+        }
+
+        var nullability = result.Values[0] switch
+        {
+            0 => "oblivious",
+            1 => "not-annotated",
+            2 => "annotated",
+            _ => "invalid"
+        };
+        return new NullableMetadataResult(
+            nullability,
+            result.Values,
+            fromDirectAttribute,
+            true,
+            null);
+    }
+
+    private static AttributeByteResult ReadGenericNullableContext(
+        MetadataReader metadata,
+        EntityHandle owner)
+    {
+        if (owner.Kind == HandleKind.MethodDefinition)
+        {
+            var method = metadata.GetMethodDefinition((MethodDefinitionHandle)owner);
+            var methodContext = ReadSingleByteAttributeStrict(
+                metadata,
+                method.GetCustomAttributes(),
+                "System.Runtime.CompilerServices.NullableContextAttribute");
+            if (methodContext.Found || !methodContext.Complete)
+            {
+                return methodContext;
+            }
+
+            owner = method.GetDeclaringType();
+        }
+
+        var visited = new HashSet<TypeDefinitionHandle>();
+        while (owner.Kind == HandleKind.TypeDefinition && !((TypeDefinitionHandle)owner).IsNil)
+        {
+            var typeHandle = (TypeDefinitionHandle)owner;
+            if (!visited.Add(typeHandle) || visited.Count > 64)
+            {
+                return new AttributeByteResult(
+                    false,
+                    [],
+                    false,
+                    "nullable context 的 outer type 鏈結循環或過深");
+            }
+
+            var definition = metadata.GetTypeDefinition(typeHandle);
+            var typeContext = ReadSingleByteAttributeStrict(
+                metadata,
+                definition.GetCustomAttributes(),
+                "System.Runtime.CompilerServices.NullableContextAttribute");
+            if (typeContext.Found || !typeContext.Complete)
+            {
+                return typeContext;
+            }
+
+            owner = definition.GetDeclaringType();
+        }
+
+        return new AttributeByteResult(false, [], true, null);
+    }
+
+    internal static AttributeByteResult ReadNullableAttributeFlag(
+        MetadataReader metadata,
+        CustomAttributeHandleCollection attributes)
+    {
+        if (attributes.Count > MaxGenericCustomAttributesPerTarget)
+        {
+            return new AttributeByteResult(
+                false,
+                [],
+                false,
+                $"custom attributes 超過 {MaxGenericCustomAttributesPerTarget} 筆限制");
+        }
+
+        AttributeByteResult? result = null;
+        foreach (var handle in attributes)
+        {
+            try
+            {
+                var attribute = metadata.GetCustomAttribute(handle);
+                if (!TryGetBoundedGenericAttributeTypeName(
+                        metadata,
+                        attribute,
+                        out var attributeType,
+                        out var typeError))
+                {
+                    return new AttributeByteResult(
+                        result?.Found ?? false,
+                        result?.Values ?? [],
+                        false,
+                        typeError);
+                }
+
+                if (attributeType != "System.Runtime.CompilerServices.NullableAttribute")
+                {
+                    continue;
+                }
+
+                if (result.HasValue)
+                {
+                    return new AttributeByteResult(
+                        true,
+                        result.Value.Values,
+                        false,
+                        "NullableAttribute 重複");
+                }
+
+                var reader = metadata.GetBlobReader(attribute.Value);
+                if (reader.ReadUInt16() != 1)
+                {
+                    return new AttributeByteResult(true, [], false, "NullableAttribute prolog 無效");
+                }
+
+                IReadOnlyList<byte> values;
+                if (reader.RemainingBytes == 3)
+                {
+                    values = [reader.ReadByte()];
+                }
+                else
+                {
+                    if (reader.RemainingBytes < 6)
+                    {
+                        return new AttributeByteResult(true, [], false, "NullableAttribute payload 過短");
+                    }
+
+                    var count = reader.ReadInt32();
+                    if (count <= 0 || count > 256 || reader.RemainingBytes != count + 2)
+                    {
+                        return new AttributeByteResult(true, [], false, "NullableAttribute flags 長度無效或超過限制");
+                    }
+
+                    values = reader.ReadBytes(count);
+                }
+
+                result = reader.ReadUInt16() == 0 && reader.RemainingBytes == 0
+                    ? new AttributeByteResult(true, values, true, null)
+                    : new AttributeByteResult(true, values, false, "NullableAttribute named arguments 無效");
+                if (!result.Value.Complete)
+                {
+                    return result.Value;
+                }
+            }
+            catch (Exception exception) when (exception is BadImageFormatException or ArgumentException)
+            {
+                return new AttributeByteResult(
+                    result?.Found ?? false,
+                    result?.Values ?? [],
+                    false,
+                    $"NullableAttribute 無法解碼：{exception.GetType().Name}");
+            }
+        }
+
+        return result ?? new AttributeByteResult(false, [], true, null);
+    }
+
+    private static AttributeByteResult ReadSingleByteAttributeStrict(
+        MetadataReader metadata,
+        CustomAttributeHandleCollection attributes,
+        string fullName)
+    {
+        if (attributes.Count > MaxGenericCustomAttributesPerTarget)
+        {
+            return new AttributeByteResult(
+                false,
+                [],
+                false,
+                $"custom attributes 超過 {MaxGenericCustomAttributesPerTarget} 筆限制");
+        }
+
+        AttributeByteResult? result = null;
+        foreach (var handle in attributes)
+        {
+            try
+            {
+                var attribute = metadata.GetCustomAttribute(handle);
+                if (!TryGetBoundedGenericAttributeTypeName(
+                        metadata,
+                        attribute,
+                        out var attributeType,
+                        out var typeError))
+                {
+                    return new AttributeByteResult(
+                        result?.Found ?? false,
+                        result?.Values ?? [],
+                        false,
+                        typeError);
+                }
+
+                if (attributeType != fullName)
+                {
+                    continue;
+                }
+
+                if (result.HasValue)
+                {
+                    return new AttributeByteResult(
+                        true,
+                        result.Value.Values,
+                        false,
+                        $"{fullName} 重複");
+                }
+
+                var reader = metadata.GetBlobReader(attribute.Value);
+                if (reader.ReadUInt16() != 1 || reader.RemainingBytes != 3)
+                {
+                    return new AttributeByteResult(true, [], false, $"{fullName} payload 無效");
+                }
+
+                var value = reader.ReadByte();
+                result = reader.ReadUInt16() == 0 && reader.RemainingBytes == 0
+                    ? new AttributeByteResult(true, [value], true, null)
+                    : new AttributeByteResult(true, [value], false, $"{fullName} named arguments 無效");
+                if (!result.Value.Complete)
+                {
+                    return result.Value;
+                }
+            }
+            catch (Exception exception) when (exception is BadImageFormatException or ArgumentException)
+            {
+                return new AttributeByteResult(
+                    result?.Found ?? false,
+                    result?.Values ?? [],
+                    false,
+                    $"{fullName} 無法解碼：{exception.GetType().Name}");
+            }
+        }
+
+        return result ?? new AttributeByteResult(false, [], true, null);
+    }
+
+    private static AttributeMarkerResult ReadMarkerAttribute(
+        MetadataReader metadata,
+        CustomAttributeHandleCollection attributes,
+        string fullName)
+    {
+        if (attributes.Count > MaxGenericCustomAttributesPerTarget)
+        {
+            return new AttributeMarkerResult(
+                false,
+                false,
+                $"custom attributes 超過 {MaxGenericCustomAttributesPerTarget} 筆限制");
+        }
+
+        AttributeMarkerResult? result = null;
+        foreach (var handle in attributes)
+        {
+            try
+            {
+                var attribute = metadata.GetCustomAttribute(handle);
+                if (!TryGetBoundedGenericAttributeTypeName(
+                        metadata,
+                        attribute,
+                        out var attributeType,
+                        out var typeError))
+                {
+                    return new AttributeMarkerResult(result?.Found ?? false, false, typeError);
+                }
+
+                if (attributeType != fullName)
+                {
+                    continue;
+                }
+
+                if (result.HasValue)
+                {
+                    return new AttributeMarkerResult(true, false, $"{fullName} 重複");
+                }
+
+                var reader = metadata.GetBlobReader(attribute.Value);
+                result = reader.ReadUInt16() == 1 && reader.ReadUInt16() == 0 && reader.RemainingBytes == 0
+                    ? new AttributeMarkerResult(true, true, null)
+                    : new AttributeMarkerResult(true, false, $"{fullName} payload 無效");
+                if (!result.Value.Complete)
+                {
+                    return result.Value;
+                }
+            }
+            catch (Exception exception) when (exception is BadImageFormatException or ArgumentException)
+            {
+                return new AttributeMarkerResult(
+                    result?.Found ?? false,
+                    false,
+                    $"{fullName} 無法解碼：{exception.GetType().Name}");
+            }
+        }
+
+        return result ?? new AttributeMarkerResult(false, true, null);
     }
 
     private static IReadOnlyList<string> ReadInterfaces(MetadataReader metadata, TypeDefinition definition)
@@ -4800,4 +6179,1251 @@ internal sealed class SignatureTypeNameProvider : ISignatureTypeProvider<string,
         TypeSpecificationHandle handle,
         byte rawTypeKind) =>
         reader.GetTypeSpecification(handle).DecodeSignature(this, genericContext);
+}
+
+internal sealed record ConstraintSignatureType(
+    string Type,
+    string Kind,
+    ImmutableArray<string> RequiredModifiers,
+    ImmutableArray<string> OptionalModifiers,
+    bool Complete,
+    string? Error);
+
+internal readonly record struct ConstraintGenericContext(
+    int TypeParameterCount,
+    int MethodParameterCount,
+    bool AllowsMethodParameters,
+    ImmutableArray<int> TypeParameterPositions = default,
+    ImmutableArray<int> MethodParameterPositions = default,
+    bool TypeParameterPositionsComplete = true,
+    bool MethodParameterPositionsComplete = true)
+{
+    public bool ContainsTypeParameter(int index) =>
+        TypeParameterPositionsComplete &&
+        index >= 0 &&
+        index < TypeParameterCount &&
+        (TypeParameterPositions.IsDefault || TypeParameterPositions.Contains(index));
+
+    public bool ContainsMethodParameter(int index) =>
+        AllowsMethodParameters &&
+        MethodParameterPositionsComplete &&
+        index >= 0 &&
+        index < MethodParameterCount &&
+        (MethodParameterPositions.IsDefault || MethodParameterPositions.Contains(index));
+}
+
+// GenericParamConstraint 的 TypeSpec 需保留 modreq/modopt；一般 signature rendering 仍維持原樣。
+internal sealed class ConstraintSignatureTypeProvider : ISignatureTypeProvider<ConstraintSignatureType, object?>
+{
+    private const int MaxSignatureBytes = 256;
+    private const int MaxSignatureNodes = 256;
+    private const int MaxSignatureDepth = 64;
+    private const int MaxGenericTypeArguments = 64;
+    private const int MaxArrayRank = 32;
+    private const int MaxAggregateSignatureBytes = 4_096;
+    private const int MaxRenderedTypeCharacters = 8_192;
+    private const int MaxMetadataNameUtf8Bytes = MaxRenderedTypeCharacters * 4;
+    private const int MaxQualifiedNameDepth = 64;
+    private const int MaxRetainedModifierCharacters = 32_768;
+    private const int MaxRetainedModifierUtf8Bytes = 32_768;
+
+    private readonly int _maxModifiers;
+    private readonly HashSet<TypeSpecificationHandle> _activeTypeSpecifications = [];
+    private readonly HashSet<TypeSpecificationHandle> _validatedTypeSpecifications = [];
+    private int _nodes;
+    private int _validatedNodes;
+    private int _signatureBytes;
+    private int _retainedModifierCharacters;
+    private int _validatedModifierUtf8Bytes;
+
+    internal ConstraintSignatureTypeProvider(int maxModifiers)
+    {
+        _maxModifiers = maxModifiers;
+    }
+
+    public static ConstraintSignatureType Decode(
+        MetadataReader metadata,
+        EntityHandle handle,
+        ConstraintGenericContext genericContext,
+        int maxModifiers)
+    {
+        var provider = new ConstraintSignatureTypeProvider(maxModifiers);
+        return handle.Kind switch
+        {
+            HandleKind.TypeDefinition => provider.GetTypeFromDefinition(
+                metadata,
+                (TypeDefinitionHandle)handle,
+                0),
+            HandleKind.TypeReference => provider.GetTypeFromReference(
+                metadata,
+                (TypeReferenceHandle)handle,
+                0),
+            HandleKind.TypeSpecification => provider.DecodeTypeSpecification(
+                metadata,
+                (TypeSpecificationHandle)handle,
+                genericContext),
+            _ => provider.Track(Invalid(
+                "<unsupported>",
+                "unsupported",
+                $"不支援的 constraint handle kind：{handle.Kind}"))
+        };
+    }
+
+    private ConstraintSignatureType DecodeTypeSpecification(
+        MetadataReader metadata,
+        TypeSpecificationHandle handle,
+        ConstraintGenericContext genericContext)
+    {
+        if (!IsValidTypeSpecificationHandle(metadata, handle))
+        {
+            return Track(Invalid(
+                "<unsupported>",
+                "unsupported",
+                "constraint TypeSpec handle 超出 metadata 範圍"));
+        }
+
+        if (!_activeTypeSpecifications.Add(handle))
+        {
+            return Track(Invalid("<unsupported>", "unsupported", "constraint TypeSpec 參照循環或過深"));
+        }
+
+        try
+        {
+            if (_activeTypeSpecifications.Count > MaxSignatureDepth)
+            {
+                return Track(Invalid(
+                    "<unsupported>",
+                    "unsupported",
+                    "constraint TypeSpec 參照循環或過深"));
+            }
+
+            if (!_validatedTypeSpecifications.Contains(handle) &&
+                !TryValidateTypeSpecificationBody(metadata, handle, genericContext, out var validationError))
+            {
+                return Track(Invalid("<unsupported>", "unsupported", validationError));
+            }
+
+            _validatedTypeSpecifications.Add(handle);
+            var specification = metadata.GetTypeSpecification(handle);
+            return specification.DecodeSignature(this, genericContext);
+        }
+        catch (Exception exception) when (
+            exception is BadImageFormatException or ArgumentException or InvalidOperationException)
+        {
+            return Track(Invalid(
+                "<unsupported>",
+                "unsupported",
+                $"constraint TypeSpec signature 無法解碼：{exception.GetType().Name}"));
+        }
+        finally
+        {
+            _activeTypeSpecifications.Remove(handle);
+        }
+    }
+
+    private bool TryValidateReferencedTypeSpecification(
+        MetadataReader metadata,
+        TypeSpecificationHandle handle,
+        ConstraintGenericContext genericContext,
+        out string error)
+    {
+        if (!IsValidTypeSpecificationHandle(metadata, handle))
+        {
+            error = "constraint TypeSpec handle 超出 metadata 範圍";
+            return false;
+        }
+
+        if (_activeTypeSpecifications.Contains(handle))
+        {
+            error = "constraint TypeSpec 參照循環或過深";
+            return false;
+        }
+
+        if (_validatedTypeSpecifications.Contains(handle))
+        {
+            error = string.Empty;
+            return true;
+        }
+
+        if (_activeTypeSpecifications.Count >= MaxSignatureDepth ||
+            !_activeTypeSpecifications.Add(handle))
+        {
+            error = "constraint TypeSpec 參照循環或過深";
+            return false;
+        }
+
+        try
+        {
+            if (!TryValidateTypeSpecificationBody(metadata, handle, genericContext, out error))
+            {
+                return false;
+            }
+
+            _validatedTypeSpecifications.Add(handle);
+            return true;
+        }
+        finally
+        {
+            _activeTypeSpecifications.Remove(handle);
+        }
+    }
+
+    private bool TryValidateTypeSpecificationBody(
+        MetadataReader metadata,
+        TypeSpecificationHandle handle,
+        ConstraintGenericContext genericContext,
+        out string error)
+    {
+        var specification = metadata.GetTypeSpecification(handle);
+        var signature = metadata.GetBlobReader(specification.Signature);
+        if (signature.Length is <= 0 or > MaxSignatureBytes)
+        {
+            error = $"constraint TypeSpec signature 長度必須介於 1 與 {MaxSignatureBytes} bytes";
+            return false;
+        }
+
+        if (_signatureBytes > MaxAggregateSignatureBytes - signature.Length)
+        {
+            error = $"constraint TypeSpec signature 累計超過 {MaxAggregateSignatureBytes} bytes 限制";
+            return false;
+        }
+
+        _signatureBytes += signature.Length;
+        return TryValidateTypeSignature(
+            metadata,
+            signature,
+            genericContext,
+            _activeTypeSpecifications.Count - 1,
+            out error);
+    }
+
+    private bool TryValidateTypeSignature(
+        MetadataReader metadata,
+        BlobReader reader,
+        ConstraintGenericContext genericContext,
+        int depth,
+        out string error)
+    {
+        try
+        {
+            if (!TryValidateTypeSignatureNode(
+                    metadata,
+                    ref reader,
+                    genericContext,
+                    depth,
+                    out error))
+            {
+                return false;
+            }
+
+            if (reader.RemainingBytes != 0)
+            {
+                error = "constraint TypeSpec signature 含 trailing bytes";
+                return false;
+            }
+
+            error = string.Empty;
+            return true;
+        }
+        catch (Exception exception) when (
+            exception is BadImageFormatException or ArgumentException or InvalidOperationException)
+        {
+            error = $"constraint TypeSpec signature 格式損壞：{exception.GetType().Name}";
+            return false;
+        }
+    }
+
+    private bool TryValidateTypeSignatureNode(
+        MetadataReader metadata,
+        ref BlobReader reader,
+        ConstraintGenericContext genericContext,
+        int depth,
+        out string error)
+    {
+        error = string.Empty;
+        if (depth >= MaxSignatureDepth || ++_validatedNodes > MaxSignatureNodes)
+        {
+            error = "constraint TypeSpec signature 深度或節點數超過限制";
+            return false;
+        }
+
+        if (reader.RemainingBytes == 0)
+        {
+            error = "constraint TypeSpec signature 提前結束";
+            return false;
+        }
+
+        var typeCode = reader.ReadByte();
+        switch (typeCode)
+        {
+            // Primitive、void、TypedReference 與 object；是否合法作為 C# constraint 由 provider 分類。
+            case >= 0x01 and <= 0x0E:
+            case 0x16:
+            case 0x18:
+            case 0x19:
+            case 0x1C:
+                error = string.Empty;
+                return true;
+
+            // Pointer、by-ref、SZArray 與 pinned 都包住另一個 type node。
+            case 0x0F:
+            case 0x10:
+            case 0x1D:
+            case 0x45:
+                return TryValidateTypeSignatureNode(
+                    metadata,
+                    ref reader,
+                    genericContext,
+                    depth + 1,
+                    out error);
+
+            // ValueType／Class + TypeDefOrRefEncoded。
+            case 0x11:
+            case 0x12:
+                return TryReadConstraintTypeHandle(
+                    metadata,
+                    ref reader,
+                    genericContext,
+                    depth + 1,
+                    isModifier: false,
+                    out error);
+
+            // Generic type/method parameter index。
+            case 0x13:
+                if (!reader.TryReadCompressedInteger(out var typeParameterIndex) ||
+                    !genericContext.ContainsTypeParameter(typeParameterIndex))
+                {
+                    error = "constraint type generic parameter index 超出 owner context";
+                    return false;
+                }
+
+                return true;
+
+            case 0x1E:
+                if (!reader.TryReadCompressedInteger(out var methodParameterIndex) ||
+                    !genericContext.ContainsMethodParameter(methodParameterIndex))
+                {
+                    error = "constraint method generic parameter index 超出 owner context";
+                    return false;
+                }
+
+                return true;
+
+            // Multi-dimensional array shape。
+            case 0x14:
+                if (!TryValidateTypeSignatureNode(
+                        metadata,
+                        ref reader,
+                        genericContext,
+                        depth + 1,
+                        out error) ||
+                    !reader.TryReadCompressedInteger(out var rank) ||
+                    rank is <= 0 or > MaxArrayRank ||
+                    !reader.TryReadCompressedInteger(out var sizeCount) ||
+                    sizeCount < 0 ||
+                    sizeCount > rank)
+                {
+                    error = string.IsNullOrEmpty(error)
+                        ? "constraint array rank 或 sizes 數量無效"
+                        : error;
+                    return false;
+                }
+
+                for (var index = 0; index < sizeCount; index++)
+                {
+                    if (!reader.TryReadCompressedInteger(out _))
+                    {
+                        error = "constraint array size 無效";
+                        return false;
+                    }
+                }
+
+                if (!reader.TryReadCompressedInteger(out var lowerBoundCount) ||
+                    lowerBoundCount < 0 ||
+                    lowerBoundCount > rank)
+                {
+                    error = "constraint array lower-bound 數量無效";
+                    return false;
+                }
+
+                for (var index = 0; index < lowerBoundCount; index++)
+                {
+                    if (!reader.TryReadCompressedSignedInteger(out _))
+                    {
+                        error = "constraint array lower bound 無效";
+                        return false;
+                    }
+                }
+
+                return true;
+
+            // GenericInst + class/value marker + TypeDefOrRefEncoded + bounded arguments。
+            case 0x15:
+                if (reader.RemainingBytes == 0 || reader.ReadByte() is not (0x11 or 0x12))
+                {
+                    error = "constraint generic instantiation header 無效";
+                    return false;
+                }
+
+                var genericTypeHandleReader = reader;
+                if (
+                    !TryReadConstraintTypeHandle(
+                        metadata,
+                        ref reader,
+                        genericContext,
+                        depth + 1,
+                        isModifier: false,
+                        out error) ||
+                    !reader.TryReadCompressedInteger(out var argumentCount) ||
+                    argumentCount is <= 0 or > MaxGenericTypeArguments)
+                {
+                    error = string.IsNullOrEmpty(error)
+                        ? "constraint generic instantiation header 或 argument count 無效"
+                        : error;
+                    return false;
+                }
+
+                var genericTypeHandle = genericTypeHandleReader.ReadTypeHandle();
+                if (!TryValidateLocalGenericTypeArity(
+                        metadata,
+                        genericTypeHandle,
+                        argumentCount,
+                        out error))
+                {
+                    return false;
+                }
+
+                for (var index = 0; index < argumentCount; index++)
+                {
+                    if (!TryValidateTypeSignatureNode(
+                            metadata,
+                            ref reader,
+                            genericContext,
+                            depth + 1,
+                            out error))
+                    {
+                        return false;
+                    }
+                }
+
+                return true;
+
+            // modreq/modopt + modifier TypeDefOrRefEncoded + wrapped type。
+            case 0x1F:
+            case 0x20:
+                return TryReadConstraintTypeHandle(
+                           metadata,
+                           ref reader,
+                           genericContext,
+                           depth + 1,
+                           isModifier: true,
+                           out error) &&
+                       TryValidateTypeSignatureNode(
+                           metadata,
+                           ref reader,
+                           genericContext,
+                           depth + 1,
+                           out error);
+
+            // Function pointer/type sentinel/internal runtime encodings are not legal C# constraints and
+            // can declare large child counts before provider callbacks, so reject them before decoding。
+            default:
+                error = $"constraint TypeSpec 含不支援的 type code 0x{typeCode:X2}";
+                return false;
+        }
+    }
+
+    private static bool TryValidateLocalGenericTypeArity(
+        MetadataReader metadata,
+        EntityHandle handle,
+        int argumentCount,
+        out string error)
+    {
+        if (handle.Kind != HandleKind.TypeDefinition)
+        {
+            if (handle.Kind == HandleKind.TypeReference)
+            {
+                error = string.Empty;
+                return true;
+            }
+
+            error = "constraint generic type 必須是 TypeDef 或 TypeRef";
+            return false;
+        }
+
+        var definitionHandle = (TypeDefinitionHandle)handle;
+        var handles = metadata.GetTypeDefinition(definitionHandle).GetGenericParameters();
+        if (handles.Count != argumentCount || handles.Count > MaxGenericTypeArguments)
+        {
+            error = "constraint local generic TypeDef 的 GenericParam row count 與 arity 不一致";
+            return false;
+        }
+
+        var positions = new bool[handles.Count];
+        foreach (var parameterHandle in handles)
+        {
+            var parameter = metadata.GetGenericParameter(parameterHandle);
+            if (parameter.Parent != definitionHandle ||
+                parameter.Index < 0 ||
+                parameter.Index >= positions.Length ||
+                positions[parameter.Index])
+            {
+                error = "constraint local generic TypeDef 的 GenericParam domain 無效";
+                return false;
+            }
+
+            positions[parameter.Index] = true;
+        }
+
+        error = string.Empty;
+        return true;
+    }
+
+    private bool TryReadConstraintTypeHandle(
+        MetadataReader metadata,
+        ref BlobReader reader,
+        ConstraintGenericContext genericContext,
+        int depth,
+        bool isModifier,
+        out string error)
+    {
+        var handle = reader.ReadTypeHandle();
+        if (handle.IsNil)
+        {
+            error = "constraint TypeDefOrRefEncoded token 無效";
+            return false;
+        }
+
+        switch (handle.Kind)
+        {
+            case HandleKind.TypeDefinition:
+                if (!IsValidTypeDefinitionHandle(metadata, (TypeDefinitionHandle)handle))
+                {
+                    error = "constraint TypeDef handle 超出 metadata 範圍";
+                    return false;
+                }
+
+                if (isModifier &&
+                    !TryReserveModifierNameBytes(metadata, (TypeDefinitionHandle)handle, out error))
+                {
+                    return false;
+                }
+
+                break;
+            case HandleKind.TypeReference:
+                if (!IsValidTypeReferenceHandle(metadata, (TypeReferenceHandle)handle))
+                {
+                    error = "constraint TypeRef handle 超出 metadata 範圍";
+                    return false;
+                }
+
+                if (isModifier &&
+                    !TryReserveModifierNameBytes(metadata, (TypeReferenceHandle)handle, out error))
+                {
+                    return false;
+                }
+
+                break;
+            case HandleKind.TypeSpecification:
+                if (depth >= MaxSignatureDepth)
+                {
+                    error = "constraint TypeSpec 參照深度超過限制";
+                    return false;
+                }
+
+                if (!TryValidateReferencedTypeSpecification(
+                        metadata,
+                        (TypeSpecificationHandle)handle,
+                        genericContext,
+                        out error))
+                {
+                    return false;
+                }
+
+                if (isModifier)
+                {
+                    error = "constraint modifier TypeSpec 無法安全保留名稱與位置";
+                    return false;
+                }
+
+                break;
+            default:
+                error = $"constraint type handle kind 不受支援：{handle.Kind}";
+                return false;
+        }
+
+        error = string.Empty;
+        return true;
+    }
+
+    private bool TryReserveModifierNameBytes(
+        MetadataReader metadata,
+        TypeDefinitionHandle handle,
+        out string error)
+    {
+        var visited = new HashSet<TypeDefinitionHandle>();
+        var current = handle;
+        long bytes = 0;
+        while (!current.IsNil)
+        {
+            if (!IsValidTypeDefinitionHandle(metadata, current) ||
+                !visited.Add(current) ||
+                visited.Count > MaxQualifiedNameDepth)
+            {
+                error = "constraint modifier TypeDef 宣告鏈循環、過深或超出範圍";
+                return false;
+            }
+
+            var definition = metadata.GetTypeDefinition(current);
+            bytes += metadata.GetBlobReader(definition.Name).Length + (visited.Count > 1 ? 1 : 0);
+            var declaringType = definition.GetDeclaringType();
+            if (declaringType.IsNil)
+            {
+                if (!definition.Namespace.IsNil)
+                {
+                    bytes += metadata.GetBlobReader(definition.Namespace).Length + 1;
+                }
+
+                break;
+            }
+
+            current = declaringType;
+        }
+
+        return TryReserveModifierNameBytes(bytes, out error);
+    }
+
+    private bool TryReserveModifierNameBytes(
+        MetadataReader metadata,
+        TypeReferenceHandle handle,
+        out string error)
+    {
+        var visited = new HashSet<TypeReferenceHandle>();
+        var current = handle;
+        long bytes = 0;
+        while (!current.IsNil)
+        {
+            if (!IsValidTypeReferenceHandle(metadata, current) ||
+                !visited.Add(current) ||
+                visited.Count > MaxQualifiedNameDepth)
+            {
+                error = "constraint modifier TypeRef scope 鏈循環、過深或超出範圍";
+                return false;
+            }
+
+            var reference = metadata.GetTypeReference(current);
+            bytes += metadata.GetBlobReader(reference.Name).Length + (visited.Count > 1 ? 1 : 0);
+            if (reference.ResolutionScope.Kind != HandleKind.TypeReference)
+            {
+                if (!reference.Namespace.IsNil)
+                {
+                    bytes += metadata.GetBlobReader(reference.Namespace).Length + 1;
+                }
+
+                break;
+            }
+
+            current = (TypeReferenceHandle)reference.ResolutionScope;
+        }
+
+        return TryReserveModifierNameBytes(bytes, out error);
+    }
+
+    private bool TryReserveModifierNameBytes(long bytes, out string error)
+    {
+        if (bytes < 0 || bytes > MaxRetainedModifierUtf8Bytes - _validatedModifierUtf8Bytes)
+        {
+            error = $"constraint modifier UTF-8 bytes 累計超過 {MaxRetainedModifierUtf8Bytes} bytes 限制";
+            return false;
+        }
+
+        _validatedModifierUtf8Bytes += (int)bytes;
+        error = string.Empty;
+        return true;
+    }
+
+    private static bool IsValidTypeDefinitionHandle(MetadataReader metadata, TypeDefinitionHandle handle) =>
+        !handle.IsNil &&
+        MetadataTokens.GetRowNumber(handle) <= metadata.GetTableRowCount(TableIndex.TypeDef);
+
+    private static bool IsValidTypeReferenceHandle(MetadataReader metadata, TypeReferenceHandle handle) =>
+        !handle.IsNil &&
+        MetadataTokens.GetRowNumber(handle) <= metadata.GetTableRowCount(TableIndex.TypeRef);
+
+    private static bool IsValidTypeSpecificationHandle(MetadataReader metadata, TypeSpecificationHandle handle) =>
+        !handle.IsNil &&
+        MetadataTokens.GetRowNumber(handle) <= metadata.GetTableRowCount(TableIndex.TypeSpec);
+
+    public ConstraintSignatureType GetArrayType(ConstraintSignatureType elementType, ArrayShape shape) =>
+        Merge(
+            shape.Rank is > 0 and <= 32
+                ? $"{elementType.Type}[{new string(',', shape.Rank - 1)}]"
+                : $"{elementType.Type}[...]",
+            "unsupported",
+            [elementType],
+            complete: shape.Rank is > 0 and <= 32,
+            error: shape.Rank is > 0 and <= 32 ? null : "array rank 無效或超過 32 維限制");
+
+    public ConstraintSignatureType GetByReferenceType(ConstraintSignatureType elementType) =>
+        WithShape(elementType, $"ref {elementType.Type}", "by-ref constraint 不受支援");
+
+    public ConstraintSignatureType GetFunctionPointerType(MethodSignature<ConstraintSignatureType> signature)
+    {
+        var parts = signature.ParameterTypes.Prepend(signature.ReturnType);
+        return Merge("method*", "unsupported", parts, false, "function-pointer constraint 不受支援");
+    }
+
+    public ConstraintSignatureType GetGenericInstantiation(
+        ConstraintSignatureType genericType,
+        ImmutableArray<ConstraintSignatureType> typeArguments)
+    {
+        var complete = genericType.Complete;
+        var error = genericType.Error;
+        if (!genericType.RequiredModifiers.IsEmpty || !genericType.OptionalModifiers.IsEmpty)
+        {
+            complete = false;
+            error = CombineErrors(
+                error,
+                "constructed type name 的巢狀 modreq/modopt 無法以頂層 modifier 清單無損表示");
+        }
+
+        foreach (var argument in typeArguments)
+        {
+            complete &= argument.Complete;
+            error = CombineErrors(error, argument.Error);
+            if (!argument.RequiredModifiers.IsEmpty || !argument.OptionalModifiers.IsEmpty)
+            {
+                complete = false;
+                error = CombineErrors(
+                    error,
+                    "巢狀 type argument 的 modreq/modopt 無法以頂層 modifier 清單無損表示");
+            }
+        }
+
+        if (!TryRenderGenericInstantiation(genericType.Type, typeArguments, out var rendered))
+        {
+            rendered = "<unsupported>";
+            complete = false;
+            error = CombineErrors(error, "constraint constructed type arity 無效或輸出超過長度限制");
+        }
+
+        // generic argument 裡的 modifier 有自己的位置，不能攤平成 constraint 的頂層 modifier。
+        return Track(new ConstraintSignatureType(
+            rendered,
+            genericType.Kind,
+            [],
+            [],
+            complete,
+            error));
+    }
+
+    public ConstraintSignatureType GetGenericMethodParameter(object? genericContext, int index)
+    {
+        if (genericContext is not ConstraintGenericContext context ||
+            !context.ContainsMethodParameter(index))
+        {
+            return Track(Invalid(
+                $"!!{index}",
+                "type-parameter",
+                "method generic parameter index 超出 owner context"));
+        }
+
+        return Simple($"!!{index}", "type-parameter");
+    }
+
+    public ConstraintSignatureType GetGenericTypeParameter(object? genericContext, int index)
+    {
+        if (genericContext is not ConstraintGenericContext context ||
+            !context.ContainsTypeParameter(index))
+        {
+            return Track(Invalid(
+                $"!{index}",
+                "type-parameter",
+                "type generic parameter index 超出 owner context"));
+        }
+
+        return Simple($"!{index}", "type-parameter");
+    }
+
+    public ConstraintSignatureType GetModifiedType(
+        ConstraintSignatureType modifier,
+        ConstraintSignatureType unmodifiedType,
+        bool isRequired)
+    {
+        var required = unmodifiedType.RequiredModifiers.ToList();
+        var optional = unmodifiedType.OptionalModifiers.ToList();
+        var target = isRequired ? required : optional;
+        var complete = modifier.Complete && unmodifiedType.Complete;
+        var error = CombineErrors(modifier.Error, unmodifiedType.Error);
+        if (!modifier.RequiredModifiers.IsEmpty || !modifier.OptionalModifiers.IsEmpty)
+        {
+            complete = false;
+            error = CombineErrors(
+                error,
+                "modifier type 的巢狀 modreq/modopt 無法以頂層 modifier 清單無損表示");
+        }
+
+        if (target.Count >= _maxModifiers)
+        {
+            complete = false;
+            error = CombineErrors(error, $"constraint modifiers 超過 {_maxModifiers} 筆限制");
+        }
+        else if (modifier.Type.Length > MaxRetainedModifierCharacters - _retainedModifierCharacters)
+        {
+            complete = false;
+            error = CombineErrors(
+                error,
+                $"constraint modifier 字元累計超過 {MaxRetainedModifierCharacters} 字元限制");
+        }
+        else
+        {
+            target.Add(modifier.Type);
+            _retainedModifierCharacters += modifier.Type.Length;
+        }
+
+        return Track(new ConstraintSignatureType(
+            unmodifiedType.Type,
+            unmodifiedType.Kind,
+            [.. required],
+            [.. optional],
+            complete,
+            error));
+    }
+
+    public ConstraintSignatureType GetPinnedType(ConstraintSignatureType elementType) =>
+        WithShape(elementType, elementType.Type, "pinned constraint 不受支援");
+
+    public ConstraintSignatureType GetPointerType(ConstraintSignatureType elementType) =>
+        WithShape(elementType, $"{elementType.Type}*", "pointer constraint 不受支援");
+
+    public ConstraintSignatureType GetPrimitiveType(PrimitiveTypeCode typeCode)
+    {
+        var type = SignatureTypeNameProvider.Instance.GetPrimitiveType(typeCode);
+        // primitive 作為頂層 constraint 仍由 caller 以 unsupported fail closed；
+        // 作為 constructed type 的型別參數時不應污染整個 TypeSpec 的解碼完整性。
+        return Simple(type, "unsupported");
+    }
+
+    public ConstraintSignatureType GetSZArrayType(ConstraintSignatureType elementType) =>
+        Merge($"{elementType.Type}[]", "unsupported", [elementType]);
+
+    public ConstraintSignatureType GetTypeFromDefinition(
+        MetadataReader reader,
+        TypeDefinitionHandle handle,
+        byte rawTypeKind)
+    {
+        if (!TryGetTypeDefinitionName(reader, handle, out var type, out var error))
+        {
+            return Track(Invalid("<unsupported>", "unsupported", error));
+        }
+
+        var definition = reader.GetTypeDefinition(handle);
+        if (type is "System.Object" or "System.Array")
+        {
+            // 頂層時由 caller 以 unsupported fail closed；嵌套於 constructed type 內仍是合法 type argument。
+            return Simple(type, "unsupported");
+        }
+
+        var kind = type == "System.ValueType"
+            ? "value-type-marker"
+            : definition.Attributes.HasFlag(TypeAttributes.Interface)
+                ? "interface"
+                : "class";
+        return Simple(type, kind);
+    }
+
+    public ConstraintSignatureType GetTypeFromReference(
+        MetadataReader reader,
+        TypeReferenceHandle handle,
+        byte rawTypeKind)
+    {
+        if (!TryGetTypeReferenceName(reader, handle, out var type, out var error))
+        {
+            return Track(Invalid("<unsupported>", "unsupported", error));
+        }
+
+        if (type is "System.Object" or "System.Array")
+        {
+            return Simple(type, "unsupported");
+        }
+
+        var kind = type switch
+        {
+            "System.ValueType" => "value-type-marker",
+            "System.Enum" or "System.Delegate" or "System.MulticastDelegate" => "class",
+            _ => "unknown"
+        };
+        return Simple(type, kind);
+    }
+
+    public ConstraintSignatureType GetTypeFromSpecification(
+        MetadataReader reader,
+        object? genericContext,
+        TypeSpecificationHandle handle,
+        byte rawTypeKind)
+    {
+        if (genericContext is not ConstraintGenericContext context)
+        {
+            return Track(Invalid(
+                "<unsupported>",
+                "unsupported",
+                "constraint TypeSpec 缺少 owner generic context"));
+        }
+
+        return DecodeTypeSpecification(reader, handle, context);
+    }
+
+    private ConstraintSignatureType WithShape(
+        ConstraintSignatureType elementType,
+        string rendered,
+        string error) =>
+        Track(new ConstraintSignatureType(
+            rendered,
+            "unsupported",
+            [],
+            [],
+            false,
+            CombineErrors(
+                elementType.Error,
+                !elementType.RequiredModifiers.IsEmpty || !elementType.OptionalModifiers.IsEmpty
+                    ? $"{error}；巢狀 element type modifier 無法以頂層 modifier 清單無損表示"
+                    : error)));
+
+    private ConstraintSignatureType Merge(
+        string type,
+        string kind,
+        IEnumerable<ConstraintSignatureType> parts,
+        bool complete = true,
+        string? error = null)
+    {
+        foreach (var part in parts)
+        {
+            complete &= part.Complete;
+            error = CombineErrors(error, part.Error);
+            if (!part.RequiredModifiers.IsEmpty || !part.OptionalModifiers.IsEmpty)
+            {
+                complete = false;
+                error = CombineErrors(
+                    error,
+                    "巢狀 component modifier 無法以頂層 modifier 清單無損表示");
+            }
+        }
+
+        return Track(new ConstraintSignatureType(
+            type,
+            kind,
+            [],
+            [],
+            complete,
+            error));
+    }
+
+    private ConstraintSignatureType Simple(string type, string kind) =>
+        Track(new ConstraintSignatureType(type, kind, [], [], true, null));
+
+    private static ConstraintSignatureType Invalid(string type, string kind, string error) =>
+        new(type, kind, [], [], false, error);
+
+    private ConstraintSignatureType Track(ConstraintSignatureType value)
+    {
+        var complete = value.Complete;
+        var error = value.Error;
+        if (++_nodes > MaxSignatureNodes)
+        {
+            complete = false;
+            error = CombineErrors(error, $"constraint decoded nodes 超過 {MaxSignatureNodes} 筆限制");
+        }
+
+        var type = value.Type;
+        if (type.Length > MaxRenderedTypeCharacters)
+        {
+            type = string.Concat(type.AsSpan(0, MaxRenderedTypeCharacters - 1), "…");
+            complete = false;
+            error = CombineErrors(
+                error,
+                $"constraint rendered type 超過 {MaxRenderedTypeCharacters} 字元限制");
+        }
+
+        return value with { Type = type, Complete = complete, Error = error };
+    }
+
+    private static bool TryGetTypeDefinitionName(
+        MetadataReader metadata,
+        TypeDefinitionHandle handle,
+        out string type,
+        out string error)
+    {
+        var visited = new HashSet<TypeDefinitionHandle>();
+        var segments = new List<string>();
+        var current = handle;
+        var namespaceName = string.Empty;
+        var characters = 0;
+        while (!current.IsNil)
+        {
+            if (!IsValidTypeDefinitionHandle(metadata, current) ||
+                !visited.Add(current) ||
+                visited.Count > MaxQualifiedNameDepth)
+            {
+                type = "<unsupported>";
+                error = "constraint TypeDef 宣告鏈循環、過深或超出 metadata 範圍";
+                return false;
+            }
+
+            var definition = metadata.GetTypeDefinition(current);
+            if (!TryReadBoundedMetadataName(metadata, definition.Name, out var name))
+            {
+                type = "<unsupported>";
+                error = "constraint TypeDef name 超過 UTF-8 bytes 限制";
+                return false;
+            }
+
+            if (!TryReserveQualifiedNameCharacters(name, segments.Count > 0, ref characters))
+            {
+                type = "<unsupported>";
+                error = "constraint TypeDef qualified name 超過長度限制";
+                return false;
+            }
+
+            segments.Add(name);
+            var declaringType = definition.GetDeclaringType();
+            if (declaringType.IsNil)
+            {
+                if (!TryReadBoundedMetadataName(metadata, definition.Namespace, out namespaceName))
+                {
+                    type = "<unsupported>";
+                    error = "constraint TypeDef namespace 超過 UTF-8 bytes 限制";
+                    return false;
+                }
+
+                break;
+            }
+
+            current = declaringType;
+        }
+
+        if (!string.IsNullOrEmpty(namespaceName) &&
+            !TryReserveQualifiedNameCharacters(namespaceName, segments.Count > 0, ref characters))
+        {
+            type = "<unsupported>";
+            error = "constraint TypeDef qualified name 超過長度限制";
+            return false;
+        }
+
+        segments.Reverse();
+        var nestedName = string.Join('.', segments);
+        type = string.IsNullOrEmpty(namespaceName) ? nestedName : $"{namespaceName}.{nestedName}";
+        error = string.Empty;
+        return true;
+    }
+
+    private static bool TryGetTypeReferenceName(
+        MetadataReader metadata,
+        TypeReferenceHandle handle,
+        out string type,
+        out string error)
+    {
+        var visited = new HashSet<TypeReferenceHandle>();
+        var segments = new List<string>();
+        var current = handle;
+        var namespaceName = string.Empty;
+        var characters = 0;
+        while (!current.IsNil)
+        {
+            if (!IsValidTypeReferenceHandle(metadata, current) ||
+                !visited.Add(current) ||
+                visited.Count > MaxQualifiedNameDepth)
+            {
+                type = "<unsupported>";
+                error = "constraint TypeRef scope 鏈循環、過深或超出 metadata 範圍";
+                return false;
+            }
+
+            var reference = metadata.GetTypeReference(current);
+            if (!TryReadBoundedMetadataName(metadata, reference.Name, out var name))
+            {
+                type = "<unsupported>";
+                error = "constraint TypeRef name 超過 UTF-8 bytes 限制";
+                return false;
+            }
+
+            if (!TryReserveQualifiedNameCharacters(name, segments.Count > 0, ref characters))
+            {
+                type = "<unsupported>";
+                error = "constraint TypeRef qualified name 超過長度限制";
+                return false;
+            }
+
+            segments.Add(name);
+            if (reference.ResolutionScope.Kind != HandleKind.TypeReference)
+            {
+                if (!TryReadBoundedMetadataName(metadata, reference.Namespace, out namespaceName))
+                {
+                    type = "<unsupported>";
+                    error = "constraint TypeRef namespace 超過 UTF-8 bytes 限制";
+                    return false;
+                }
+
+                break;
+            }
+
+            current = (TypeReferenceHandle)reference.ResolutionScope;
+        }
+
+        if (!string.IsNullOrEmpty(namespaceName) &&
+            !TryReserveQualifiedNameCharacters(namespaceName, segments.Count > 0, ref characters))
+        {
+            type = "<unsupported>";
+            error = "constraint TypeRef qualified name 超過長度限制";
+            return false;
+        }
+
+        segments.Reverse();
+        var nestedName = string.Join('.', segments);
+        type = string.IsNullOrEmpty(namespaceName) ? nestedName : $"{namespaceName}.{nestedName}";
+        error = string.Empty;
+        return true;
+    }
+
+    private static bool TryReadBoundedMetadataName(
+        MetadataReader metadata,
+        StringHandle handle,
+        out string value)
+    {
+        if (handle.IsNil)
+        {
+            value = string.Empty;
+            return true;
+        }
+
+        var bytes = metadata.GetBlobReader(handle);
+        if (bytes.Length > MaxMetadataNameUtf8Bytes)
+        {
+            value = string.Empty;
+            return false;
+        }
+
+        value = metadata.GetString(handle);
+        return value.Length <= MaxRenderedTypeCharacters;
+    }
+
+    private static bool TryReserveQualifiedNameCharacters(
+        string segment,
+        bool needsSeparator,
+        ref int characters)
+    {
+        var required = (long)segment.Length + (needsSeparator ? 1 : 0);
+        if (required > MaxRenderedTypeCharacters - characters)
+        {
+            return false;
+        }
+
+        characters += (int)required;
+        return true;
+    }
+
+    private static bool TryRenderGenericInstantiation(
+        string genericType,
+        ImmutableArray<ConstraintSignatureType> typeArguments,
+        out string rendered)
+    {
+        var segments = genericType.Split('.');
+        var builder = new StringBuilder(Math.Min(genericType.Length + 16, MaxRenderedTypeCharacters));
+        var argumentIndex = 0;
+        var foundArity = false;
+        for (var index = 0; index < segments.Length; index++)
+        {
+            if (index > 0 && !TryAppendBounded(builder, "."))
+            {
+                rendered = string.Empty;
+                return false;
+            }
+
+            var segment = segments[index];
+            var backtick = segment.LastIndexOf('`');
+            if (backtick < 0)
+            {
+                if (!TryAppendBounded(builder, segment))
+                {
+                    rendered = string.Empty;
+                    return false;
+                }
+
+                continue;
+            }
+
+            foundArity = true;
+            if (!int.TryParse(
+                    segment.AsSpan(backtick + 1),
+                    NumberStyles.None,
+                    CultureInfo.InvariantCulture,
+                    out var arity) ||
+                arity <= 0 ||
+                arity > typeArguments.Length - argumentIndex)
+            {
+                rendered = string.Empty;
+                return false;
+            }
+
+            if (!TryAppendBounded(builder, segment.AsSpan(0, backtick)) ||
+                !TryAppendBounded(builder, "<"))
+            {
+                rendered = string.Empty;
+                return false;
+            }
+
+            for (var argument = 0; argument < arity; argument++)
+            {
+                if ((argument > 0 && !TryAppendBounded(builder, ", ")) ||
+                    !TryAppendBounded(builder, typeArguments[argumentIndex++].Type))
+                {
+                    rendered = string.Empty;
+                    return false;
+                }
+            }
+
+            if (!TryAppendBounded(builder, ">"))
+            {
+                rendered = string.Empty;
+                return false;
+            }
+        }
+
+        if (!foundArity || argumentIndex != typeArguments.Length)
+        {
+            rendered = string.Empty;
+            return false;
+        }
+
+        rendered = builder.ToString();
+        return true;
+    }
+
+    private static bool TryAppendBounded(StringBuilder builder, string value) =>
+        TryAppendBounded(builder, value.AsSpan());
+
+    private static bool TryAppendBounded(StringBuilder builder, ReadOnlySpan<char> value)
+    {
+        if (value.Length > MaxRenderedTypeCharacters - builder.Length)
+        {
+            return false;
+        }
+
+        builder.Append(value);
+        return true;
+    }
+
+    private static string? CombineErrors(string? left, string? right)
+    {
+        if (string.IsNullOrEmpty(left))
+        {
+            return right;
+        }
+
+        if (string.IsNullOrEmpty(right) || left.Contains(right, StringComparison.Ordinal))
+        {
+            return left;
+        }
+
+        return $"{left}；{right}";
+    }
 }

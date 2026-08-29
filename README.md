@@ -139,13 +139,13 @@ src/ExeBlueprint.Desktop/bin/Release/net10.0/win-x64/publish/ExeBlueprint.exe
 
 ## 報告內容
 
-`blueprint.json` 目前使用 schema `0.8`，是後續專案重建和轉語言要共用的資料格式，內容包含：
+`blueprint.json` 目前使用 schema `0.9`，是後續專案重建和轉語言要共用的資料格式，內容包含：
 
 - 輸入套件摘要
 - 每個檔案的格式、雜湊與來源資訊（provenance；直接輸入、資料夾、ZIP 或 ASAR，以及直接容器、項目和深度）
 - ASAR 封存的 header／節點／packed／unpacked／link 數量，以及完整或不完整狀態與原因
 - PE 與 .NET metadata
-- .NET 型別、欄位、屬性、事件、方法簽章、方法層級呼叫圖與各方法反組譯出的 IL
+- .NET 型別、泛型參數與 constraint metadata、欄位、屬性、事件、方法簽章、方法層級呼叫圖與各方法反組譯出的 IL
 - 語言、框架和工具鏈判斷
 - 套件內與外部相依關係
 - 分析警告
