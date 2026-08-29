@@ -2795,9 +2795,7 @@ internal static class ManagedSymbolReader
             case "sub":
             case "mul":
             case "div":
-            case "div.un":
             case "rem":
-            case "rem.un":
             case "and":
             case "or":
             case "xor":
@@ -2805,6 +2803,10 @@ internal static class ManagedSymbolReader
             case "shr":
             case "shr.un":
                 return TryBinary(context, stack, BinaryOperator(name));
+            case "div.un":
+            case "rem.un":
+                // unsigned 運算語意取決於 IL stack type；未完整追蹤前寧可保留原始 IL。
+                return false;
             case "ceq":
                 return TryBinary(context, stack, "==", "bool");
             case "cgt":
@@ -3585,8 +3587,8 @@ internal static class ManagedSymbolReader
         "add" => "+",
         "sub" => "-",
         "mul" => "*",
-        "div" or "div.un" => "/",
-        "rem" or "rem.un" => "%",
+        "div" => "/",
+        "rem" => "%",
         "and" => "&",
         "or" => "|",
         "xor" => "^",

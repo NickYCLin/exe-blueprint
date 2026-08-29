@@ -240,6 +240,32 @@ public sealed class IlBodyReconstructionTests
     }
 
     [Fact]
+    public void RejectsUnsignedDivisionAndRemainderWithoutTypedLowering()
+    {
+        byte[] unsignedDivision = [0x02, 0x03, 0x5C, 0x2A];
+        byte[] unsignedRemainder = [0x02, 0x03, 0x5E, 0x2A];
+        byte[] signedDivision = [0x02, 0x03, 0x5B, 0x2A];
+
+        Assert.Null(Reconstruct(
+            unsignedDivision,
+            isInstance: false,
+            returnType: "ulong",
+            parameterTypes: ["long", "ulong"]));
+        Assert.Null(Reconstruct(
+            unsignedRemainder,
+            isInstance: false,
+            returnType: "ulong",
+            parameterTypes: ["long", "ulong"]));
+        Assert.Equal(
+            ["return (arg0 / arg1);"],
+            Reconstruct(
+                signedDivision,
+                isInstance: false,
+                returnType: "long",
+                parameterTypes: ["long", "long"]));
+    }
+
+    [Fact]
     public void ReconstructsTerminalSwitchCases()
     {
         // static int M(int n) => n switch { 0 => 10, 1 => 20, 2 => 30, _ => 99 };
