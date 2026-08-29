@@ -1613,6 +1613,13 @@ internal sealed record NullableHashFixture(int? Value);
 
 internal delegate bool GenericPredicateFixture<T>(T value);
 
+internal sealed class GenericInterfaceFixture<T> : IEqualityComparer<T>
+{
+    public bool Equals(T? x, T? y) => EqualityComparer<T>.Default.Equals(x, y);
+
+    public int GetHashCode(T obj) => EqualityComparer<T>.Default.GetHashCode(obj!);
+}
+
 internal sealed class RefLikePropertyFixture
 {
     private readonly byte[] _buffer = [];

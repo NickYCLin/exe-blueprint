@@ -94,6 +94,34 @@ public sealed class CSharpSkeletonGeneratorTests
     }
 
     [Fact]
+    public async Task PreservesGenericInterfacesWithoutEmittingCompilerGeneratedTypeSegments()
+    {
+        var assemblyPath = typeof(GenericInterfaceFixture<>).Assembly.Location;
+        var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
+        var source = Assert.Single(
+            CSharpSkeletonGenerator.Generate(document),
+            file => file.RelativePath.EndsWith("ExeBlueprint.Core.Tests.cs", StringComparison.Ordinal)).Content;
+
+        Assert.Contains(
+            "internal sealed class GenericInterfaceFixture<T> : System.Collections.Generic.IEqualityComparer<T>",
+            source,
+            StringComparison.Ordinal);
+        Assert.True(CSharpSkeletonGenerator.ShouldEmitInterface(
+            "System.Collections.Generic.IEnumerator<!0>"));
+        Assert.True(CSharpSkeletonGenerator.ShouldEmitInterface(
+            "System.Collections.Generic.IEqualityComparer<!0>"));
+        Assert.False(CSharpSkeletonGenerator.ShouldEmitInterface(
+            "System.Collections.Generic.ICollection<!0>"));
+        Assert.False(CSharpSkeletonGenerator.ContainsCompilerGeneratedTypeSegment(
+            "System.Collections.Generic.IEnumerator<!0>"));
+        Assert.True(CSharpSkeletonGenerator.ContainsCompilerGeneratedTypeSegment("Example.<State>d__1"));
+        Assert.True(CSharpSkeletonGenerator.ContainsCompilerGeneratedTypeSegment(
+            "System.Collections.Generic.IEnumerable<Example.<State>d__1>"));
+        Assert.True(CSharpSkeletonGenerator.ContainsCompilerGeneratedTypeSegment(
+            "System.Collections.Generic.IEnumerable<<State>d__1>"));
+    }
+
+    [Fact]
     public async Task EmitsOverrideSealedAndFinalInterfaceMethodModifiers()
     {
         var assemblyPath = typeof(DispatchDerivedFixture).Assembly.Location;

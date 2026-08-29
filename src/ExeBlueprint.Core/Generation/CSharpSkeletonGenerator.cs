@@ -633,7 +633,7 @@ public static class CSharpSkeletonGenerator
         }
 
         bases.AddRange(type.Interfaces
-            .Where(name => !IsCompilerGenerated(name))
+            .Where(ShouldEmitInterface)
             .Select(name => Humanize(name, type.GenericParameters, [])));
 
         var declaration = string.Join(" ", parts);
@@ -807,6 +807,52 @@ public static class CSharpSkeletonGenerator
 
     private static bool IsCompilerGenerated(string name) =>
         name.Contains('<', StringComparison.Ordinal) || name.Contains('>', StringComparison.Ordinal);
+
+    internal static bool ContainsCompilerGeneratedTypeSegment(string name)
+    {
+        for (var index = name.IndexOf('<', StringComparison.Ordinal);
+             index >= 0;
+             index = name.IndexOf('<', index + 1))
+        {
+            if (index == 0 || name[index - 1] is '.' or '<')
+            {
+                return true;
+            }
+
+            var previous = index - 1;
+            while (previous >= 0 && char.IsWhiteSpace(name[previous]))
+            {
+                previous--;
+            }
+
+            if (previous >= 0 && name[previous] == ',')
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    internal static bool ShouldEmitInterface(string name)
+    {
+        if (ContainsCompilerGeneratedTypeSegment(name))
+        {
+            return false;
+        }
+
+        var genericStart = name.IndexOf('<', StringComparison.Ordinal);
+        if (genericStart < 0)
+        {
+            return true;
+        }
+
+        // collection 類泛型介面仍有 explicit accessor／out 參數等契約待補；
+        // 先只輸出目前 member generator 能完整滿足的兩種介面，避免產生不可編譯骨架。
+        return name[..genericStart] is
+            "System.Collections.Generic.IEnumerator" or
+            "System.Collections.Generic.IEqualityComparer";
+    }
 
     private static string Sanitize(string value)
     {
