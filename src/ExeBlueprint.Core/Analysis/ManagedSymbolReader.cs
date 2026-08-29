@@ -4202,8 +4202,43 @@ internal sealed class SignatureTypeNameProvider : ISignatureTypeProvider<string,
 
     public string GetFunctionPointerType(MethodSignature<string> signature) => "method*";
 
-    public string GetGenericInstantiation(string genericType, ImmutableArray<string> typeArguments) =>
-        $"{genericType}<{string.Join(", ", typeArguments)}>";
+    public string GetGenericInstantiation(string genericType, ImmutableArray<string> typeArguments)
+    {
+        var segments = genericType.Split('.');
+        var rendered = new string[segments.Length];
+        var argumentIndex = 0;
+        var foundArity = false;
+        for (var index = 0; index < segments.Length; index++)
+        {
+            var segment = segments[index];
+            var backtick = segment.LastIndexOf('`');
+            if (backtick < 0)
+            {
+                rendered[index] = segment;
+                continue;
+            }
+
+            foundArity = true;
+            if (!int.TryParse(
+                    segment.AsSpan(backtick + 1),
+                    NumberStyles.None,
+                    CultureInfo.InvariantCulture,
+                    out var arity)
+                || arity <= 0
+                || arity > typeArguments.Length - argumentIndex)
+            {
+                return FormatLegacyGenericInstantiation(genericType, typeArguments);
+            }
+
+            rendered[index] =
+                $"{segment[..backtick]}<{string.Join(", ", typeArguments.Skip(argumentIndex).Take(arity))}>";
+            argumentIndex += arity;
+        }
+
+        return foundArity && argumentIndex == typeArguments.Length
+            ? string.Join('.', rendered)
+            : FormatLegacyGenericInstantiation(genericType, typeArguments);
+    }
 
     public string GetGenericMethodParameter(object? genericContext, int index) => $"!!{index}";
 
@@ -4243,7 +4278,7 @@ internal sealed class SignatureTypeNameProvider : ISignatureTypeProvider<string,
     public string GetTypeFromDefinition(MetadataReader reader, TypeDefinitionHandle handle, byte rawTypeKind)
     {
         var definition = reader.GetTypeDefinition(handle);
-        var name = StripArity(reader.GetString(definition.Name));
+        var name = reader.GetString(definition.Name);
         var declaringType = definition.GetDeclaringType();
         if (!declaringType.IsNil)
         {
@@ -4257,7 +4292,7 @@ internal sealed class SignatureTypeNameProvider : ISignatureTypeProvider<string,
     public string GetTypeFromReference(MetadataReader reader, TypeReferenceHandle handle, byte rawTypeKind)
     {
         var reference = reader.GetTypeReference(handle);
-        var name = StripArity(reader.GetString(reference.Name));
+        var name = reader.GetString(reference.Name);
         if (reference.ResolutionScope.Kind == HandleKind.TypeReference)
         {
             return $"{GetTypeFromReference(reader, (TypeReferenceHandle)reference.ResolutionScope, rawTypeKind)}.{name}";
@@ -4266,6 +4301,14 @@ internal sealed class SignatureTypeNameProvider : ISignatureTypeProvider<string,
         var namespaceName = reader.GetString(reference.Namespace);
         return string.IsNullOrEmpty(namespaceName) ? name : $"{namespaceName}.{name}";
     }
+
+    private static string FormatLegacyGenericInstantiation(
+        string genericType,
+        ImmutableArray<string> typeArguments) =>
+        $"{StripQualifiedArity(genericType)}<{string.Join(", ", typeArguments)}>";
+
+    private static string StripQualifiedArity(string name) =>
+        string.Join('.', name.Split('.').Select(StripArity));
 
     private static string StripArity(string name)
     {

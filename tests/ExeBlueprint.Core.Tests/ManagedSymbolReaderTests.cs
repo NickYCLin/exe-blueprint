@@ -400,6 +400,28 @@ public sealed class ManagedSymbolReaderTests
     }
 
     [Fact]
+    public void DistributesGenericArgumentsAcrossNestedTypeSegments()
+    {
+        var provider = SignatureTypeNameProvider.Instance;
+
+        Assert.Equal(
+            "Example.Outer<!0, !1>.Nested",
+            provider.GetGenericInstantiation("Example.Outer`2.Nested", ["!0", "!1"]));
+        Assert.Equal(
+            "Example.Outer<!0>.Child<!!0>.Leaf",
+            provider.GetGenericInstantiation("Example.Outer`1.Child`1.Leaf", ["!0", "!!0"]));
+        Assert.Equal(
+            "Example.Legacy<!0>",
+            provider.GetGenericInstantiation("Example.Legacy", ["!0"]));
+        Assert.Equal(
+            "Example.Outer.Child<!0>",
+            provider.GetGenericInstantiation("Example.Outer`1.Child`1", ["!0"]));
+        Assert.Equal(
+            "Example.Outer.Child<!0, !1, !!0>",
+            provider.GetGenericInstantiation("Example.Outer`1.Child`1", ["!0", "!1", "!!0"]));
+    }
+
+    [Fact]
     public async Task ExtractsRefLikeTypeShape()
     {
         var assemblyPath = typeof(RefStructFixture).Assembly.Location;
@@ -1561,6 +1583,13 @@ internal class NestedTypeFixture<T>
             public int Number { get; init; }
         }
     }
+}
+
+internal sealed class NestedTypeReferenceFixture<T, U>
+{
+    public NestedTypeFixture<T>.Child<U>.Leaf Leaf { get; init; }
+
+    public NestedTypeFixture<T>.Child<U>.State State { get; init; }
 }
 
 internal readonly record struct StructInitializerFixture(string Value);

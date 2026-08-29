@@ -131,6 +131,14 @@ public sealed class CSharpSkeletonGeneratorTests
         Assert.Contains("        public struct Leaf", source);
         Assert.Contains("        public int Number { get; set; }", source);
         Assert.DoesNotContain("        public int Number { get; set; } = default!;", source, StringComparison.Ordinal);
+        Assert.Contains(
+            "public ExeBlueprint.Core.Tests.NestedTypeFixture<T>.Child<U>.Leaf Leaf { get; set; } = default!;",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "public ExeBlueprint.Core.Tests.NestedTypeFixture<T>.Child<U>.State State { get; set; } = default!;",
+            source,
+            StringComparison.Ordinal);
     }
 
     [Fact]
