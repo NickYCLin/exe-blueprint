@@ -239,23 +239,133 @@ public sealed class IlBodyReconstructionTests
             Reconstruct(il, isInstance: false, returnType: "bool", parameterTypes: ["double"]));
     }
 
-    [Fact]
-    public void RejectsUnsignedDivisionAndRemainderWithoutTypedLowering()
+    [Theory]
+    [InlineData("int", "uint")]
+    [InlineData("long", "ulong")]
+    [InlineData("nint", "nuint")]
+    public void LowersUnsignedDivisionAndRemainderForKnownStackFamilies(
+        string signedType,
+        string unsignedType)
     {
         byte[] unsignedDivision = [0x02, 0x03, 0x5C, 0x2A];
         byte[] unsignedRemainder = [0x02, 0x03, 0x5E, 0x2A];
-        byte[] signedDivision = [0x02, 0x03, 0x5B, 0x2A];
+
+        Assert.Equal(
+            [$"return (unchecked(({unsignedType})arg0) / unchecked(({unsignedType})arg1));"],
+            Reconstruct(
+                unsignedDivision,
+                isInstance: false,
+                returnType: unsignedType,
+                parameterTypes: [signedType, unsignedType]));
+        Assert.Equal(
+            [$"return (unchecked(({unsignedType})arg0) % unchecked(({unsignedType})arg1));"],
+            Reconstruct(
+                unsignedRemainder,
+                isInstance: false,
+                returnType: unsignedType,
+                parameterTypes: [signedType, unsignedType]));
+    }
+
+    [Theory]
+    [InlineData("int", "uint")]
+    [InlineData("long", "ulong")]
+    [InlineData("nint", "nuint")]
+    public void CastsUnsignedResultsBackToSignedReturnAndLocalTypes(
+        string signedType,
+        string unsignedType)
+    {
+        byte[] directReturn = [0x02, 0x03, 0x5C, 0x2A];
+        byte[] localRoundTrip = [0x02, 0x03, 0x5E, 0x0A, 0x06, 0x2A];
+        byte[] argumentRoundTrip = [0x02, 0x03, 0x5C, 0x10, 0x00, 0x02, 0x2A];
+        var division = $"(unchecked(({unsignedType})arg0) / unchecked(({unsignedType})arg1))";
+        var remainder = $"(unchecked(({unsignedType})arg0) % unchecked(({unsignedType})arg1))";
+
+        Assert.Equal(
+            [$"return unchecked(({signedType}){division});"],
+            Reconstruct(
+                directReturn,
+                isInstance: false,
+                returnType: signedType,
+                parameterTypes: [signedType, unsignedType]));
+        Assert.Equal(
+            [
+                $"{signedType} v0 = unchecked(({signedType}){remainder});",
+                "return v0;"
+            ],
+            Reconstruct(
+                localRoundTrip,
+                isInstance: false,
+                returnType: signedType,
+                localTypes: [signedType],
+                parameterTypes: [signedType, unsignedType]));
+        Assert.Equal(
+            [
+                $"arg0 = unchecked(({signedType}){division});",
+                "return arg0;"
+            ],
+            Reconstruct(
+                argumentRoundTrip,
+                isInstance: false,
+                returnType: signedType,
+                parameterTypes: [signedType, unsignedType]));
+    }
+
+    [Fact]
+    public void DoesNotApplyUnsignedOperationBoundaryRulesToOrdinaryUnsignedExpressions()
+    {
+        byte[] localRoundTrip = [0x02, 0x0A, 0x06, 0x2A];
+
+        Assert.Equal(
+            ["var v0 = arg0;", "return v0;"],
+            Reconstruct(
+                localRoundTrip,
+                isInstance: false,
+                returnType: "uint",
+                parameterTypes: ["uint"]));
+    }
+
+    [Fact]
+    public void RejectsUnsignedDivisionAndRemainderForUnknownOrUnsafeTypes()
+    {
+        byte[] unknownLocal = [0x02, 0x03, 0x5C, 0x0A, 0x06, 0x2A];
+        byte[][] operations =
+        [
+            [0x02, 0x03, 0x5C, 0x2A],
+            [0x02, 0x03, 0x5E, 0x2A]
+        ];
+
+        foreach (var il in operations)
+        {
+            Assert.Null(Reconstruct(il, isInstance: false, returnType: "uint"));
+            Assert.Null(Reconstruct(
+                il,
+                isInstance: false,
+                returnType: "ulong",
+                parameterTypes: ["int", "ulong"]));
+            Assert.Null(Reconstruct(
+                il,
+                isInstance: false,
+                returnType: "float",
+                parameterTypes: ["float", "float"]));
+            Assert.Null(Reconstruct(
+                il,
+                isInstance: false,
+                returnType: "double",
+                parameterTypes: ["double", "double"]));
+        }
 
         Assert.Null(Reconstruct(
-            unsignedDivision,
+            unknownLocal,
             isInstance: false,
-            returnType: "ulong",
-            parameterTypes: ["long", "ulong"]));
+            returnType: "uint",
+            parameterTypes: ["int", "uint"]));
         Assert.Null(Reconstruct(
-            unsignedRemainder,
+            operations[0],
             isInstance: false,
-            returnType: "ulong",
-            parameterTypes: ["long", "ulong"]));
+            returnType: "long",
+            parameterTypes: ["int", "uint"]));
+
+        byte[] signedDivision = [0x02, 0x03, 0x5B, 0x2A];
         Assert.Equal(
             ["return (arg0 / arg1);"],
             Reconstruct(

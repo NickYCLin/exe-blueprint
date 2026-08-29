@@ -89,6 +89,29 @@ public sealed class ManagedSymbolReaderTests
     }
 
     [Fact]
+    public async Task ReconstructsCompilerGeneratedUnsignedDivisionAndFieldStore()
+    {
+        var assemblyPath = typeof(UnsignedArithmeticFixture).Assembly.Location;
+        var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
+        var fixture = Assert.Single(
+            document.Files[0].Code!.Types,
+            type => type.FullName == "ExeBlueprint.Core.Tests.UnsignedArithmeticFixture");
+
+        Assert.Equal(
+            ["return (unchecked((uint)left) / unchecked((uint)right));"],
+            Assert.Single(fixture.Methods, method => method.Name == nameof(UnsignedArithmeticFixture.Divide)).Body);
+        Assert.Equal(
+            ["return unchecked((int)(unchecked((uint)left) / unchecked((uint)right)));"],
+            Assert.Single(fixture.Methods, method => method.Name == nameof(UnsignedArithmeticFixture.DivideSigned)).Body);
+        Assert.Equal(
+            [
+                "ExeBlueprint.Core.Tests.UnsignedArithmeticFixture.Stored = unchecked((int)(unchecked((uint)left) % unchecked((uint)right)));",
+                "return ExeBlueprint.Core.Tests.UnsignedArithmeticFixture.Stored;"
+            ],
+            Assert.Single(fixture.Methods, method => method.Name == nameof(UnsignedArithmeticFixture.StoreSignedField)).Body);
+    }
+
+    [Fact]
     public async Task ReadsTopLevelNullableMethodAnnotations()
     {
         var assemblyPath = typeof(BlueprintAnalyzer).Assembly.Location;
@@ -2448,4 +2471,19 @@ internal sealed class DispatchImplementationFixture : DispatchContractFixture
 internal static class NumericArgumentFixture
 {
     public static int Log2(int value) => System.Numerics.BitOperations.Log2((uint)value);
+}
+
+internal static class UnsignedArithmeticFixture
+{
+    public static int Stored;
+
+    public static uint Divide(uint left, uint right) => left / right;
+
+    public static int DivideSigned(int left, int right) => unchecked((int)((uint)left / (uint)right));
+
+    public static int StoreSignedField(int left, int right)
+    {
+        Stored = unchecked((int)((uint)left % (uint)right));
+        return Stored;
+    }
 }

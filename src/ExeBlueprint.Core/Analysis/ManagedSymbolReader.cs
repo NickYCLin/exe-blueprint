@@ -969,6 +969,7 @@ internal static class ManagedSymbolReader
         IReadOnlyList<ExceptionRegionInfo> ExceptionRegions,
         IReadOnlyDictionary<int, string> LocalNames,
         Dictionary<string, string> ExpressionTypes,
+        HashSet<string> UnsignedIntegralExpressions,
         ExceptionLeaveRedirect? LeaveRedirect,
         int CatchDepth);
 
@@ -1056,6 +1057,7 @@ internal static class ManagedSymbolReader
             exceptionRegions,
             new Dictionary<int, string>(),
             new Dictionary<string, string>(StringComparer.Ordinal),
+            new HashSet<string>(StringComparer.Ordinal),
             LeaveRedirect: null,
             CatchDepth: 0);
         return TryStructure(context, [.. instructions], offsetToIndex, 0, instructions.Count, new HashSet<int>(), 0);
@@ -2680,12 +2682,14 @@ internal static class ManagedSymbolReader
                 PushArgument(context, stack, BinaryPrimitives.ReadUInt16LittleEndian(il.AsSpan(offset, 2)));
                 return true;
             case "starg.s":
-                if (!TryPop(stack, out var stargValue))
+                var argumentSlot = il[offset];
+                if (!TryPop(stack, out var stargValue)
+                    || !TryRenderTargetExpression(context, stargValue, ArgType(context, argumentSlot), out stargValue))
                 {
                     return false;
                 }
 
-                statements.Add($"{ArgName(context, il[offset])} = {stargValue};");
+                statements.Add($"{ArgName(context, argumentSlot)} = {stargValue};");
                 return true;
 
             case "ldnull":
@@ -2774,7 +2778,15 @@ internal static class ManagedSymbolReader
                 return true;
             case "stsfld":
                 var storeStatic = ResolveField(metadata, BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)));
-                if (storeStatic is null || IsGeneratedName(storeStatic.Value.DeclaringType) || IsGeneratedName(storeStatic.Value.Name) || !TryPop(stack, out var storeStaticValue))
+                if (storeStatic is null
+                    || IsGeneratedName(storeStatic.Value.DeclaringType)
+                    || IsGeneratedName(storeStatic.Value.Name)
+                    || !TryPop(stack, out var storeStaticValue)
+                    || !TryRenderTargetExpression(
+                        context,
+                        storeStaticValue,
+                        storeStatic.Value.Type,
+                        out storeStaticValue))
                 {
                     return false;
                 }
@@ -2783,7 +2795,15 @@ internal static class ManagedSymbolReader
                 return true;
             case "stfld":
                 var storeField = ResolveField(metadata, BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)));
-                if (storeField is null || IsGeneratedName(storeField.Value.Name) || !TryPop(stack, out var storeFieldValue) || !TryPop(stack, out var storeFieldTarget))
+                if (storeField is null
+                    || IsGeneratedName(storeField.Value.Name)
+                    || !TryPop(stack, out var storeFieldValue)
+                    || !TryPop(stack, out var storeFieldTarget)
+                    || !TryRenderTargetExpression(
+                        context,
+                        storeFieldValue,
+                        storeField.Value.Type,
+                        out storeFieldValue))
                 {
                     return false;
                 }
@@ -2805,8 +2825,10 @@ internal static class ManagedSymbolReader
                 return TryBinary(context, stack, BinaryOperator(name));
             case "div.un":
             case "rem.un":
-                // unsigned 運算語意取決於 IL stack type；未完整追蹤前寧可保留原始 IL。
-                return false;
+                return TryUnsignedIntegralBinary(
+                    context,
+                    stack,
+                    name == "div.un" ? "/" : "%");
             case "ceq":
                 return TryBinary(context, stack, "==", "bool");
             case "cgt":
@@ -2909,6 +2931,10 @@ internal static class ManagedSymbolReader
                     {
                         value = $"unchecked(({context.ReturnType}){value})";
                     }
+                    else if (!TryRenderTargetExpression(context, value, context.ReturnType, out value))
+                    {
+                        return false;
+                    }
 
                     statements.Add($"return {value};");
                 }
@@ -2974,6 +3000,49 @@ internal static class ManagedSymbolReader
         }
 
         PushExpression(context, stack, $"({left} {op} {right})", resultType);
+        return true;
+    }
+
+    private static bool TryUnsignedIntegralBinary(
+        ReconContext context,
+        Stack<string> stack,
+        string op)
+    {
+        if (stack.Count < 2)
+        {
+            return false;
+        }
+
+        var right = stack.Pop();
+        var left = stack.Pop();
+        if (!context.ExpressionTypes.TryGetValue(left, out var leftType)
+            || !context.ExpressionTypes.TryGetValue(right, out var rightType))
+        {
+            return false;
+        }
+
+        var stackFamily = IntegralStackFamily(leftType);
+        if (stackFamily < 0 || stackFamily != IntegralStackFamily(rightType))
+        {
+            return false;
+        }
+
+        var unsignedType = stackFamily switch
+        {
+            0 => "uint",
+            1 => "ulong",
+            2 => "nuint",
+            _ => null
+        };
+        if (unsignedType is null)
+        {
+            return false;
+        }
+
+        var expression =
+            $"(unchecked(({unsignedType}){left}) {op} unchecked(({unsignedType}){right}))";
+        PushExpression(context, stack, expression, unsignedType);
+        context.UnsignedIntegralExpressions.Add(expression);
         return true;
     }
 
@@ -3081,6 +3150,14 @@ internal static class ManagedSymbolReader
     private static bool TryStoreLocal(ReconContext context, Stack<string> stack, List<string> statements, HashSet<int> declaredLocals, int index)
     {
         if (!TryPop(stack, out var value))
+        {
+            return false;
+        }
+
+        var localType = index >= 0 && index < context.LocalTypes.Count
+            ? context.LocalTypes[index]
+            : null;
+        if (!TryRenderTargetExpression(context, value, localType, out value))
         {
             return false;
         }
@@ -3418,6 +3495,36 @@ internal static class ManagedSymbolReader
     {
         var leftFamily = IntegralStackFamily(left);
         return leftFamily >= 0 && leftFamily == IntegralStackFamily(right);
+    }
+
+    private static bool TryRenderTargetExpression(
+        ReconContext context,
+        string expression,
+        string? targetType,
+        out string rendered)
+    {
+        rendered = expression;
+        if (!context.ExpressionTypes.TryGetValue(expression, out var sourceType)
+            || sourceType == targetType
+            || !context.UnsignedIntegralExpressions.Contains(expression))
+        {
+            return true;
+        }
+
+        // div.un／rem.un 會把結果標成該 stack family 的無號型別。若接收端是同 family
+        // 的 signed／窄型別，必須明確轉回；缺少或跨 family 的目標則不能猜測。
+        if (sourceType is not ("uint" or "ulong" or "nuint"))
+        {
+            return true;
+        }
+
+        if (targetType is null || !IsSameIntegralStackFamily(sourceType, targetType))
+        {
+            return false;
+        }
+
+        rendered = $"unchecked(({targetType}){expression})";
+        return true;
     }
 
     private static int IntegralStackFamily(string type) => type switch
