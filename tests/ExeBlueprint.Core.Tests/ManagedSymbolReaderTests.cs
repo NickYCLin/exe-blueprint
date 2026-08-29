@@ -1,4 +1,5 @@
 using ExeBlueprint.Analysis;
+using ExeBlueprint.Models;
 using ExeBlueprint.Reporting;
 using System.Text.Json;
 
@@ -776,7 +777,7 @@ public sealed class ManagedSymbolReaderTests
 
         Assert.Null(resource.EntriesError);
         Assert.False(resource.EntriesTruncated);
-        Assert.Equal(2, resource.Entries.Count);
+        Assert.Equal(3, resource.Entries.Count);
         AssertResourceEntry(resource, "Greeting", "String", "哈囉 ExeBlueprint");
 
         var bamlEntry = Assert.Single(resource.Entries, entry => entry.Name == "mainwindow.baml");
@@ -854,6 +855,12 @@ public sealed class ManagedSymbolReaderTests
             bamlEntry.Baml.PropertyValues,
             item => item.PropertyName == "Height" && item.Value == "450");
 
+        var deferredEntry = Assert.Single(resource.Entries, entry => entry.Name == "deferred.baml");
+        Assert.Equal("parsed", deferredEntry.Baml!.Status);
+        Assert.True(deferredEntry.Baml.DeferredResourcesComplete);
+        Assert.Equal(2, deferredEntry.Baml.DeferredResourceCount);
+        Assert.Equal(["primary", "Grid"], deferredEntry.Baml.DeferredResources.Select(item => item.Key));
+
         await using var temp = new TemporaryDirectory();
         var outputPath = Path.Combine(temp.Path, "blueprint.json");
         await BlueprintJsonWriter.WriteAsync(document, outputPath);
@@ -864,7 +871,7 @@ public sealed class ManagedSymbolReaderTests
             .GetProperty("resources")
             .EnumerateArray()
             .Single(item => item.GetProperty("name").GetString() == resource.Name);
-        Assert.Equal(2, resourceJson.GetProperty("entries").GetArrayLength());
+        Assert.Equal(3, resourceJson.GetProperty("entries").GetArrayLength());
         Assert.False(resourceJson.GetProperty("entriesTruncated").GetBoolean());
         var bamlJson = resourceJson
             .GetProperty("entries")
@@ -886,6 +893,11 @@ public sealed class ManagedSymbolReaderTests
         Assert.Equal(3, bamlJson.GetProperty("propertyValueCount").GetInt32());
         Assert.Equal(3, bamlJson.GetProperty("propertyValues").GetArrayLength());
         Assert.False(bamlJson.GetProperty("propertyValuesTruncated").GetBoolean());
+        Assert.Equal(0, bamlJson.GetProperty("deferredResourceCount").GetInt32());
+        Assert.Equal(0, bamlJson.GetProperty("deferredResources").GetArrayLength());
+        Assert.False(bamlJson.GetProperty("deferredResourcesTruncated").GetBoolean());
+        Assert.True(bamlJson.GetProperty("deferredResourcesComplete").GetBoolean());
+        Assert.False(bamlJson.TryGetProperty("deferredResourcesError", out _));
         Assert.Equal(
             "Grid",
             bamlJson.GetProperty("elementTypes")
@@ -893,6 +905,17 @@ public sealed class ManagedSymbolReaderTests
                 .Single(item => item.GetProperty("id").GetInt32() == -254)
                 .GetProperty("name")
                 .GetString());
+        var deferredJson = resourceJson
+            .GetProperty("entries")
+            .EnumerateArray()
+            .Single(item => item.GetProperty("name").GetString() == "deferred.baml")
+            .GetProperty("baml");
+        Assert.Equal(2, deferredJson.GetProperty("deferredResourceCount").GetInt32());
+        Assert.Equal(2, deferredJson.GetProperty("deferredResources").GetArrayLength());
+        Assert.True(deferredJson.GetProperty("deferredResourcesComplete").GetBoolean());
+        Assert.Equal(
+            "accent",
+            deferredJson.GetProperty("propertyValues")[0].GetProperty("value").GetString());
     }
 
     [Fact]
@@ -1355,10 +1378,205 @@ public sealed class ManagedSymbolReaderTests
         Assert.Contains(summary.PropertyValues, value =>
             value.Kind == "custom-binary" && value.RelatedType == "BooleanConverter" && value.DataSize == 1);
         Assert.Contains(summary.PropertyValues, value =>
-            value.Kind == "static-resource" && value.ReferenceId == 3 && value.Value is null);
+            value.Kind == "static-resource"
+            && value.ReferenceId == 3
+            && value.Value is null
+            && value.DeferredResourceId is null);
         var longValue = Assert.Single(summary.PropertyValues, value => value.Value?.Length == 4_096);
         Assert.True(longValue.ValueTruncated);
         Assert.False(summary.PropertyValuesTruncated);
+    }
+
+    [Fact]
+    public void LinksSimpleDeferredBamlKeysToKeyLocalStaticResources()
+    {
+        var summary = BamlSummaryReader.Read(Convert.FromBase64String(DeferredBamlFixtureBase64));
+
+        Assert.Equal("parsed", summary.Status);
+        Assert.Equal(2, summary.DeferredResourceCount);
+        Assert.Equal(2, summary.DeferredResources.Count);
+        Assert.False(summary.DeferredResourcesTruncated);
+        Assert.True(summary.DeferredResourcesComplete);
+        Assert.Null(summary.DeferredResourcesError);
+
+        var stringKey = Assert.Single(summary.DeferredResources, resource => resource.Id == 0);
+        Assert.Equal("string", stringKey.KeyKind);
+        Assert.Equal(10, stringKey.KeyId);
+        Assert.Equal("primary", stringKey.Key);
+        Assert.Equal(60, stringKey.KeyRecordOffset);
+        Assert.Equal(0, stringKey.ValuePosition);
+        Assert.Equal(88, stringKey.ValueStartOffset);
+        Assert.Equal(98, stringKey.ValueEndOffset);
+        Assert.False(stringKey.Shared);
+        Assert.False(stringKey.SharedSet);
+        Assert.Equal(1, stringKey.ElementId);
+        Assert.Equal(-1, stringKey.ElementTypeId);
+        Assert.Equal("AccessText", stringKey.ElementType);
+        Assert.False(stringKey.StaticResourcesTruncated);
+        var accent = Assert.Single(stringKey.StaticResources);
+        Assert.Equal(0, accent.Id);
+        Assert.Equal("string-reference", accent.Kind);
+        Assert.Equal(11, accent.ReferenceId);
+        Assert.Equal("accent", accent.Value);
+
+        var typeKey = Assert.Single(summary.DeferredResources, resource => resource.Id == 1);
+        Assert.Equal("type", typeKey.KeyKind);
+        Assert.Equal(-254, typeKey.KeyId);
+        Assert.Equal("Grid", typeKey.Key);
+        Assert.Equal(74, typeKey.KeyRecordOffset);
+        Assert.Equal(10, typeKey.ValuePosition);
+        Assert.Equal(98, typeKey.ValueStartOffset);
+        Assert.Equal(108, typeKey.ValueEndOffset);
+        Assert.True(typeKey.Shared);
+        Assert.True(typeKey.SharedSet);
+        Assert.Equal(2, typeKey.ElementId);
+        Assert.Equal(-254, typeKey.ElementTypeId);
+        Assert.Equal("Grid", typeKey.ElementType);
+        Assert.False(typeKey.StaticResourcesTruncated);
+        var accessText = Assert.Single(typeKey.StaticResources);
+        Assert.Equal(0, accessText.Id);
+        Assert.Equal("type-reference", accessText.Kind);
+        Assert.Equal(-1, accessText.ReferenceId);
+        Assert.Equal("AccessText", accessText.Value);
+
+        var width = Assert.Single(summary.PropertyValues, value => value.PropertyName == "Width");
+        Assert.Equal("static-resource", width.Kind);
+        Assert.Equal(0, width.ReferenceId);
+        Assert.Equal("accent", width.Value);
+        Assert.Equal(stringKey.Id, width.DeferredResourceId);
+        Assert.Equal(stringKey.ElementId, width.ElementId);
+
+        var content = Assert.Single(summary.PropertyValues, value => value.PropertyName == "Content");
+        Assert.Equal("static-resource", content.Kind);
+        Assert.Equal(0, content.ReferenceId);
+        Assert.Equal("AccessText", content.Value);
+        Assert.Equal(typeKey.Id, content.DeferredResourceId);
+        Assert.Equal(typeKey.ElementId, content.ElementId);
+    }
+
+    [Fact]
+    public void RejectsUnsafeDeferredBamlContentAndValueOffsets()
+    {
+        var contentOutsideStream = ReadMutatedDeferredBaml(bytes => bytes[56] = 64);
+        AssertIncompleteDeferredResources(contentOutsideStream);
+        Assert.All(
+            contentOutsideStream.PropertyValues.Where(value => value.Kind == "static-resource"),
+            value =>
+            {
+                Assert.Null(value.Value);
+                Assert.Null(value.DeferredResourceId);
+            });
+
+        var contentEndsAtValueElement = ReadMutatedDeferredBaml(bytes => bytes[56] = 37);
+        AssertIncompleteDeferredResources(contentEndsAtValueElement);
+        Assert.Contains("owner", contentEndsAtValueElement.DeferredResourcesError);
+
+        var contentIncludesOwnerEnd = ReadMutatedDeferredBaml(bytes => bytes[56] = 49);
+        AssertIncompleteDeferredResources(contentIncludesOwnerEnd);
+
+        var valueInsideRecord = ReadMutatedDeferredBaml(bytes => bytes[64] = 1);
+        AssertIncompleteDeferredResources(valueInsideRecord);
+        var nonBoundaryWidth = Assert.Single(
+            valueInsideRecord.PropertyValues,
+            value => value.PropertyName == "Width");
+        Assert.Null(nonBoundaryWidth.Value);
+        Assert.Null(nonBoundaryWidth.DeferredResourceId);
+
+        var decreasingPositions = ReadMutatedDeferredBaml(bytes =>
+        {
+            bytes[64] = 10;
+            bytes[78] = 0;
+        });
+        AssertIncompleteDeferredResources(decreasingPositions);
+        Assert.All(
+            decreasingPositions.PropertyValues.Where(value => value.Kind == "static-resource"),
+            value =>
+            {
+                Assert.Null(value.Value);
+                Assert.Null(value.DeferredResourceId);
+            });
+    }
+
+    [Fact]
+    public void RejectsDeferredKeyThatTargetsNestedValueElement()
+    {
+        var summary = BamlSummaryReader.Read(CreateDeferredBamlWithNestedValueTarget());
+
+        Assert.Equal("parsed", summary.Status);
+        Assert.Equal(2, summary.DeferredResourceCount);
+        Assert.Empty(summary.DeferredResources);
+        AssertIncompleteDeferredResources(summary);
+        Assert.Contains("直接子", summary.DeferredResourcesError);
+        Assert.All(
+            summary.PropertyValues.Where(value => value.Kind == "static-resource"),
+            value =>
+            {
+                Assert.Null(value.Value);
+                Assert.Null(value.DeferredResourceId);
+            });
+    }
+
+    [Fact]
+    public void RejectsOutOfRangeKeyLocalStaticResourceIdWithoutGlobalFallback()
+    {
+        var summary = ReadMutatedDeferredBaml(bytes => bytes[95] = 1);
+
+        AssertIncompleteDeferredResources(summary);
+        var width = Assert.Single(summary.PropertyValues, value => value.PropertyName == "Width");
+        Assert.Equal(1, width.ReferenceId);
+        Assert.Equal(0, width.DeferredResourceId);
+        Assert.Null(width.Value);
+        Assert.DoesNotContain(
+            summary.PropertyValues,
+            value => value.PropertyName == "Width" && value.Value is "accent" or "AccessText");
+    }
+
+    [Fact]
+    public void ResolvesStaticMemberOptimizedResourceAndRejectsUnsupportedDeferredHeaders()
+    {
+        var staticMember = ReadMutatedDeferredBaml(bytes => bytes[85] = 2);
+        Assert.True(staticMember.DeferredResourcesComplete);
+        var typeKey = Assert.Single(staticMember.DeferredResources, resource => resource.KeyKind == "type");
+        var member = Assert.Single(typeKey.StaticResources);
+        Assert.Equal("property-reference", member.Kind);
+        Assert.Equal("AccessText.Text", member.Value);
+        Assert.Contains(
+            staticMember.PropertyValues,
+            value => value.DeferredResourceId == typeKey.Id && value.Value == "AccessText.Text");
+
+        var complexKey = ReadMutatedDeferredBaml(bytes => bytes[60] = 40);
+        AssertIncompleteDeferredResources(complexKey);
+        Assert.Contains("KeyElementStart", complexKey.DeferredResourcesError);
+
+        var verboseStaticResource = ReadMutatedDeferredBaml(bytes => bytes[70] = 48);
+        AssertIncompleteDeferredResources(verboseStaticResource);
+        Assert.Contains("StaticResourceStart", verboseStaticResource.DeferredResourcesError);
+
+        var keylessContent = ReadMutatedDeferredBaml(bytes => bytes[60] = 51);
+        AssertIncompleteDeferredResources(keylessContent);
+        Assert.Contains("沒有可辨識的 key", keylessContent.DeferredResourcesError);
+
+        var nestedStaticResource = BamlSummaryReader.Read(CreateDeferredBamlWithNestedStaticResourceId());
+        AssertIncompleteDeferredResources(nestedStaticResource);
+        Assert.Contains("nested indirection", nestedStaticResource.DeferredResourcesError);
+    }
+
+    [Fact]
+    public void BoundsDeferredBamlKeysAndStaticResourceTables()
+    {
+        var manyKeys = BamlSummaryReader.Read(CreateLargeDeferredBaml(keyCount: 2_001, staticResourceCount: 0));
+        Assert.Equal(2_001, manyKeys.DeferredResourceCount);
+        Assert.Empty(manyKeys.DeferredResources);
+        Assert.True(manyKeys.DeferredResourcesTruncated);
+        AssertIncompleteDeferredResources(manyKeys);
+
+        var manyStaticResources = BamlSummaryReader.Read(
+            CreateLargeDeferredBaml(keyCount: 1, staticResourceCount: 2_001));
+        var resource = Assert.Single(manyStaticResources.DeferredResources);
+        Assert.Equal(2_000, resource.StaticResources.Count);
+        Assert.True(resource.StaticResourcesTruncated);
+        Assert.True(manyStaticResources.DeferredResourcesTruncated);
+        AssertIncompleteDeferredResources(manyStaticResources);
     }
 
     [Fact]
@@ -1367,7 +1585,7 @@ public sealed class ManagedSymbolReaderTests
         var assemblyPath = typeof(BlueprintAnalyzer).Assembly.Location;
         var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
 
-        Assert.Equal("0.5", document.SchemaVersion);
+        Assert.Equal("0.6", document.SchemaVersion);
         Assert.True(document.Summary.TypeCount > 0);
         Assert.True(document.Summary.MethodCount > 0);
         Assert.Equal(document.Files[0].Code!.TypeCount, document.Summary.TypeCount);
@@ -1441,6 +1659,180 @@ public sealed class ManagedSymbolReaderTests
         }
 
         return stream.ToArray();
+    }
+
+    private const string DeferredBamlFixtureBase64 =
+        "DAAAAE0AUwBCAEEATQBMAAAAYAAAAGAAAABgACALCgAHcHJpbWFyeSAKCwAGYWNjZW50AwL/ACUwAAAAJgkKAAAAAAAAADcACwAnAv8ACgAAAAEBNwH//wP//wA4x/8AAAQDAv8AOPL/AAAEBAI=";
+
+    private static BamlSummaryModel ReadMutatedDeferredBaml(Action<byte[]> mutate)
+    {
+        var data = Convert.FromBase64String(DeferredBamlFixtureBase64);
+        mutate(data);
+        return BamlSummaryReader.Read(data);
+    }
+
+    private static byte[] CreateLargeDeferredBaml(int keyCount, int staticResourceCount)
+    {
+        using var stream = new MemoryStream();
+        stream.Write(CreateBamlHeader());
+        using var writer = new BinaryWriter(stream, System.Text.Encoding.UTF8, leaveOpen: true);
+        writer.Write((byte)3);
+        writer.Write((short)-254);
+        writer.Write((byte)0);
+        writer.Write((byte)37);
+        var contentSizeOffset = stream.Position;
+        writer.Write(0);
+        var contentStart = stream.Position;
+
+        for (var index = 0; index < keyCount; index++)
+        {
+            WriteBamlVariableRecord(writer, 38, payload =>
+            {
+                payload.Write((short)10);
+                payload.Write(index * 5);
+                payload.Write(false);
+                payload.Write(false);
+            });
+
+            if (index == 0)
+            {
+                for (var staticIndex = 0; staticIndex < staticResourceCount; staticIndex++)
+                {
+                    writer.Write((byte)55);
+                    writer.Write((byte)0);
+                    writer.Write((short)10);
+                }
+            }
+        }
+
+        for (var index = 0; index < keyCount; index++)
+        {
+            writer.Write((byte)3);
+            writer.Write((short)-1);
+            writer.Write((byte)0);
+            writer.Write((byte)4);
+        }
+
+        var contentEnd = stream.Position;
+        stream.Position = contentSizeOffset;
+        writer.Write(checked((int)(contentEnd - contentStart)));
+        stream.Position = contentEnd;
+        writer.Write((byte)4);
+        writer.Write((byte)2);
+        return stream.ToArray();
+    }
+
+    private static byte[] CreateDeferredBamlWithNestedStaticResourceId()
+    {
+        using var stream = new MemoryStream();
+        stream.Write(CreateBamlHeader());
+        using var writer = new BinaryWriter(stream, System.Text.Encoding.UTF8, leaveOpen: true);
+        writer.Write((byte)3);
+        writer.Write((short)-254);
+        writer.Write((byte)0);
+        writer.Write((byte)37);
+        var contentSizeOffset = stream.Position;
+        writer.Write(0);
+        var contentStart = stream.Position;
+        WriteBamlVariableRecord(writer, 38, payload =>
+        {
+            payload.Write((short)10);
+            payload.Write(0);
+            payload.Write(false);
+            payload.Write(false);
+        });
+        writer.Write((byte)55);
+        writer.Write((byte)0);
+        writer.Write((short)10);
+        writer.Write((byte)3);
+        writer.Write((short)-1);
+        writer.Write((byte)0);
+        writer.Write((byte)50);
+        writer.Write((short)0);
+        writer.Write((byte)4);
+
+        var contentEnd = stream.Position;
+        stream.Position = contentSizeOffset;
+        writer.Write(checked((int)(contentEnd - contentStart)));
+        stream.Position = contentEnd;
+        writer.Write((byte)4);
+        writer.Write((byte)2);
+        return stream.ToArray();
+    }
+
+    private static byte[] CreateDeferredBamlWithNestedValueTarget()
+    {
+        using var stream = new MemoryStream();
+        stream.Write(CreateBamlHeader());
+        using var writer = new BinaryWriter(stream, System.Text.Encoding.UTF8, leaveOpen: true);
+        writer.Write((byte)3);
+        writer.Write((short)-254);
+        writer.Write((byte)0);
+        writer.Write((byte)37);
+        var contentSizeOffset = stream.Position;
+        writer.Write(0);
+        var contentStart = stream.Position;
+
+        WriteBamlVariableRecord(writer, 38, payload =>
+        {
+            payload.Write((short)10);
+            payload.Write(0);
+            payload.Write(false);
+            payload.Write(false);
+        });
+        writer.Write((byte)55);
+        writer.Write((byte)0);
+        writer.Write((short)10);
+
+        var secondValuePositionOffset = stream.Position + 4;
+        WriteBamlVariableRecord(writer, 38, payload =>
+        {
+            payload.Write((short)11);
+            payload.Write(0);
+            payload.Write(false);
+            payload.Write(false);
+        });
+        writer.Write((byte)55);
+        writer.Write((byte)0);
+        writer.Write((short)11);
+
+        var valuesStart = stream.Position;
+        writer.Write((byte)3);
+        writer.Write((short)-1);
+        writer.Write((byte)0);
+        var nestedValueStart = stream.Position;
+        writer.Write((byte)3);
+        writer.Write((short)-1);
+        writer.Write((byte)0);
+        writer.Write((byte)56);
+        writer.Write((short)-57);
+        writer.Write((short)0);
+        writer.Write((byte)4);
+        writer.Write((byte)4);
+
+        writer.Write((byte)3);
+        writer.Write((short)-1);
+        writer.Write((byte)0);
+        writer.Write((byte)56);
+        writer.Write((short)-57);
+        writer.Write((short)0);
+        writer.Write((byte)4);
+
+        var contentEnd = stream.Position;
+        stream.Position = secondValuePositionOffset;
+        writer.Write(checked((int)(nestedValueStart - valuesStart)));
+        stream.Position = contentSizeOffset;
+        writer.Write(checked((int)(contentEnd - contentStart)));
+        stream.Position = contentEnd;
+        writer.Write((byte)4);
+        writer.Write((byte)2);
+        return stream.ToArray();
+    }
+
+    private static void AssertIncompleteDeferredResources(BamlSummaryModel summary)
+    {
+        Assert.False(summary.DeferredResourcesComplete);
+        Assert.NotNull(summary.DeferredResourcesError);
     }
 
     private static short FindKnownWpfTypeId(string name)

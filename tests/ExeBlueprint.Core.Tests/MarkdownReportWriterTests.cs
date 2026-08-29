@@ -52,5 +52,10 @@ public sealed class MarkdownReportWriterTests
         Assert.Contains("`MainWindow`", report);
         Assert.Contains("`FrameworkElement.Width`", report);
         Assert.Contains("`800`", report);
+        Assert.Contains("BAML deferred resources：", report);
+        Assert.Contains("`primary`（string）", report);
+        Assert.Contains("`accent`", report);
+        Assert.Contains("`AccessText`", report);
+        Assert.Contains("[88, 98)", report);
     }
 }

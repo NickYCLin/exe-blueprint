@@ -130,6 +130,18 @@ public sealed record BamlSummaryModel
 
     public bool PropertyValuesTruncated { get; init; }
 
+    // ResourceDictionary deferred section 中可安全定位的 string/type key。
+    public int DeferredResourceCount { get; init; }
+
+    public IReadOnlyList<BamlDeferredResourceModel> DeferredResources { get; init; } = [];
+
+    public bool DeferredResourcesTruncated { get; init; }
+
+    public bool DeferredResourcesComplete { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? DeferredResourcesError { get; init; }
+
     public bool RecordsTruncated { get; init; }
 
     public bool SymbolsTruncated { get; init; }
@@ -257,6 +269,64 @@ public sealed record BamlPropertyValueModel
 
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     public int? DataSize { get; init; }
+
+    // record 56 的 local StaticResource ID 所屬 deferred resource，可與 DeferredResources.Id 對接。
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public int? DeferredResourceId { get; init; }
+}
+
+public sealed record BamlDeferredResourceModel
+{
+    public required int Id { get; init; }
+
+    // string 或 type；不執行 complex key 的 markup extension。
+    public required string KeyKind { get; init; }
+
+    public required int KeyId { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? Key { get; init; }
+
+    public required int KeyRecordOffset { get; init; }
+
+    // 相對 deferred keys/header 結束後 values 區起點的位置。
+    public required int ValuePosition { get; init; }
+
+    public required int ValueStartOffset { get; init; }
+
+    // Exclusive end offset；範圍表示為 [ValueStartOffset, ValueEndOffset)。
+    public required int ValueEndOffset { get; init; }
+
+    public bool Shared { get; init; }
+
+    public bool SharedSet { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public int? ElementId { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public int? ElementTypeId { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? ElementType { get; init; }
+
+    // ID 是 key-local 0-based index，供 value 內的 StaticResourceId record 對照。
+    public IReadOnlyList<BamlStaticResourceModel> StaticResources { get; init; } = [];
+
+    public bool StaticResourcesTruncated { get; init; }
+}
+
+public sealed record BamlStaticResourceModel
+{
+    public required int Id { get; init; }
+
+    // string-reference、type-reference 或 property-reference。
+    public required string Kind { get; init; }
+
+    public required int ReferenceId { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? Value { get; init; }
 }
 
 public sealed record TypeModel

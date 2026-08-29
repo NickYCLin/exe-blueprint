@@ -15,6 +15,8 @@ internal static class BamlSummaryReader
     private const int MaxPropertyValues = 2_000;
     private const int MaxPropertyValueBytes = 16_384;
     private const int MaxPropertyValueChars = 4_096;
+    private const int MaxDeferredResources = 2_000;
+    private const int MaxDeferredStaticResources = 2_000;
     private const int VariableRecord = -1;
     private const int UnsupportedRecord = -2;
 
@@ -117,6 +119,7 @@ internal static class BamlSummaryReader
 
         var position = HeaderSize;
         var recordCounts = new Dictionary<byte, int>();
+        var recordSpans = new List<BamlRecordSpan>();
         var symbols = new SymbolTable();
         while (position < data.Length && recordCounts.Values.Sum() < MaxRecords)
         {
@@ -167,7 +170,8 @@ internal static class BamlSummaryReader
                         symbols);
                 }
 
-                if (!symbols.TryReadRecord(recordType, recordOffset, data[position..(int)nextPosition], out var symbolError))
+                var payloadOffset = position;
+                if (!symbols.TryReadRecord(recordType, recordOffset, data[payloadOffset..(int)nextPosition], out var symbolError))
                 {
                     return Partial(
                         signature,
@@ -180,6 +184,7 @@ internal static class BamlSummaryReader
                         symbols);
                 }
 
+                recordSpans.Add(new BamlRecordSpan(recordType, recordOffset, payloadOffset, (int)nextPosition));
                 position = (int)nextPosition;
             }
             else
@@ -197,8 +202,9 @@ internal static class BamlSummaryReader
                         symbols);
                 }
 
-                var nextPosition = position + payloadSize;
-                if (!symbols.TryReadRecord(recordType, recordOffset, data[position..nextPosition], out var symbolError))
+                var payloadOffset = position;
+                var nextPosition = payloadOffset + payloadSize;
+                if (!symbols.TryReadRecord(recordType, recordOffset, data[payloadOffset..nextPosition], out var symbolError))
                 {
                     return Partial(
                         signature,
@@ -211,6 +217,7 @@ internal static class BamlSummaryReader
                         symbols);
                 }
 
+                recordSpans.Add(new BamlRecordSpan(recordType, recordOffset, payloadOffset, nextPosition));
                 position = nextPosition;
             }
 
@@ -218,6 +225,7 @@ internal static class BamlSummaryReader
         }
 
         var truncated = position < data.Length;
+        var deferred = symbols.BuildDeferredResources(data, recordSpans);
         return new BamlSummaryModel
         {
             Status = truncated ? "partial" : "parsed",
@@ -239,8 +247,14 @@ internal static class BamlSummaryReader
                 ?? (truncated ? "BAML record 達解析上限，element tree 可能不完整。" : null),
             Properties = symbols.BuildProperties(),
             PropertyValueCount = symbols.PropertyValueCount,
-            PropertyValues = symbols.BuildPropertyValues(),
+            PropertyValues = symbols.BuildPropertyValues(deferred.PropertyLinks),
             PropertyValuesTruncated = symbols.PropertyValuesTruncated,
+            DeferredResourceCount = deferred.ResourceCount,
+            DeferredResources = deferred.Resources,
+            DeferredResourcesTruncated = deferred.Truncated,
+            DeferredResourcesComplete = !truncated && deferred.Complete,
+            DeferredResourcesError = deferred.Error
+                ?? (truncated ? "BAML record 達解析上限，deferred resource 關係可能不完整。" : null),
             RecordsTruncated = truncated,
             SymbolsTruncated = symbols.Truncated,
             Error = truncated ? $"BAML record 超過 {MaxRecords:N0} 筆安全解析上限。" : null
@@ -340,6 +354,8 @@ internal static class BamlSummaryReader
             PropertyValueCount = symbols?.PropertyValueCount ?? 0,
             PropertyValues = symbols?.BuildPropertyValues() ?? [],
             PropertyValuesTruncated = symbols?.PropertyValuesTruncated ?? false,
+            DeferredResourcesComplete = false,
+            DeferredResourcesError = error,
             RecordsTruncated = recordsTruncated,
             SymbolsTruncated = symbols?.Truncated ?? false,
             Error = error
@@ -350,8 +366,26 @@ internal static class BamlSummaryReader
         {
             Status = "invalid",
             Signature = signature,
+            DeferredResourcesComplete = false,
+            DeferredResourcesError = error,
             Error = error
         };
+
+    private readonly record struct BamlRecordSpan(
+        byte Type,
+        int StartOffset,
+        int PayloadOffset,
+        int EndOffset);
+
+    private sealed record DeferredAnalysis(
+        int ResourceCount,
+        IReadOnlyList<BamlDeferredResourceModel> Resources,
+        bool Truncated,
+        bool Complete,
+        string? Error,
+        IReadOnlyDictionary<int, DeferredPropertyLink> PropertyLinks);
+
+    private sealed record DeferredPropertyLink(int ResourceId, string? Value);
 
     private static bool TryReadInt16(ReadOnlySpan<byte> data, ref int position, out short value)
     {
@@ -463,6 +497,7 @@ internal static class BamlSummaryReader
         private readonly List<PropertyValueData> _propertyValues = [];
         private readonly Stack<ElementContext> _elementStack = [];
         private readonly Stack<PropertyScope> _propertyScopes = [];
+        private readonly Dictionary<int, int?> _deferredSectionOwners = [];
         private string? _elementTreeError;
 
         public int ElementCount { get; private set; }
@@ -513,7 +548,13 @@ internal static class BamlSummaryReader
                 34 => TryReadReferencedProperty(payload, "type-reference", ReferenceKind.Type, out error),
                 35 => TryReadMarkupExtensionProperty(payload, out error),
                 36 => TryReadConvertedProperty(payload, out error),
-                56 => TryReadReferencedProperty(payload, "static-resource", ReferenceKind.StaticResource, out error),
+                37 => TryReadDeferableContentStart(recordOffset, out error),
+                56 => TryReadReferencedProperty(
+                    payload,
+                    "static-resource",
+                    ReferenceKind.StaticResource,
+                    out error,
+                    recordOffset),
                 7 or 9 or 11 or 13 => TryReadPropertyScopeStart(recordType, payload, out error),
                 8 or 10 or 12 or 14 => TryReadPropertyScopeEnd(recordType, out error),
                 46 => TryReadContentProperty(payload, out error),
@@ -616,11 +657,18 @@ internal static class BamlSummaryReader
                 })
                 .ToArray();
 
-        public IReadOnlyList<BamlPropertyValueModel> BuildPropertyValues() =>
+        public IReadOnlyList<BamlPropertyValueModel> BuildPropertyValues(
+            IReadOnlyDictionary<int, DeferredPropertyLink>? deferredLinks = null) =>
             _propertyValues
                 .Select(value =>
                 {
                     var (propertyName, propertyOwnerType) = ResolveProperty(value.PropertyId);
+                    DeferredPropertyLink? deferredLink = null;
+                    if (value.RecordOffset is { } recordOffset)
+                    {
+                        deferredLinks?.TryGetValue(recordOffset, out deferredLink);
+                    }
+
                     return new BamlPropertyValueModel
                     {
                         PropertyId = value.PropertyId,
@@ -632,15 +680,508 @@ internal static class BamlSummaryReader
                             ? ResolveTypeName(elementTypeId)
                             : null,
                         Kind = value.Kind,
-                        Value = value.Value ?? ResolveReference(value),
+                        Value = value.Value ?? deferredLink?.Value ?? ResolveReference(value),
                         ValueTruncated = value.ValueTruncated || IsReferencedStringTruncated(value),
                         ReferenceId = value.ReferenceId,
                         RelatedTypeId = value.RelatedTypeId,
                         RelatedType = ResolveRelatedType(value),
-                        DataSize = value.DataSize
+                        DataSize = value.DataSize,
+                        DeferredResourceId = deferredLink?.ResourceId
                     };
                 })
                 .ToArray();
+
+        public DeferredAnalysis BuildDeferredResources(
+            ReadOnlySpan<byte> data,
+            IReadOnlyList<BamlRecordSpan> records)
+        {
+            var recordByStartOffset = records.ToDictionary(record => record.StartOffset);
+
+            var resolvedResources = new List<DeferredResourceData>();
+            var propertyLinks = new Dictionary<int, DeferredPropertyLink>();
+            var elementByStartOffset = new Dictionary<int, ElementData>();
+            var elementById = new Dictionary<int, ElementData>();
+            foreach (var element in _elements)
+            {
+                elementByStartOffset.TryAdd(element.StartOffset, element);
+                elementById.TryAdd(element.Id, element);
+            }
+
+            var resourceCount = 0;
+            var staticResourceCount = 0;
+            var truncated = false;
+            var complete = true;
+            string? firstError = null;
+            var previousSectionEnd = -1;
+
+            void SetError(string message)
+            {
+                complete = false;
+                firstError ??= message;
+            }
+
+            bool IsElementOrDescendant(int? elementId, ElementData root)
+            {
+                var remaining = elementById.Count + 1;
+                while (elementId is { } currentId && remaining-- > 0)
+                {
+                    if (currentId == root.Id)
+                    {
+                        return true;
+                    }
+
+                    if (!elementById.TryGetValue(currentId, out var currentElement))
+                    {
+                        return false;
+                    }
+
+                    elementId = currentElement.ParentId;
+                }
+
+                return false;
+            }
+
+            for (var recordIndex = 0; recordIndex < records.Count; recordIndex++)
+            {
+                var sectionRecord = records[recordIndex];
+                if (sectionRecord.Type != 37)
+                {
+                    continue;
+                }
+
+                if (sectionRecord.EndOffset - sectionRecord.PayloadOffset != sizeof(int))
+                {
+                    SetError($"offset {sectionRecord.StartOffset} 的 DeferableContentStart 長度不是 4 bytes。");
+                    continue;
+                }
+
+                var contentSize = BinaryPrimitives.ReadInt32LittleEndian(data[sectionRecord.PayloadOffset..]);
+                var contentEndLong = (long)sectionRecord.EndOffset + contentSize;
+                if (contentSize < 0 || contentEndLong > data.Length)
+                {
+                    SetError(
+                        $"offset {sectionRecord.StartOffset} 的 deferred content size {contentSize} 超出 BAML 資料範圍。");
+                    continue;
+                }
+
+                var contentEnd = (int)contentEndLong;
+                if (!recordByStartOffset.TryGetValue(contentEnd, out var closingRecord)
+                    || closingRecord.Type != 4)
+                {
+                    SetError(
+                        $"offset {sectionRecord.StartOffset} 的 deferred content 結尾 {contentEnd} 不是 owner ElementEnd。");
+                    continue;
+                }
+
+                if (!_deferredSectionOwners.TryGetValue(sectionRecord.StartOffset, out var ownerId)
+                    || ownerId is null
+                    || !elementById.TryGetValue(ownerId.Value, out var ownerElement)
+                    || ownerElement.EndOffset != contentEnd)
+                {
+                    SetError(
+                        $"offset {sectionRecord.StartOffset} 的 deferred content 結尾未對準其 owner element。");
+                    continue;
+                }
+
+                if (sectionRecord.StartOffset < previousSectionEnd)
+                {
+                    SetError(
+                        $"offset {sectionRecord.StartOffset} 出現巢狀或重疊的 deferred content，目前不安全解析其關係。");
+                    continue;
+                }
+
+                previousSectionEnd = contentEnd;
+                var sectionResources = new List<DeferredResourceData>();
+                DeferredResourceData? currentResource = null;
+                var currentKeyExists = false;
+                var sectionKeyCount = 0;
+                var valuesStart = contentEnd;
+                var sectionSupported = true;
+
+                for (var headerIndex = recordIndex + 1; headerIndex < records.Count; headerIndex++)
+                {
+                    var headerRecord = records[headerIndex];
+                    if (headerRecord.StartOffset >= contentEnd)
+                    {
+                        break;
+                    }
+
+                    if (headerRecord.EndOffset > contentEnd)
+                    {
+                        SetError(
+                            $"offset {headerRecord.StartOffset} 的 record 跨出 deferred content 結尾 {contentEnd}。");
+                        sectionSupported = false;
+                        break;
+                    }
+
+                    if (headerRecord.Type is 38 or 39)
+                    {
+                        var payload = data[headerRecord.PayloadOffset..headerRecord.EndOffset];
+                        var expectedSize = headerRecord.Type == 38 ? 8 : 9;
+                        if (payload.Length != expectedSize)
+                        {
+                            SetError(
+                                $"offset {headerRecord.StartOffset} 的 {GetRecordName(headerRecord.Type)} payload 長度不正確。");
+                            sectionSupported = false;
+                            break;
+                        }
+
+                        short keyId;
+                        int valuePosition;
+                        bool shared;
+                        bool sharedSet;
+                        string keyKind;
+                        string? key;
+                        if (headerRecord.Type == 38)
+                        {
+                            keyId = BinaryPrimitives.ReadInt16LittleEndian(payload);
+                            valuePosition = BinaryPrimitives.ReadInt32LittleEndian(payload[sizeof(short)..]);
+                            shared = payload[6] != 0;
+                            sharedSet = payload[7] != 0;
+                            keyKind = "string";
+                            key = _strings.TryGetValue(keyId, out var keyText) ? keyText.Value : null;
+                        }
+                        else
+                        {
+                            keyId = BinaryPrimitives.ReadInt16LittleEndian(payload);
+                            valuePosition = BinaryPrimitives.ReadInt32LittleEndian(payload[3..]);
+                            shared = payload[7] != 0;
+                            sharedSet = payload[8] != 0;
+                            keyKind = "type";
+                            key = ResolveTypeName(keyId);
+                        }
+
+                        var resourceId = resourceCount++;
+                        sectionKeyCount++;
+                        currentKeyExists = true;
+                        if (resourceId < MaxDeferredResources)
+                        {
+                            currentResource = new DeferredResourceData(
+                                resourceId,
+                                keyKind,
+                                keyId,
+                                key,
+                                headerRecord.StartOffset,
+                                valuePosition,
+                                shared,
+                                sharedSet);
+                            sectionResources.Add(currentResource);
+                        }
+                        else
+                        {
+                            currentResource = null;
+                            truncated = true;
+                            SetError($"BAML deferred resource 超過 {MaxDeferredResources:N0} 筆安全保留上限。");
+                        }
+
+                        continue;
+                    }
+
+                    if (headerRecord.Type == 55)
+                    {
+                        if (!currentKeyExists)
+                        {
+                            SetError(
+                                $"offset {headerRecord.StartOffset} 的 OptimizedStaticResource 前沒有 deferred key。");
+                            sectionSupported = false;
+                            break;
+                        }
+
+                        var payload = data[headerRecord.PayloadOffset..headerRecord.EndOffset];
+                        if (payload.Length != 3)
+                        {
+                            SetError(
+                                $"offset {headerRecord.StartOffset} 的 OptimizedStaticResource payload 長度不正確。");
+                            sectionSupported = false;
+                            break;
+                        }
+
+                        var flags = payload[0];
+                        var referenceId = BinaryPrimitives.ReadInt16LittleEndian(payload[1..]);
+                        var localId = currentResource?.StaticResourceCount ?? 0;
+                        currentResource?.IncrementStaticResourceCount();
+                        staticResourceCount++;
+
+                        string kind;
+                        string? value;
+                        if (flags == 0)
+                        {
+                            kind = "string-reference";
+                            value = _strings.TryGetValue(referenceId, out var text) ? text.Value : null;
+                        }
+                        else if (flags == 1)
+                        {
+                            kind = "type-reference";
+                            value = ResolveTypeName(referenceId);
+                        }
+                        else if (flags == 2)
+                        {
+                            kind = "property-reference";
+                            value = FormatPropertyReference(referenceId);
+                        }
+                        else
+                        {
+                            kind = "unknown";
+                            value = null;
+                            SetError(
+                                $"offset {headerRecord.StartOffset} 的 OptimizedStaticResource flags 0x{flags:X2} 不受支援。");
+                        }
+
+                        if (currentResource is not null)
+                        {
+                            if (staticResourceCount <= MaxDeferredStaticResources)
+                            {
+                                currentResource.StaticResources.Add(new BamlStaticResourceModel
+                                {
+                                    Id = localId,
+                                    Kind = kind,
+                                    ReferenceId = referenceId,
+                                    Value = value
+                                });
+                            }
+                            else
+                            {
+                                currentResource.StaticResourcesTruncated = true;
+                                truncated = true;
+                                SetError(
+                                    $"BAML deferred StaticResource 超過 {MaxDeferredStaticResources:N0} 筆安全保留上限。");
+                            }
+                        }
+
+                        continue;
+                    }
+
+                    if (headerRecord.Type is 40 or 41 or 48 or 49 or 50)
+                    {
+                        SetError(
+                            $"deferred header 的 {GetRecordName(headerRecord.Type)} ({headerRecord.Type}) 關係目前不受支援。");
+                        sectionSupported = false;
+                        break;
+                    }
+
+                    valuesStart = headerRecord.StartOffset;
+                    break;
+                }
+
+                if (sectionSupported && sectionKeyCount == 0 && contentSize > 0)
+                {
+                    SetError(
+                        $"offset {sectionRecord.StartOffset} 的非空 deferred content 沒有可辨識的 key header。");
+                    continue;
+                }
+
+                if (!sectionSupported || sectionResources.Count == 0)
+                {
+                    continue;
+                }
+
+                if (sectionKeyCount != sectionResources.Count)
+                {
+                    // 截斷後無法安全得知最後一筆已保留 resource 的 value 結尾。
+                    continue;
+                }
+
+                var absoluteStarts = new int[sectionResources.Count];
+                var valueElements = new ElementData[sectionResources.Count];
+                var positionsValid = true;
+                var previousValuePosition = -1;
+                for (var index = 0; index < sectionResources.Count; index++)
+                {
+                    var resource = sectionResources[index];
+                    var absoluteStartLong = (long)valuesStart + resource.ValuePosition;
+                    if (resource.ValuePosition < 0
+                        || resource.ValuePosition <= previousValuePosition
+                        || absoluteStartLong < valuesStart
+                        || absoluteStartLong >= contentEnd
+                        || !recordByStartOffset.TryGetValue((int)absoluteStartLong, out var valueStartRecord)
+                        || valueStartRecord.Type != 3)
+                    {
+                        SetError(
+                            $"offset {resource.KeyRecordOffset} 的 deferred ValuePosition {resource.ValuePosition} 無效或不在 record 邊界。");
+                        positionsValid = false;
+                        break;
+                    }
+
+                    var absoluteStart = (int)absoluteStartLong;
+                    if (!elementByStartOffset.TryGetValue(absoluteStart, out var valueElement)
+                        || valueElement.ParentId != ownerElement.Id
+                        || valueElement.EndOffset is null)
+                    {
+                        SetError(
+                            $"offset {resource.KeyRecordOffset} 的 deferred value 必須是 owner 的完整直接子 element。");
+                        positionsValid = false;
+                        break;
+                    }
+
+                    absoluteStarts[index] = absoluteStart;
+                    valueElements[index] = valueElement;
+                    previousValuePosition = resource.ValuePosition;
+                }
+
+                if (!positionsValid)
+                {
+                    continue;
+                }
+
+                var directValueChildStarts = _elements
+                    .Where(element => element.ParentId == ownerElement.Id
+                                      && element.StartOffset >= valuesStart
+                                      && element.StartOffset < contentEnd)
+                    .Select(element => element.StartOffset)
+                    .OrderBy(offset => offset)
+                    .ToArray();
+                if (!absoluteStarts.SequenceEqual(directValueChildStarts))
+                {
+                    SetError(
+                        $"offset {sectionRecord.StartOffset} 的 deferred key offsets 未與 owner 直接子 elements 一一對應。");
+                    continue;
+                }
+
+                var valueRangesValid = true;
+                for (var index = 0; index < sectionResources.Count; index++)
+                {
+                    var valueEndOffset = index + 1 < absoluteStarts.Length
+                        ? absoluteStarts[index + 1]
+                        : contentEnd;
+                    var elementEndOffset = valueElements[index].EndOffset!.Value;
+                    if (elementEndOffset <= absoluteStarts[index]
+                        || elementEndOffset >= valueEndOffset)
+                    {
+                        SetError(
+                            $"deferred resource {sectionResources[index].Id} 的 value element 超出其 key range。");
+                        valueRangesValid = false;
+                        break;
+                    }
+                }
+
+                if (!valueRangesValid)
+                {
+                    continue;
+                }
+
+                for (var index = 0; index < sectionResources.Count; index++)
+                {
+                    var resource = sectionResources[index];
+                    resource.ValueStartOffset = absoluteStarts[index];
+                    resource.ValueEndOffset = index + 1 < absoluteStarts.Length
+                        ? absoluteStarts[index + 1]
+                        : contentEnd;
+                    resource.Element = valueElements[index];
+
+                    resolvedResources.Add(resource);
+                }
+            }
+
+            var resourceRangeIndex = 0;
+            foreach (var record in records)
+            {
+                if (record.Type != 50)
+                {
+                    continue;
+                }
+
+                while (resourceRangeIndex < resolvedResources.Count
+                       && record.StartOffset >= resolvedResources[resourceRangeIndex].ValueEndOffset)
+                {
+                    resourceRangeIndex++;
+                }
+
+                if (resourceRangeIndex >= resolvedResources.Count)
+                {
+                    break;
+                }
+
+                var resource = resolvedResources[resourceRangeIndex];
+                if (record.StartOffset < resource.ValueStartOffset)
+                {
+                    continue;
+                }
+
+                SetError(
+                    $"deferred value 內的 StaticResourceId ({record.Type}) nested indirection 目前不受支援。");
+                break;
+            }
+
+            foreach (var propertyValue in _propertyValues)
+            {
+                if (propertyValue.ReferenceKind != ReferenceKind.StaticResource
+                    || propertyValue.RecordOffset is not { } recordOffset
+                    || propertyValue.ReferenceId is not { } referenceId)
+                {
+                    continue;
+                }
+
+                var resource = resolvedResources.FirstOrDefault(
+                    candidate => recordOffset >= candidate.ValueStartOffset
+                                 && recordOffset < candidate.ValueEndOffset);
+                if (resource is null)
+                {
+                    continue;
+                }
+
+                var valueElement = resource.Element;
+                if (valueElement?.EndOffset is not { } valueElementEnd
+                    || recordOffset <= valueElement.StartOffset
+                    || recordOffset >= valueElementEnd
+                    || !IsElementOrDescendant(propertyValue.ElementId, valueElement))
+                {
+                    SetError(
+                        $"offset {recordOffset} 的 StaticResourceId 不在 deferred resource {resource.Id} 的 value element 子樹內。");
+                    continue;
+                }
+
+                var staticResource = referenceId >= 0
+                    ? resource.StaticResources.FirstOrDefault(candidate => candidate.Id == referenceId)
+                    : null;
+                propertyLinks[recordOffset] = new DeferredPropertyLink(resource.Id, staticResource?.Value);
+                if (staticResource is null)
+                {
+                    SetError(
+                        $"deferred resource {resource.Id} 的 local StaticResource ID {referenceId} 超出範圍。");
+                }
+            }
+
+            if (resourceCount > 0 && !ElementTreeComplete)
+            {
+                SetError("BAML element tree 不完整，無法證明所有 deferred resource 的 element 關係。");
+            }
+
+            if (resourceCount > 0 && PropertyValuesTruncated)
+            {
+                SetError("BAML property value 已截斷，deferred StaticResource 關係可能不完整。");
+            }
+
+            var models = resolvedResources
+                .Select(resource => new BamlDeferredResourceModel
+                {
+                    Id = resource.Id,
+                    KeyKind = resource.KeyKind,
+                    KeyId = resource.KeyId,
+                    Key = resource.Key,
+                    KeyRecordOffset = resource.KeyRecordOffset,
+                    ValuePosition = resource.ValuePosition,
+                    ValueStartOffset = resource.ValueStartOffset,
+                    ValueEndOffset = resource.ValueEndOffset,
+                    Shared = resource.Shared,
+                    SharedSet = resource.SharedSet,
+                    ElementId = resource.Element?.Id,
+                    ElementTypeId = resource.Element?.TypeId,
+                    ElementType = resource.Element is { } element
+                        ? ResolveTypeName(element.TypeId)
+                        : null,
+                    StaticResources = resource.StaticResources.ToArray(),
+                    StaticResourcesTruncated = resource.StaticResourcesTruncated
+                })
+                .ToArray();
+
+            return new DeferredAnalysis(
+                resourceCount,
+                models,
+                truncated,
+                complete,
+                firstError,
+                propertyLinks);
+        }
 
         private bool IsReferencedStringTruncated(PropertyValueData value)
         {
@@ -943,6 +1484,13 @@ internal static class BamlSummaryReader
         private void SetElementTreeError(string error) =>
             _elementTreeError ??= error.TrimEnd();
 
+        private bool TryReadDeferableContentStart(int recordOffset, out string? error)
+        {
+            _deferredSectionOwners[recordOffset] = CurrentElementId;
+            error = null;
+            return true;
+        }
+
         private bool TryReadContentProperty(ReadOnlySpan<byte> payload, out string? error)
         {
             var position = 0;
@@ -1011,7 +1559,8 @@ internal static class BamlSummaryReader
             ReadOnlySpan<byte> payload,
             string kind,
             ReferenceKind referenceKind,
-            out string? error)
+            out string? error,
+            int? recordOffset = null)
         {
             var position = 0;
             if (!TryReadInt16(payload, ref position, out var attributeId)
@@ -1024,7 +1573,8 @@ internal static class BamlSummaryReader
             AddPropertyValue(new PropertyValueData(attributeId, CurrentElementTypeId, kind)
             {
                 ReferenceId = referenceId,
-                ReferenceKind = referenceKind
+                ReferenceKind = referenceKind,
+                RecordOffset = recordOffset
             });
             error = null;
             return true;
@@ -1214,6 +1764,47 @@ internal static class BamlSummaryReader
             public void SetEndOffset(int endOffset) => EndOffset = endOffset;
         }
 
+        private sealed class DeferredResourceData(
+            int id,
+            string keyKind,
+            short keyId,
+            string? key,
+            int keyRecordOffset,
+            int valuePosition,
+            bool shared,
+            bool sharedSet)
+        {
+            public int Id { get; } = id;
+
+            public string KeyKind { get; } = keyKind;
+
+            public short KeyId { get; } = keyId;
+
+            public string? Key { get; } = key;
+
+            public int KeyRecordOffset { get; } = keyRecordOffset;
+
+            public int ValuePosition { get; } = valuePosition;
+
+            public bool Shared { get; } = shared;
+
+            public bool SharedSet { get; } = sharedSet;
+
+            public int ValueStartOffset { get; set; }
+
+            public int ValueEndOffset { get; set; }
+
+            public ElementData? Element { get; set; }
+
+            public List<BamlStaticResourceModel> StaticResources { get; } = [];
+
+            public int StaticResourceCount { get; private set; }
+
+            public bool StaticResourcesTruncated { get; set; }
+
+            public void IncrementStaticResourceCount() => StaticResourceCount++;
+        }
+
         private sealed record PropertyScope(int? ElementId, short PropertyId, byte StartRecordType);
 
         private sealed record PropertyValueData(short PropertyId, short? ElementTypeId, string Kind)
@@ -1233,6 +1824,8 @@ internal static class BamlSummaryReader
             public bool RelatedTypeIsKnownElementId { get; init; }
 
             public int? DataSize { get; init; }
+
+            public int? RecordOffset { get; init; }
         }
 
         private enum ReferenceKind

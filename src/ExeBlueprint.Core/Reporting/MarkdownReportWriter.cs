@@ -138,6 +138,8 @@ public static class MarkdownReportWriter
     private const int MaxResourcesPerFile = 30;
     private const int MaxResourceEntriesPerFile = 50;
     private const int MaxBamlElementsPerFile = 50;
+    private const int MaxBamlDeferredResourcesPerFile = 50;
+    private const int MaxStaticResourcesPerDeferredResource = 5;
     private const int MaxBamlPropertyValuesPerFile = 50;
     private const int MaxBamlPropertyValueReportChars = 200;
 
@@ -348,6 +350,54 @@ public static class MarkdownReportWriter
                         $"- `{EscapeInline(item.Resource)}` / `{EscapeInline(item.Entry.Name)}` element tree 不完整：{EscapeCell(item.Entry.Baml!.ElementTreeError ?? "已達解析上限")}");
                 }
 
+                var bamlDeferredResources = code.Resources
+                    .SelectMany(resource => resource.Entries
+                        .Where(entry => entry.Baml is not null)
+                        .SelectMany(entry => entry.Baml!.DeferredResources
+                            .Select(deferred => (Resource: resource.Name, Entry: entry.Name, Deferred: deferred))))
+                    .Take(MaxBamlDeferredResourcesPerFile)
+                    .ToArray();
+                if (bamlDeferredResources.Length > 0)
+                {
+                    builder.AppendLine();
+                    builder.AppendLine("BAML deferred resources：");
+                    builder.AppendLine();
+                    builder.AppendLine("| 資源 | BAML | Key | Value 範圍 | Element | local StaticResource | Shared | ");
+                    builder.AppendLine("| --- | --- | --- | --- | --- | --- | --- | ");
+                    foreach (var item in bamlDeferredResources)
+                    {
+                        var shared = item.Deferred.SharedSet
+                            ? item.Deferred.Shared ? "是" : "否"
+                            : "未指定";
+                        builder.AppendLine(
+                            $"| `{EscapeInline(item.Resource)}` | `{EscapeInline(item.Entry)}` | {FormatBamlDeferredKey(item.Deferred)} | [{item.Deferred.ValueStartOffset}, {item.Deferred.ValueEndOffset}) | {FormatBamlDeferredElement(item.Deferred)} | {FormatBamlDeferredStaticResources(item.Deferred)} | {shared} |");
+                    }
+                }
+
+                var totalBamlDeferredResources = code.Resources
+                    .SelectMany(resource => resource.Entries)
+                    .Where(entry => entry.Baml is not null)
+                    .Sum(entry => entry.Baml!.DeferredResourceCount);
+                if (totalBamlDeferredResources > MaxBamlDeferredResourcesPerFile
+                    || code.Resources.SelectMany(resource => resource.Entries)
+                        .Any(entry => entry.Baml?.DeferredResourcesTruncated == true))
+                {
+                    builder.AppendLine();
+                    builder.AppendLine(
+                        $"（報告最多列出 {MaxBamlDeferredResourcesPerFile} 筆 BAML deferred resource，完整關係與截斷狀態請看 blueprint.json）");
+                }
+
+                foreach (var item in code.Resources
+                             .SelectMany(resource => resource.Entries
+                                 .Where(entry => entry.Baml?.DeferredResourcesComplete == false)
+                                 .Select(entry => (Resource: resource.Name, Entry: entry)))
+                             .Take(10))
+                {
+                    builder.AppendLine();
+                    builder.AppendLine(
+                        $"- `{EscapeInline(item.Resource)}` / `{EscapeInline(item.Entry.Name)}` deferred resource 關係不完整：{EscapeCell(item.Entry.Baml!.DeferredResourcesError ?? "已達解析上限")}");
+                }
+
                 var bamlPropertyValues = code.Resources
                     .SelectMany(resource => resource.Entries
                         .Where(entry => entry.Baml is not null)
@@ -523,6 +573,45 @@ public static class MarkdownReportWriter
         return $"property ID {value.PropertyId}";
     }
 
+    private static string FormatBamlDeferredKey(BamlDeferredResourceModel resource)
+    {
+        if (resource.Key is { } key)
+        {
+            return $"`{EscapeInline(EscapeCell(key))}`（{resource.KeyKind}）";
+        }
+
+        return $"{EscapeCell(resource.KeyKind)} ID {resource.KeyId}";
+    }
+
+    private static string FormatBamlDeferredElement(BamlDeferredResourceModel resource)
+    {
+        if (resource.ElementType is { } elementType)
+        {
+            return $"`{EscapeInline(EscapeCell(elementType))}`";
+        }
+
+        return resource.ElementTypeId is { } elementTypeId ? $"type ID {elementTypeId}" : "-";
+    }
+
+    private static string FormatBamlDeferredStaticResources(BamlDeferredResourceModel resource)
+    {
+        var values = resource.StaticResources
+            .Take(MaxStaticResourcesPerDeferredResource)
+            .Select(item => item.Value is { } value
+                ? $"{item.Id}: `{EscapeInline(EscapeCell(TruncateReportValue(value, 100)))}`"
+                : $"{item.Id}: reference ID {item.ReferenceId}")
+            .ToArray();
+        if (values.Length == 0)
+        {
+            return "-";
+        }
+
+        var suffix = resource.StaticResources.Count > values.Length || resource.StaticResourcesTruncated
+            ? "；…"
+            : string.Empty;
+        return string.Join("；", values) + suffix;
+    }
+
     private static string FormatBamlPropertyKind(BamlPropertyValueModel value)
     {
         var kind = value.Kind switch
@@ -568,6 +657,22 @@ public static class MarkdownReportWriter
         }
 
         return value.ReferenceId is { } referenceId ? $"reference ID {referenceId}" : "-";
+    }
+
+    private static string TruncateReportValue(string value, int maxChars)
+    {
+        if (value.Length <= maxChars)
+        {
+            return value;
+        }
+
+        var outputLength = maxChars;
+        if (char.IsHighSurrogate(value[outputLength - 1]))
+        {
+            outputLength--;
+        }
+
+        return value[..outputLength] + "…";
     }
 
     private static string FormatBytes(long bytes)
