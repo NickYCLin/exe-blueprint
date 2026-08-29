@@ -19,5 +19,7 @@
     <!-- 給 manifest 資源還原測試用的內嵌資源，固定 LogicalName 方便斷言。 -->
     <EmbeddedResource Include="Fixtures\settings.json" LogicalName="ExeBlueprint.Core.Tests.Fixtures.settings.json" />
     <EmbeddedResource Update="Fixtures\sample.resources.resx" LogicalName="ExeBlueprint.Core.Tests.Fixtures.sample.resources" />
+    <!-- 由 @electron/asar 4.3.0 產生，防止測試 fixture 與自製 parser 共享同一個格式錯誤。 -->
+    <None Update="Fixtures\official-sample.asar" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>
