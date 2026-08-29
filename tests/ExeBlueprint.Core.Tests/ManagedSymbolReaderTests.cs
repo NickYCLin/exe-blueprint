@@ -180,7 +180,7 @@ public sealed class ManagedSymbolReaderTests
     }
 
     [Fact]
-    public async Task ReconstructsBooleanAndEnumCallArguments()
+    public async Task ReconstructsBooleanEnumAndNumericCallArguments()
     {
         var assemblyPath = typeof(ManagedSymbolReaderTests).Assembly.Location;
         var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
@@ -204,6 +204,18 @@ public sealed class ManagedSymbolReaderTests
         Assert.Contains(
             deleteNonRecursively.Body,
             line => line.Contains("System.IO.Directory.Delete(path, false)", StringComparison.Ordinal));
+
+        var numericFixture = Assert.Single(
+            document.Files[0].Code!.Types,
+            type => type.FullName == typeof(NumericArgumentFixture).FullName);
+        var log2 = Assert.Single(
+            numericFixture.Methods,
+            method => method.Name == nameof(NumericArgumentFixture.Log2));
+        Assert.Contains(
+            log2.Body,
+            line => line.Contains(
+                "System.Numerics.BitOperations.Log2(unchecked((uint)value))",
+                StringComparison.Ordinal));
     }
 
     [Fact]
@@ -2039,4 +2051,9 @@ internal interface DispatchContractFixture
 internal sealed class DispatchImplementationFixture : DispatchContractFixture
 {
     public string Read() => "value";
+}
+
+internal static class NumericArgumentFixture
+{
+    public static int Log2(int value) => System.Numerics.BitOperations.Log2((uint)value);
 }

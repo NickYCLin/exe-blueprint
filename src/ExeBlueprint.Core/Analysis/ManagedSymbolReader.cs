@@ -3144,7 +3144,10 @@ internal static class ManagedSymbolReader
                 return false;
             }
 
-            args[index] = RenderArgument(argument, index < info.ParameterTypes.Count ? info.ParameterTypes[index] : null);
+            args[index] = RenderArgument(
+                context,
+                argument,
+                index < info.ParameterTypes.Count ? info.ParameterTypes[index] : null);
             if (RequiresNullForgivingComparerArgument(context, info, argument))
             {
                 args[index] += "!";
@@ -3362,7 +3365,10 @@ internal static class ManagedSymbolReader
                 return false;
             }
 
-            args[index] = RenderArgument(argument, index < info.ParameterTypes.Count ? info.ParameterTypes[index] : null);
+            args[index] = RenderArgument(
+                context,
+                argument,
+                index < info.ParameterTypes.Count ? info.ParameterTypes[index] : null);
         }
 
         PushExpression(context, stack, $"new {info.DeclaringType}({string.Join(", ", args)})", info.DeclaringType);
@@ -3370,27 +3376,55 @@ internal static class ManagedSymbolReader
     }
 
     // bool、char 與 enum 在 IL 中都以整數常值傳遞；依正式參數型別還原成可編譯的 C# 引數。
-    private static string RenderArgument(string argument, string? parameterType)
+    private static string RenderArgument(ReconContext context, string argument, string? parameterType)
     {
-        if (!long.TryParse(argument, out var value))
-        {
-            return argument;
-        }
-
-        if (parameterType == "bool" && value is 0 or 1)
+        var isIntegerLiteral = long.TryParse(
+            argument,
+            NumberStyles.Integer,
+            CultureInfo.InvariantCulture,
+            out var value);
+        if (isIntegerLiteral && parameterType == "bool" && value is 0 or 1)
         {
             return value == 1 ? "true" : "false";
         }
 
-        if (parameterType == "char" && value is >= 0 and <= 0xFFFF)
+        if (isIntegerLiteral && parameterType == "char" && value is >= 0 and <= 0xFFFF)
         {
             return FormatCharLiteral((char)value);
+        }
+
+        // CLI 在同一 integral stack family 內不區分 signedness／窄型別，C# 呼叫則要求正式型別。
+        if (parameterType is not null &&
+            context.ExpressionTypes.TryGetValue(argument, out var argumentType) &&
+            argumentType != parameterType &&
+            IsSameIntegralStackFamily(argumentType, parameterType))
+        {
+            return $"unchecked(({parameterType}){argument})";
+        }
+
+        if (!isIntegerLiteral)
+        {
+            return argument;
         }
 
         return IsNumericOrReferenceParameter(parameterType)
             ? argument
             : $"unchecked(({parameterType}){argument})";
     }
+
+    private static bool IsSameIntegralStackFamily(string left, string right)
+    {
+        var leftFamily = IntegralStackFamily(left);
+        return leftFamily >= 0 && leftFamily == IntegralStackFamily(right);
+    }
+
+    private static int IntegralStackFamily(string type) => type switch
+    {
+        "char" or "sbyte" or "byte" or "short" or "ushort" or "int" or "uint" => 0,
+        "long" or "ulong" => 1,
+        "nint" or "nuint" => 2,
+        _ => -1
+    };
 
     private static bool IsNumericOrReferenceParameter(string? parameterType) => parameterType is null
         or "sbyte"
