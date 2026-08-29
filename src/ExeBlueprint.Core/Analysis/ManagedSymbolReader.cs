@@ -7,6 +7,7 @@ using System.Reflection.Metadata;
 using System.Reflection.Metadata.Ecma335;
 using System.Reflection.PortableExecutable;
 using System.Resources;
+using System.Text;
 using ExeBlueprint.Models;
 
 namespace ExeBlueprint.Analysis;
@@ -3161,7 +3162,9 @@ internal static class ManagedSymbolReader
             return TryEmitOperator(context, info, args, stack);
         }
 
-        var target = info.HasThis ? receiver! : info.DeclaringType;
+        var target = info.HasThis
+            ? RenderInstanceCallTarget(context, receiver!, info.DeclaringType)
+            : info.DeclaringType;
 
         if (info.Name.StartsWith("get_", StringComparison.Ordinal))
         {
@@ -3216,6 +3219,72 @@ internal static class ManagedSymbolReader
         }
 
         return true;
+    }
+
+    private static string RenderInstanceCallTarget(
+        ReconContext context,
+        string receiver,
+        string declaringType)
+    {
+        if (string.IsNullOrEmpty(declaringType) ||
+            IsGeneratedName(declaringType) ||
+            !IsPotentialInterfaceType(context.Metadata, declaringType) ||
+            !context.ExpressionTypes.TryGetValue(receiver, out var receiverType) ||
+            receiverType == declaringType)
+        {
+            return receiver;
+        }
+
+        // IL callvirt 會保留宣告 slot；C# 若直接用 concrete receiver，可能改綁到同名 public member。
+        // 明確轉成 metadata declaring interface，保留 explicit interface dispatch、overload 與回傳型別。
+        return $"(({declaringType}){receiver})";
+    }
+
+    private static bool IsPotentialInterfaceType(MetadataReader metadata, string type)
+    {
+        var definitionName = RemoveTypeArguments(type);
+        foreach (var handle in metadata.TypeDefinitions)
+        {
+            if (GetTypeDefinitionFullName(metadata, handle) == definitionName)
+            {
+                var definition = metadata.GetTypeDefinition(handle);
+                return definition.Attributes.HasFlag(TypeAttributes.Interface) &&
+                       (definition.GetGenericParameters().Count == 0 || type.Contains('<', StringComparison.Ordinal));
+            }
+        }
+
+        // 外部 assembly 不在本次 metadata reader 中；以標準 .NET 介面命名慣例保守辨識。
+        var separator = definitionName.LastIndexOf('.');
+        var simpleName = definitionName[(separator + 1)..];
+        return simpleName.Length > 1 && simpleName[0] == 'I' && char.IsUpper(simpleName[1]);
+    }
+
+    private static string RemoveTypeArguments(string type)
+    {
+        var builder = new StringBuilder(type.Length);
+        var depth = 0;
+        foreach (var character in type)
+        {
+            if (character == '<')
+            {
+                depth++;
+            }
+            else if (character == '>')
+            {
+                if (depth == 0)
+                {
+                    return type;
+                }
+
+                depth--;
+            }
+            else if (depth == 0)
+            {
+                builder.Append(character);
+            }
+        }
+
+        return depth == 0 ? builder.ToString() : type;
     }
 
     private static bool RequiresNullForgivingComparerArgument(

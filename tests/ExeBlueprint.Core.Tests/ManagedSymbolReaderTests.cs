@@ -2018,3 +2018,25 @@ internal sealed class NullableValueComparerDecoyFixture : IEqualityComparer<int>
 
     public int GetHashCode(int? obj) => obj.GetHashCode();
 }
+
+internal static class InterfaceDispatchFixture
+{
+    public static IEnumerator<T> EmptyEnumerator<T>() =>
+        ((IEnumerable<T>)Array.Empty<T>()).GetEnumerator();
+
+    public static void CopyTo<T>(List<T> items, Array array, int index) =>
+        ((System.Collections.ICollection)items).CopyTo(array, index);
+
+    public static string Read(DispatchImplementationFixture value) =>
+        ((DispatchContractFixture)value).Read();
+}
+
+internal interface DispatchContractFixture
+{
+    string Read();
+}
+
+internal sealed class DispatchImplementationFixture : DispatchContractFixture
+{
+    public string Read() => "value";
+}

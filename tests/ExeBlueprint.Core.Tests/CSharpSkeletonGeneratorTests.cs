@@ -276,6 +276,43 @@ public sealed class CSharpSkeletonGeneratorTests
     }
 
     [Fact]
+    public async Task PreservesMetadataDeclaringTypeForInstanceDispatch()
+    {
+        var assemblyPath = typeof(InterfaceDispatchFixture).Assembly.Location;
+        var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
+        var fixture = Assert.Single(
+            document.Files[0].Code!.Types,
+            type => type.FullName == "ExeBlueprint.Core.Tests.InterfaceDispatchFixture");
+
+        Assert.True(Assert.Single(
+            fixture.Methods,
+            method => method.Name == nameof(InterfaceDispatchFixture.EmptyEnumerator)).BodyReconstructed);
+        Assert.True(Assert.Single(
+            fixture.Methods,
+            method => method.Name == nameof(InterfaceDispatchFixture.CopyTo)).BodyReconstructed);
+        Assert.True(Assert.Single(
+            fixture.Methods,
+            method => method.Name == nameof(InterfaceDispatchFixture.Read)).BodyReconstructed);
+
+        var source = Assert.Single(
+            CSharpSkeletonGenerator.Generate(document),
+            file => file.RelativePath.EndsWith("ExeBlueprint.Core.Tests.cs", StringComparison.Ordinal)).Content;
+
+        Assert.Contains(
+            "return ((System.Collections.Generic.IEnumerable<T>)System.Array.Empty<T>()).GetEnumerator();",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "((System.Collections.ICollection)items).CopyTo(array, index);",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "return ((ExeBlueprint.Core.Tests.DispatchContractFixture)value).Read();",
+            source,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task EmitsExplicitInterfaceMembersWithoutAccessibilityOrAccessorMethods()
     {
         var assemblyPath = typeof(CSharpSkeletonExplicitInterfaceFixture).Assembly.Location;
