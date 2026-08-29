@@ -496,6 +496,10 @@ public sealed record MethodModel
     public IReadOnlyList<string> Body { get; init; } = [];
 
     public bool BodyReconstructed { get; init; }
+
+    // 成功還原的 body 使用 pointer／function pointer local、field 或 call signature 時才會設定。
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingDefault)]
+    public bool RequiresUnsafeContext { get; init; }
 }
 
 public sealed record GenericParameterModel

@@ -140,10 +140,16 @@ internal static class ManagedSymbolReader
                             model.Parameters.Select(parameter => parameter.Type).ToArray(),
                             model.ReturnType,
                             localTypes,
-                            exceptionRegions);
+                            exceptionRegions,
+                            out var requiresUnsafeContext);
                         if (body is not null)
                         {
-                            model = model with { Body = body, BodyReconstructed = true };
+                            model = model with
+                            {
+                                Body = body,
+                                BodyReconstructed = true,
+                                RequiresUnsafeContext = requiresUnsafeContext
+                            };
                         }
                     }
                 }
@@ -987,6 +993,11 @@ internal static class ManagedSymbolReader
         public int RemainingNodes { get; set; } = MaxIlInstructions;
     }
 
+    private sealed class ReconstructionState
+    {
+        public bool RequiresUnsafeContext { get; set; }
+    }
+
     internal readonly record struct ExceptionRegionInfo(
         ExceptionRegionKind Kind,
         int TryOffset,
@@ -1008,6 +1019,7 @@ internal static class ManagedSymbolReader
         IReadOnlyDictionary<int, string> LocalNames,
         Dictionary<string, string> ExpressionTypes,
         HashSet<string> UnsignedIntegralExpressions,
+        ReconstructionState State,
         ExceptionLeaveRedirect? LeaveRedirect,
         int CatchDepth);
 
@@ -1028,7 +1040,8 @@ internal static class ManagedSymbolReader
             parameterTypes ?? [],
             returnType,
             localTypes ?? [],
-            exceptionRegions ?? []);
+            exceptionRegions ?? [],
+            out _);
 
     // 把方法的 IL 還原成 C#。先解碼成指令陣列，再用區間遞迴結構化還原 if／if-else（可巢狀）。
     // 採全有或全無：遇到無法安全切開的迴圈、非終止型 switch、不支援的例外區域或任何無法結構化的跳轉就整個方法放棄，
@@ -1041,8 +1054,10 @@ internal static class ManagedSymbolReader
         IReadOnlyList<string> parameterTypes,
         string returnType,
         IReadOnlyList<string> localTypes,
-        IReadOnlyList<ExceptionRegionInfo> exceptionRegions)
+        IReadOnlyList<ExceptionRegionInfo> exceptionRegions,
+        out bool requiresUnsafeContext)
     {
+        requiresUnsafeContext = false;
         var instructions = new List<Instr>();
         var offsetToIndex = new Dictionary<int, int>();
         foreach (var instruction in EnumerateInstructions(il))
@@ -1084,6 +1099,10 @@ internal static class ManagedSymbolReader
         }
 
         offsetToIndex[il.Length] = instructions.Count;
+        var state = new ReconstructionState
+        {
+            RequiresUnsafeContext = localTypes.Any(RequiresUnsafeType)
+        };
         var context = new ReconContext(
             metadata,
             il,
@@ -1096,9 +1115,19 @@ internal static class ManagedSymbolReader
             new Dictionary<int, string>(),
             new Dictionary<string, string>(StringComparer.Ordinal),
             new HashSet<string>(StringComparer.Ordinal),
+            state,
             LeaveRedirect: null,
             CatchDepth: 0);
-        return TryStructure(context, [.. instructions], offsetToIndex, 0, instructions.Count, new HashSet<int>(), 0);
+        var body = TryStructure(
+            context,
+            [.. instructions],
+            offsetToIndex,
+            0,
+            instructions.Count,
+            new HashSet<int>(),
+            0);
+        requiresUnsafeContext = body is not null && state.RequiresUnsafeContext;
+        return body;
     }
 
     private static List<string>? TryStructure(
@@ -2873,6 +2902,7 @@ internal static class ManagedSymbolReader
                     return false;
                 }
 
+                MarkUnsafeType(context, loadStatic.Value.Type);
                 PushExpression(
                     context,
                     stack,
@@ -2886,6 +2916,7 @@ internal static class ManagedSymbolReader
                     return false;
                 }
 
+                MarkUnsafeType(context, loadField.Value.Type);
                 PushExpression(context, stack, $"{fieldTarget}.{loadField.Value.Name}", loadField.Value.Type);
                 return true;
             case "stsfld":
@@ -2903,6 +2934,7 @@ internal static class ManagedSymbolReader
                     return false;
                 }
 
+                MarkUnsafeType(context, storeStatic.Value.Type);
                 statements.Add($"{storeStatic.Value.DeclaringType}.{storeStatic.Value.Name} = {storeStaticValue};");
                 return true;
             case "stfld":
@@ -2920,6 +2952,7 @@ internal static class ManagedSymbolReader
                     return false;
                 }
 
+                MarkUnsafeType(context, storeField.Value.Type);
                 statements.Add($"{storeFieldTarget}.{storeField.Value.Name} = {storeFieldValue};");
                 return true;
 
@@ -3360,6 +3393,8 @@ internal static class ManagedSymbolReader
             return false;
         }
 
+        MarkUnsafeSignature(context, info);
+
         var args = new string[info.ParamCount];
         for (var index = info.ParamCount - 1; index >= 0; index--)
         {
@@ -3581,6 +3616,8 @@ internal static class ManagedSymbolReader
             return false;
         }
 
+        MarkUnsafeSignature(context, info);
+
         var args = new string[info.ParamCount];
         for (var index = info.ParamCount - 1; index >= 0; index--)
         {
@@ -3598,6 +3635,26 @@ internal static class ManagedSymbolReader
         PushExpression(context, stack, $"new {info.DeclaringType}({string.Join(", ", args)})", info.DeclaringType);
         return true;
     }
+
+    private static void MarkUnsafeSignature(ReconContext context, CallInfo info)
+    {
+        if (RequiresUnsafeType(info.ReturnType) ||
+            info.ParameterTypes.Any(RequiresUnsafeType) ||
+            info.GenericArguments.Any(RequiresUnsafeType))
+        {
+            context.State.RequiresUnsafeContext = true;
+        }
+    }
+
+    private static void MarkUnsafeType(ReconContext context, string type)
+    {
+        if (RequiresUnsafeType(type))
+        {
+            context.State.RequiresUnsafeContext = true;
+        }
+    }
+
+    private static bool RequiresUnsafeType(string type) => type.Contains('*');
 
     // bool、char 與 enum 在 IL 中都以整數常值傳遞；依正式參數型別還原成可編譯的 C# 引數。
     private static string RenderArgument(ReconContext context, string argument, string? parameterType)
@@ -3757,10 +3814,13 @@ internal static class ManagedSymbolReader
                     return null;
                 }
 
-                var genericArguments = spec
-                    .DecodeSignature(SignatureTypeNameProvider.Instance, null)
-                    .Select(type => type.Text)
-                    .ToArray();
+                var decodedGenericArguments = spec.DecodeSignature(SignatureTypeNameProvider.Instance, null);
+                if (decodedGenericArguments.Any(type => type.IsRestrictedGenericArgument))
+                {
+                    return null;
+                }
+
+                var genericArguments = decodedGenericArguments.Select(type => type.Text).ToArray();
                 return resolved with
                 {
                     ReturnType = InstantiateMethodSignatureType(resolved.ReturnType, genericArguments),

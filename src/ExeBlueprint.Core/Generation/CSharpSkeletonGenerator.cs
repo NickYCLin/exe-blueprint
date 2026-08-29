@@ -72,6 +72,10 @@ public static class CSharpSkeletonGenerator
                 .Where(type => type.IsRefLike)
                 .Select(type => type.FullName)
                 .ToHashSet(StringComparer.Ordinal);
+            var requiresUnsafeBlocks = topLevelTypes.Any(type => RequiresUnsafeContextInTree(
+                type,
+                nestedTypesByDeclaringType,
+                new HashSet<string>(StringComparer.Ordinal)));
 
             foreach (var namespaceGroup in topLevelTypes.GroupBy(type => type.Namespace).OrderBy(group => group.Key, StringComparer.Ordinal))
             {
@@ -96,7 +100,8 @@ public static class CSharpSkeletonGenerator
                         .Select(reference => projectsByAssembly[reference])
                         .Where(reference => reference != projectDirectory)
                         .Distinct(StringComparer.OrdinalIgnoreCase)
-                        .OrderBy(reference => reference, StringComparer.OrdinalIgnoreCase))
+                        .OrderBy(reference => reference, StringComparer.OrdinalIgnoreCase),
+                    requiresUnsafeBlocks)
             });
         }
 
@@ -402,7 +407,8 @@ public static class CSharpSkeletonGenerator
                 $"{Humanize(parameter.Type, type.GenericParameters, invoke.GenericParameters)} {SafeName(parameter.Name)}"));
         AppendConstrainedDeclaration(
             builder,
-            $"{indent}{type.Accessibility} delegate {returnType} {name}({parameters})",
+            $"{indent}{type.Accessibility}{(RequiresUnsafeContext(type) ? " unsafe" : "")} delegate " +
+            $"{returnType} {name}({parameters})",
             indent + "    ",
             BuildTypeConstraintClauses(type),
             terminator: ";");
@@ -650,6 +656,11 @@ public static class CSharpSkeletonGenerator
             }
         }
 
+        if (RequiresUnsafeContext(type))
+        {
+            parts.Add("unsafe");
+        }
+
         if (type.Kind == "struct" && type.IsRefLike)
         {
             parts.Add("ref");
@@ -687,6 +698,79 @@ public static class CSharpSkeletonGenerator
 
         return bases.Count == 0 ? declaration : $"{declaration} : {string.Join(", ", bases)}";
     }
+
+    internal static bool RequiresUnsafeContext(TypeModel type)
+    {
+        if (type.Kind == "enum")
+        {
+            return false;
+        }
+
+        if (type.Kind == "delegate")
+        {
+            var invoke = type.Methods.FirstOrDefault(method => method.Name == "Invoke");
+            return invoke is not null && RequiresUnsafeContext(invoke);
+        }
+
+        var eventNames = type.Events.Select(@event => @event.Name).ToHashSet(StringComparer.Ordinal);
+        return type.Fields.Any(field =>
+                   !IsCompilerGenerated(field.Name) &&
+                   field.Name != "value__" &&
+                   !eventNames.Contains(field.Name) &&
+                   RequiresUnsafeContext(field.Type)) ||
+               type.Properties.Any(property =>
+                   !IsCompilerGenerated(property.Name) &&
+                   (RequiresUnsafeContext(property.Type) ||
+                    property.Parameters.Any(parameter => RequiresUnsafeContext(parameter.Type)))) ||
+               type.Events.Any(@event =>
+                   !IsCompilerGenerated(@event.Name) &&
+                   RequiresUnsafeContext(@event.Type)) ||
+               type.Methods.Any(method =>
+                   !ShouldSkipMethod(method) &&
+                   !(type.IsStatic && method.IsConstructor) &&
+                   RequiresUnsafeContext(method));
+    }
+
+    private static bool RequiresUnsafeContextInTree(
+        TypeModel type,
+        IReadOnlyDictionary<string, TypeModel[]> nestedTypesByDeclaringType,
+        HashSet<string> activeTypes)
+    {
+        if (!activeTypes.Add(type.FullName))
+        {
+            return false;
+        }
+
+        try
+        {
+            if (RequiresUnsafeContext(type))
+            {
+                return true;
+            }
+
+            if (type.Kind is "delegate" or "enum")
+            {
+                return false;
+            }
+
+            return nestedTypesByDeclaringType.TryGetValue(type.FullName, out var children) &&
+                children.Any(child => RequiresUnsafeContextInTree(
+                    child,
+                    nestedTypesByDeclaringType,
+                    activeTypes));
+        }
+        finally
+        {
+            activeTypes.Remove(type.FullName);
+        }
+    }
+
+    private static bool RequiresUnsafeContext(MethodModel method) =>
+        method.RequiresUnsafeContext ||
+        RequiresUnsafeContext(method.ReturnType) ||
+        method.Parameters.Any(parameter => RequiresUnsafeContext(parameter.Type));
+
+    private static bool RequiresUnsafeContext(string typeName) => typeName.Contains('*');
 
     private static void AppendConstrainedDeclaration(
         StringBuilder builder,
@@ -1794,7 +1878,9 @@ public static class CSharpSkeletonGenerator
         return descriptors;
     }
 
-    private static string BuildProjectFile(IEnumerable<string> projectReferences)
+    private static string BuildProjectFile(
+        IEnumerable<string> projectReferences,
+        bool allowUnsafeBlocks)
     {
         var references = projectReferences.ToArray();
         var builder = new StringBuilder();
@@ -1803,6 +1889,11 @@ public static class CSharpSkeletonGenerator
         builder.AppendLine("    <TargetFramework>net10.0</TargetFramework>");
         builder.AppendLine("    <Nullable>enable</Nullable>");
         builder.AppendLine("    <ImplicitUsings>enable</ImplicitUsings>");
+        if (allowUnsafeBlocks)
+        {
+            builder.AppendLine("    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>");
+        }
+
         builder.AppendLine("  </PropertyGroup>");
         if (references.Length > 0)
         {
@@ -1841,7 +1932,7 @@ public static class CSharpSkeletonGenerator
         `Reconstructed.slnx` 會收錄所有產生的專案；輸入套件內可對上的 assembly reference
         會轉成專案間的 `ProjectReference`。
 
-        目前會還原型別、泛型 variance 與可安全表示的 where constraints、欄位、屬性、事件、方法簽章與繼承關係；可安全結構化的方法也會帶回方法體，
+        目前會還原型別、泛型 variance 與可安全表示的 where constraints、欄位、屬性、事件、方法簽章與繼承關係；pointer owner 會取得 scoped unsafe context，可安全結構化的方法也會帶回方法體，
         其餘方法會保留 IL 並使用 `NotImplementedException`，
         需要對照原程式的 IL 或反組譯結果補回實作。
 
