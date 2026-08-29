@@ -245,7 +245,7 @@ public sealed class CSharpSkeletonGeneratorTests
         Assert.DoesNotContain("System.ReadOnlySpan<byte> Header { get; }", source, StringComparison.Ordinal);
         Assert.Contains(
             "public ref int ValueRef\n    {\n        get => throw new global::System.NotImplementedException();\n    }",
-            source,
+            source.ReplaceLineEndings("\n"),
             StringComparison.Ordinal);
         Assert.DoesNotContain("public ref int ValueRef { get; }", source, StringComparison.Ordinal);
     }
