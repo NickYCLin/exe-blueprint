@@ -137,6 +137,8 @@ public static class MarkdownReportWriter
     private const int MaxNativeFunctionsPerFile = 100;
     private const int MaxResourcesPerFile = 30;
     private const int MaxResourceEntriesPerFile = 50;
+    private const int MaxBamlPropertyValuesPerFile = 50;
+    private const int MaxBamlPropertyValueReportChars = 200;
 
     private static void AppendNativeFunctions(StringBuilder builder, BlueprintDocument document)
     {
@@ -301,6 +303,39 @@ public static class MarkdownReportWriter
                     builder.AppendLine($"（報告最多列出 {MaxResourceEntriesPerFile} 筆資源鍵值，完整內容與截斷狀態請看 blueprint.json）");
                 }
 
+                var bamlPropertyValues = code.Resources
+                    .SelectMany(resource => resource.Entries
+                        .Where(entry => entry.Baml is not null)
+                        .SelectMany(entry => entry.Baml!.PropertyValues
+                            .Select(value => (Resource: resource.Name, Entry: entry.Name, Value: value))))
+                    .Take(MaxBamlPropertyValuesPerFile)
+                    .ToArray();
+                if (bamlPropertyValues.Length > 0)
+                {
+                    builder.AppendLine();
+                    builder.AppendLine("BAML property 值：");
+                    builder.AppendLine();
+                    builder.AppendLine("| 資源 | BAML | 元素 | 屬性 | 值類型 | 內容 |");
+                    builder.AppendLine("| --- | --- | --- | --- | --- | --- |");
+                    foreach (var item in bamlPropertyValues)
+                    {
+                        builder.AppendLine(
+                            $"| `{EscapeInline(item.Resource)}` | `{EscapeInline(item.Entry)}` | {FormatBamlElement(item.Value)} | {FormatBamlProperty(item.Value)} | {FormatBamlPropertyKind(item.Value)} | {FormatBamlPropertyValue(item.Value)} |");
+                    }
+                }
+
+                var totalBamlPropertyValues = code.Resources
+                    .SelectMany(resource => resource.Entries)
+                    .Where(entry => entry.Baml is not null)
+                    .Sum(entry => entry.Baml!.PropertyValueCount);
+                if (totalBamlPropertyValues > MaxBamlPropertyValuesPerFile
+                    || code.Resources.SelectMany(resource => resource.Entries)
+                        .Any(entry => entry.Baml?.PropertyValuesTruncated == true))
+                {
+                    builder.AppendLine();
+                    builder.AppendLine($"（報告最多列出 {MaxBamlPropertyValuesPerFile} 筆 BAML property 值，完整內容與截斷狀態請看 blueprint.json）");
+                }
+
                 foreach (var resource in code.Resources.Where(resource => resource.EntriesError is not null))
                 {
                     builder.AppendLine();
@@ -383,6 +418,76 @@ public static class MarkdownReportWriter
         var size = entry.DataSize is { } dataSize ? $"，原始資料 {FormatBytes(dataSize)}" : string.Empty;
         var error = entry.Error is null ? string.Empty : $"：{EscapeCell(entry.Error)}";
         return $"{(entry.Status == "invalid" ? "無法解碼" : "未解碼")}{size}{error}";
+    }
+
+    private static string FormatBamlElement(BamlPropertyValueModel value)
+    {
+        if (value.ElementType is { } elementType)
+        {
+            return $"`{EscapeInline(EscapeCell(elementType))}`";
+        }
+
+        return value.ElementTypeId is { } elementTypeId ? $"type ID {elementTypeId}" : "-";
+    }
+
+    private static string FormatBamlProperty(BamlPropertyValueModel value)
+    {
+        if (value.PropertyName is { } propertyName)
+        {
+            var qualifiedName = value.PropertyOwnerType is { } ownerType
+                ? $"{ownerType}.{propertyName}"
+                : propertyName;
+            return $"`{EscapeInline(EscapeCell(qualifiedName))}`";
+        }
+
+        return $"property ID {value.PropertyId}";
+    }
+
+    private static string FormatBamlPropertyKind(BamlPropertyValueModel value)
+    {
+        var kind = value.Kind switch
+        {
+            "literal" => "文字",
+            "string-reference" => "字串參照",
+            "type-reference" => "型別參照",
+            "markup-extension" => "Markup extension",
+            "converted" => "converter 字串",
+            "custom-binary" => "自訂二進位",
+            "static-resource" => "StaticResource 參照",
+            _ => value.Kind
+        };
+        return value.RelatedType is { } relatedType
+            ? $"{EscapeCell(kind)}（`{EscapeInline(EscapeCell(relatedType))}`）"
+            : EscapeCell(kind);
+    }
+
+    private static string FormatBamlPropertyValue(BamlPropertyValueModel value)
+    {
+        if (value.Value is { } decodedValue)
+        {
+            if (decodedValue.Length == 0)
+            {
+                return "（空字串）";
+            }
+
+            var reportTruncated = decodedValue.Length > MaxBamlPropertyValueReportChars;
+            var outputLength = Math.Min(decodedValue.Length, MaxBamlPropertyValueReportChars);
+            if (outputLength > 0 && char.IsHighSurrogate(decodedValue[outputLength - 1]))
+            {
+                outputLength--;
+            }
+
+            var output = decodedValue[..outputLength];
+            var suffix = value.ValueTruncated || reportTruncated ? "…（已截斷）" : string.Empty;
+            return $"`{EscapeInline(EscapeCell(output))}`{suffix}";
+        }
+
+        if (value.DataSize is { } dataSize)
+        {
+            return $"二進位，{FormatBytes(dataSize)}";
+        }
+
+        return value.ReferenceId is { } referenceId ? $"reference ID {referenceId}" : "-";
     }
 
     private static string FormatBytes(long bytes)

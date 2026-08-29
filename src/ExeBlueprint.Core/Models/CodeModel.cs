@@ -113,6 +113,13 @@ public sealed record BamlSummaryModel
 
     public IReadOnlyList<BamlPropertyUsageModel> Properties { get; init; } = [];
 
+    // 具有可安全摘要之 inline value 或 reference 的 property record 總數。
+    public int PropertyValueCount { get; init; }
+
+    public IReadOnlyList<BamlPropertyValueModel> PropertyValues { get; init; } = [];
+
+    public bool PropertyValuesTruncated { get; init; }
+
     public bool RecordsTruncated { get; init; }
 
     public bool SymbolsTruncated { get; init; }
@@ -154,6 +161,43 @@ public sealed record BamlPropertyUsageModel
     public string? OwnerType { get; init; }
 
     public required int Count { get; init; }
+}
+
+public sealed record BamlPropertyValueModel
+{
+    public required int PropertyId { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? PropertyName { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? PropertyOwnerType { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public int? ElementTypeId { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? ElementType { get; init; }
+
+    // literal、string-reference、type-reference、markup-extension、converted、custom-binary 或 static-resource。
+    public required string Kind { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? Value { get; init; }
+
+    public bool ValueTruncated { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public int? ReferenceId { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public int? RelatedTypeId { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? RelatedType { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public int? DataSize { get; init; }
 }
 
 public sealed record TypeModel

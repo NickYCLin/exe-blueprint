@@ -772,6 +772,20 @@ public sealed class ManagedSymbolReaderTests
         Assert.Equal("Content", contentProperty.Name);
         Assert.Equal("ContentControl", contentProperty.OwnerType);
         Assert.Equal(4, bamlEntry.Baml.Properties.Count);
+        Assert.Equal(3, bamlEntry.Baml.PropertyValueCount);
+        Assert.False(bamlEntry.Baml.PropertyValuesTruncated);
+        var titleValue = Assert.Single(
+            bamlEntry.Baml.PropertyValues,
+            item => item.PropertyName == "Title");
+        Assert.Equal("BamlFixture.MainWindow", titleValue.ElementType);
+        Assert.Equal("converted", titleValue.Kind);
+        Assert.Equal("MainWindow", titleValue.Value);
+        Assert.Contains(
+            bamlEntry.Baml.PropertyValues,
+            item => item.PropertyName == "Width" && item.Value == "800");
+        Assert.Contains(
+            bamlEntry.Baml.PropertyValues,
+            item => item.PropertyName == "Height" && item.Value == "450");
 
         await using var temp = new TemporaryDirectory();
         var outputPath = Path.Combine(temp.Path, "blueprint.json");
@@ -798,6 +812,9 @@ public sealed class ManagedSymbolReaderTests
         Assert.Equal("BamlFixture.MainWindow", bamlJson.GetProperty("rootElementType").GetString());
         Assert.Equal(2, bamlJson.GetProperty("elementTypes").GetArrayLength());
         Assert.Equal(4, bamlJson.GetProperty("properties").GetArrayLength());
+        Assert.Equal(3, bamlJson.GetProperty("propertyValueCount").GetInt32());
+        Assert.Equal(3, bamlJson.GetProperty("propertyValues").GetArrayLength());
+        Assert.False(bamlJson.GetProperty("propertyValuesTruncated").GetBoolean());
         Assert.Equal(
             "Grid",
             bamlJson.GetProperty("elementTypes")
@@ -923,6 +940,32 @@ public sealed class ManagedSymbolReaderTests
         Assert.Equal(2_001, boundedSymbols.ElementCount);
         Assert.Equal(2_000, boundedSymbols.ElementTypes.Count);
         Assert.True(boundedSymbols.SymbolsTruncated);
+
+        using var manyValues = new MemoryStream();
+        manyValues.Write(CreateBamlHeader());
+        using (var writer = new BinaryWriter(manyValues, System.Text.Encoding.UTF8, leaveOpen: true))
+        {
+            writer.Write((byte)3);
+            writer.Write((short)-254);
+            writer.Write((byte)0);
+            for (var index = 0; index <= 2_000; index++)
+            {
+                WriteBamlVariableRecord(writer, 5, payload =>
+                {
+                    payload.Write((short)-57);
+                    payload.Write(string.Empty);
+                });
+            }
+
+            writer.Write((byte)4);
+            writer.Write((byte)2);
+        }
+
+        var boundedValues = BamlSummaryReader.Read(manyValues.ToArray());
+        Assert.Equal("parsed", boundedValues.Status);
+        Assert.Equal(2_001, boundedValues.PropertyValueCount);
+        Assert.Equal(2_000, boundedValues.PropertyValues.Count);
+        Assert.True(boundedValues.PropertyValuesTruncated);
     }
 
     [Fact]
@@ -967,12 +1010,103 @@ public sealed class ManagedSymbolReaderTests
     }
 
     [Fact]
+    public void ReadsBoundedBamlPropertyValueKindsWithoutLoadingWpf()
+    {
+        var staticResourceExtensionId = FindKnownWpfTypeId("StaticResourceExtension");
+        var booleanConverterId = FindKnownWpfTypeId("BooleanConverter");
+        var lengthConverterId = FindKnownWpfTypeId("LengthConverter");
+        using var stream = new MemoryStream();
+        stream.Write(CreateBamlHeader());
+        using (var writer = new BinaryWriter(stream, System.Text.Encoding.UTF8, leaveOpen: true))
+        {
+            writer.Write((byte)3);
+            writer.Write((short)-254);
+            writer.Write((byte)0);
+
+            WriteBamlVariableRecord(writer, 32, payload =>
+            {
+                payload.Write((short)10);
+                payload.Write("primary");
+            });
+            WriteBamlVariableRecord(writer, 5, payload =>
+            {
+                payload.Write((short)-57);
+                payload.Write("640");
+            });
+
+            writer.Write((byte)33);
+            writer.Write((short)-47);
+            writer.Write((short)10);
+
+            writer.Write((byte)34);
+            writer.Write((short)-14);
+            writer.Write((short)-254);
+
+            writer.Write((byte)35);
+            writer.Write((short)-14);
+            writer.Write(staticResourceExtensionId);
+            writer.Write((short)10);
+
+            WriteBamlVariableRecord(writer, 36, payload =>
+            {
+                payload.Write((short)-57);
+                payload.Write("42");
+                payload.Write((short)-lengthConverterId);
+            });
+            WriteBamlVariableRecord(writer, 6, payload =>
+            {
+                payload.Write((short)-47);
+                payload.Write(booleanConverterId);
+                payload.Write((byte)1);
+            });
+
+            writer.Write((byte)56);
+            writer.Write((short)-14);
+            writer.Write((short)3);
+
+            WriteBamlVariableRecord(writer, 5, payload =>
+            {
+                payload.Write((short)-57);
+                payload.Write(new string('x', 4_097));
+            });
+
+            writer.Write((byte)4);
+            writer.Write((byte)2);
+        }
+
+        var summary = BamlSummaryReader.Read(stream.ToArray());
+
+        Assert.Equal("parsed", summary.Status);
+        Assert.Equal(8, summary.PropertyValueCount);
+        Assert.Equal(8, summary.PropertyValues.Count);
+        Assert.All(summary.PropertyValues, value => Assert.Equal("Grid", value.ElementType));
+        Assert.Contains(summary.PropertyValues, value => value.Kind == "literal" && value.Value == "640");
+        Assert.Contains(summary.PropertyValues, value =>
+            value.Kind == "string-reference" && value.ReferenceId == 10 && value.Value == "primary");
+        Assert.Contains(summary.PropertyValues, value =>
+            value.Kind == "type-reference" && value.Value == "Grid");
+        Assert.Contains(summary.PropertyValues, value =>
+            value.Kind == "markup-extension"
+            && value.RelatedType == "StaticResourceExtension"
+            && value.Value == "primary");
+        Assert.Contains(summary.PropertyValues, value =>
+            value.Kind == "converted" && value.RelatedType == "LengthConverter" && value.Value == "42");
+        Assert.Contains(summary.PropertyValues, value =>
+            value.Kind == "custom-binary" && value.RelatedType == "BooleanConverter" && value.DataSize == 1);
+        Assert.Contains(summary.PropertyValues, value =>
+            value.Kind == "static-resource" && value.ReferenceId == 3 && value.Value is null);
+        var longValue = Assert.Single(summary.PropertyValues, value => value.Value?.Length == 4_096);
+        Assert.True(longValue.ValueTruncated);
+        Assert.False(summary.PropertyValuesTruncated);
+    }
+
+    [Fact]
     public async Task SummaryAggregatesManagedTypeAndMethodCounts()
     {
         var assemblyPath = typeof(BlueprintAnalyzer).Assembly.Location;
         var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
 
-        Assert.Equal("0.2", document.SchemaVersion);
+        Assert.Equal("0.3", document.SchemaVersion);
         Assert.True(document.Summary.TypeCount > 0);
         Assert.True(document.Summary.MethodCount > 0);
         Assert.Equal(document.Files[0].Code!.TypeCount, document.Summary.TypeCount);
@@ -1046,6 +1180,74 @@ public sealed class ManagedSymbolReaderTests
         }
 
         return stream.ToArray();
+    }
+
+    private static short FindKnownWpfTypeId(string name)
+    {
+        for (short id = 1; id <= 759; id++)
+        {
+            if (WpfBamlKnownIds.GetTypeName((short)-id) == name)
+            {
+                return id;
+            }
+        }
+
+        throw new InvalidOperationException($"找不到 WPF 內建型別 {name}。");
+    }
+
+    private static void WriteBamlVariableRecord(
+        BinaryWriter writer,
+        byte recordType,
+        Action<BinaryWriter> writePayload)
+    {
+        using var payloadStream = new MemoryStream();
+        using (var payloadWriter = new BinaryWriter(
+                   payloadStream,
+                   System.Text.Encoding.UTF8,
+                   leaveOpen: true))
+        {
+            writePayload(payloadWriter);
+        }
+
+        var payload = payloadStream.ToArray();
+        var sizeFieldLength = 1;
+        while (true)
+        {
+            var recordSize = checked(payload.Length + sizeFieldLength);
+            var requiredLength = Get7BitEncodedLength(recordSize);
+            if (requiredLength == sizeFieldLength)
+            {
+                writer.Write(recordType);
+                Write7BitEncodedInt(writer, recordSize);
+                writer.Write(payload);
+                return;
+            }
+
+            sizeFieldLength = requiredLength;
+        }
+    }
+
+    private static int Get7BitEncodedLength(int value)
+    {
+        var length = 1;
+        while ((value >>= 7) != 0)
+        {
+            length++;
+        }
+
+        return length;
+    }
+
+    private static void Write7BitEncodedInt(BinaryWriter writer, int value)
+    {
+        var remaining = (uint)value;
+        while (remaining >= 0x80)
+        {
+            writer.Write((byte)(remaining | 0x80));
+            remaining >>= 7;
+        }
+
+        writer.Write((byte)remaining);
     }
 
     private static byte[] CreateBamlHeader(short readerMinor = 96)

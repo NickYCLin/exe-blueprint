@@ -37,7 +37,7 @@ Each archive also includes the `exe-blueprint-cli` command-line tool and checksu
 - .NET assembly references, namespaces, types, fields, properties, events, methods, enum values, and inheritance
 - IL instructions, method-level call graphs, and reconstructable C# control flow
 - Embedded manifest resources and safe decoding of standard `.resources` values
-- WPF `.baml` header versions, record summaries, element/property usage, and file-declared or built-in WPF type/property ID mappings without loading WPF types
+- WPF `.baml` header versions, record summaries, element/property usage, file-declared or built-in WPF type/property ID mappings, and property strings/references that can be read without invoking converters or serializers
 - Common runtime, framework, language, installer, and toolchain fingerprints
 - Optional Ghidra headless results for native PE functions
 
@@ -102,7 +102,7 @@ If Ghidra is unavailable, the rest of the analysis continues and the report reco
 - Analyze only software that you own or are authorized to inspect.
 - Do not commit customer binaries, credentials, private configuration, or analysis output to the repository.
 - ZIP extraction rejects path traversal and symbolic links and enforces file-count and size limits.
-- Custom `.resources` types are not deserialized, and WPF objects are not instantiated during BAML inspection. BAML output includes record counts, element/property usage, file-declared mappings, and the WPF 10 built-in ID names; unknown or reserved IDs remain numeric.
+- Custom `.resources` types are not deserialized, and WPF objects are not instantiated during BAML inspection. BAML output includes record counts, element/property usage, file-declared mappings, WPF 10 built-in ID names, and bounded property-value samples; converters and custom binary serializers are identified but never executed, while unknown or reserved IDs remain numeric.
 - Detection and reconstructed code must be reviewed by an engineer before use.
 
 See the [architecture notes](docs/architecture.md), [contribution guide](CONTRIBUTING.md), and [security policy](SECURITY.md) for more details.

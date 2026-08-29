@@ -4,13 +4,16 @@ using ExeBlueprint.Models;
 
 namespace ExeBlueprint.Analysis;
 
-// 只讀 BAML 檔頭、record 邊界及檔案內宣告的型別／屬性 ID，不解析屬性值，也不載入 WPF assembly。
+// 只讀 BAML 位元組與安全的字串／ID reference，不載入 WPF assembly，也不執行 converter 或 serializer。
 internal static class BamlSummaryReader
 {
     private const int HeaderSize = 28;
     private const int MaxRecords = 100_000;
     private const int MaxSymbols = 2_000;
     private const int MaxMetadataStringBytes = 8_192;
+    private const int MaxPropertyValues = 2_000;
+    private const int MaxPropertyValueBytes = 16_384;
+    private const int MaxPropertyValueChars = 4_096;
     private const int VariableRecord = -1;
     private const int UnsupportedRecord = -2;
 
@@ -225,6 +228,9 @@ internal static class BamlSummaryReader
             RootElementType = symbols.ResolveRootElementType(),
             ElementTypes = symbols.BuildElementTypes(),
             Properties = symbols.BuildProperties(),
+            PropertyValueCount = symbols.PropertyValueCount,
+            PropertyValues = symbols.BuildPropertyValues(),
+            PropertyValuesTruncated = symbols.PropertyValuesTruncated,
             RecordsTruncated = truncated,
             SymbolsTruncated = symbols.Truncated,
             Error = truncated ? $"BAML record 超過 {MaxRecords:N0} 筆安全解析上限。" : null
@@ -317,6 +323,9 @@ internal static class BamlSummaryReader
             RootElementType = symbols?.ResolveRootElementType(),
             ElementTypes = symbols?.BuildElementTypes() ?? [],
             Properties = symbols?.BuildProperties() ?? [],
+            PropertyValueCount = symbols?.PropertyValueCount ?? 0,
+            PropertyValues = symbols?.BuildPropertyValues() ?? [],
+            PropertyValuesTruncated = symbols?.PropertyValuesTruncated ?? false,
             RecordsTruncated = recordsTruncated,
             SymbolsTruncated = symbols?.Truncated ?? false,
             Error = error
@@ -366,21 +375,90 @@ internal static class BamlSummaryReader
         }
     }
 
+    private static bool TryReadPropertyValueString(
+        ReadOnlySpan<byte> data,
+        ref int position,
+        out string value,
+        out bool truncated)
+    {
+        value = string.Empty;
+        truncated = false;
+        if (!TryRead7BitEncodedInt(data, ref position, out var byteLength)
+            || byteLength < 0
+            || byteLength > data.Length - position)
+        {
+            return false;
+        }
+
+        var bytesToDecode = Math.Min(byteLength, MaxPropertyValueBytes);
+        var minimumBytes = bytesToDecode == byteLength
+            ? bytesToDecode
+            : Math.Max(0, bytesToDecode - 3);
+        var decoded = false;
+        for (var candidateLength = bytesToDecode; candidateLength >= minimumBytes; candidateLength--)
+        {
+            try
+            {
+                value = StrictUtf8.GetString(data.Slice(position, candidateLength));
+                bytesToDecode = candidateLength;
+                decoded = true;
+                break;
+            }
+            catch (DecoderFallbackException)
+            {
+                if (bytesToDecode == byteLength)
+                {
+                    return false;
+                }
+
+                // 截斷點可能落在 UTF-8 字元中間，最多向前退三個 byte 找完整邊界。
+            }
+        }
+
+        if (!decoded)
+        {
+            return false;
+        }
+
+        position += byteLength;
+        truncated = bytesToDecode < byteLength;
+        if (value.Length > MaxPropertyValueChars)
+        {
+            var outputLength = MaxPropertyValueChars;
+            if (char.IsHighSurrogate(value[outputLength - 1]))
+            {
+                outputLength--;
+            }
+
+            value = value[..outputLength];
+            truncated = true;
+        }
+
+        return true;
+    }
+
     private sealed class SymbolTable
     {
         private readonly Dictionary<short, string> _assemblies = [];
         private readonly Dictionary<short, TypeDeclaration> _types = [];
         private readonly Dictionary<short, AttributeDeclaration> _attributes = [];
+        private readonly Dictionary<short, BoundedText> _strings = [];
         private readonly Dictionary<short, int> _elementTypes = [];
         private readonly Dictionary<short, int> _properties = [];
+        private readonly List<PropertyValueData> _propertyValues = [];
+        private readonly Stack<short> _elementStack = [];
 
         public int ElementCount { get; private set; }
 
         public int PropertyCount { get; private set; }
 
+        public int PropertyValueCount { get; private set; }
+
         public short? RootElementTypeId { get; private set; }
 
         public bool Truncated { get; private set; }
+
+        public bool PropertyValuesTruncated { get; private set; }
 
         public bool TryReadRecord(byte recordType, ReadOnlySpan<byte> payload, out string? error)
         {
@@ -388,11 +466,20 @@ internal static class BamlSummaryReader
             return recordType switch
             {
                 3 => TryReadElement(payload, out error),
+                4 => TryReadElementEnd(out error),
                 28 => TryReadAssembly(payload, out error),
                 29 => TryReadType(payload, hasSerializer: false, out error),
                 30 => TryReadType(payload, hasSerializer: true, out error),
                 31 => TryReadAttribute(payload, out error),
-                5 or 6 or 7 or 9 or 11 or 13 or 18 or 33 or 34 or 35 or 36 or 46 or 56
+                32 => TryReadStringInfo(payload, out error),
+                5 => TryReadLiteralProperty(payload, out error),
+                6 => TryReadCustomProperty(payload, out error),
+                33 => TryReadReferencedProperty(payload, "string-reference", ReferenceKind.String, out error),
+                34 => TryReadReferencedProperty(payload, "type-reference", ReferenceKind.Type, out error),
+                35 => TryReadMarkupExtensionProperty(payload, out error),
+                36 => TryReadConvertedProperty(payload, out error),
+                56 => TryReadReferencedProperty(payload, "static-resource", ReferenceKind.StaticResource, out error),
+                7 or 9 or 11 or 13 or 18 or 46
                     => TryReadProperty(payload, out error),
                 _ => true
             };
@@ -459,12 +546,133 @@ internal static class BamlSummaryReader
                 })
                 .ToArray();
 
+        public IReadOnlyList<BamlPropertyValueModel> BuildPropertyValues() =>
+            _propertyValues
+                .Select(value =>
+                {
+                    var (propertyName, propertyOwnerType) = ResolveProperty(value.PropertyId);
+                    return new BamlPropertyValueModel
+                    {
+                        PropertyId = value.PropertyId,
+                        PropertyName = propertyName,
+                        PropertyOwnerType = propertyOwnerType,
+                        ElementTypeId = value.ElementTypeId,
+                        ElementType = value.ElementTypeId is { } elementTypeId
+                            ? ResolveTypeName(elementTypeId)
+                            : null,
+                        Kind = value.Kind,
+                        Value = value.Value ?? ResolveReference(value),
+                        ValueTruncated = value.ValueTruncated || IsReferencedStringTruncated(value),
+                        ReferenceId = value.ReferenceId,
+                        RelatedTypeId = value.RelatedTypeId,
+                        RelatedType = ResolveRelatedType(value),
+                        DataSize = value.DataSize
+                    };
+                })
+                .ToArray();
+
+        private bool IsReferencedStringTruncated(PropertyValueData value)
+        {
+            if (value.ReferenceId is not { } referenceId)
+            {
+                return false;
+            }
+
+            if (value.ReferenceKind == ReferenceKind.String)
+            {
+                return _strings.TryGetValue(referenceId, out var text) && text.Truncated;
+            }
+
+            if (value.ReferenceKind != ReferenceKind.ExtensionArgument)
+            {
+                return false;
+            }
+
+            var extensionType = ResolveRelatedType(value);
+            return extensionType is not ("TypeExtension" or "StaticExtension" or "TemplateBindingExtension")
+                && _strings.TryGetValue(referenceId, out var extensionText)
+                && extensionText.Truncated;
+        }
+
         private string? ResolveTypeName(short id) =>
             id < 0
                 ? WpfBamlKnownIds.GetTypeName(id)
                 : _types.TryGetValue(id, out var declaration)
                     ? declaration.Name
                     : null;
+
+        private (string? Name, string? OwnerType) ResolveProperty(short id)
+        {
+            if (id >= 0 && _attributes.TryGetValue(id, out var declaration))
+            {
+                return (declaration.Name, ResolveTypeName(declaration.OwnerTypeId));
+            }
+
+            return WpfBamlKnownIds.TryGetProperty(id, out var ownerType, out var name)
+                ? (name, ownerType)
+                : (null, null);
+        }
+
+        private string? ResolveReference(PropertyValueData value)
+        {
+            if (value.ReferenceId is not { } referenceId)
+            {
+                return null;
+            }
+
+            return value.ReferenceKind switch
+            {
+                ReferenceKind.String => _strings.TryGetValue(referenceId, out var text) ? text.Value : null,
+                ReferenceKind.Type => ResolveTypeName(referenceId),
+                ReferenceKind.Property => FormatPropertyReference(referenceId),
+                ReferenceKind.ExtensionArgument => ResolveExtensionArgument(value, referenceId),
+                _ => null
+            };
+        }
+
+        private string? ResolveRelatedType(PropertyValueData value)
+        {
+            if (value.RelatedTypeId is not { } relatedTypeId)
+            {
+                return null;
+            }
+
+            return value.RelatedTypeIsKnownElementId && relatedTypeId > 0
+                ? WpfBamlKnownIds.GetTypeName((short)-relatedTypeId)
+                : ResolveTypeName(relatedTypeId);
+        }
+
+        private string? ResolveExtensionArgument(PropertyValueData value, short referenceId)
+        {
+            var extensionType = ResolveRelatedType(value);
+            if (extensionType == "TypeExtension")
+            {
+                return ResolveTypeName(referenceId);
+            }
+
+            if (extensionType is "StaticExtension" or "TemplateBindingExtension")
+            {
+                return FormatPropertyReference(referenceId);
+            }
+
+            if (_strings.TryGetValue(referenceId, out var text))
+            {
+                return text.Value;
+            }
+
+            return ResolveTypeName(referenceId) ?? FormatPropertyReference(referenceId);
+        }
+
+        private string? FormatPropertyReference(short id)
+        {
+            var (name, ownerType) = ResolveProperty(id);
+            if (name is null)
+            {
+                return null;
+            }
+
+            return ownerType is null ? name : $"{ownerType}.{name}";
+        }
 
         private bool TryReadAssembly(ReadOnlySpan<byte> payload, out string? error)
         {
@@ -522,6 +730,21 @@ internal static class BamlSummaryReader
             return true;
         }
 
+        private bool TryReadStringInfo(ReadOnlySpan<byte> payload, out string? error)
+        {
+            var position = 0;
+            if (!TryReadInt16(payload, ref position, out var id)
+                || !TryReadPropertyValueString(payload, ref position, out var value, out var truncated))
+            {
+                error = "string 對照表已截斷或字串格式錯誤。";
+                return false;
+            }
+
+            AddDeclaration(_strings, id, new BoundedText(value, truncated));
+            error = null;
+            return true;
+        }
+
         private bool TryReadElement(ReadOnlySpan<byte> payload, out string? error)
         {
             var position = 0;
@@ -534,6 +757,129 @@ internal static class BamlSummaryReader
             RootElementTypeId ??= typeId;
             ElementCount++;
             AddUsage(_elementTypes, typeId);
+            _elementStack.Push(typeId);
+            error = null;
+            return true;
+        }
+
+        private bool TryReadElementEnd(out string? error)
+        {
+            if (_elementStack.Count > 0)
+            {
+                _elementStack.Pop();
+            }
+
+            error = null;
+            return true;
+        }
+
+        private bool TryReadLiteralProperty(ReadOnlySpan<byte> payload, out string? error)
+        {
+            var position = 0;
+            if (!TryReadInt16(payload, ref position, out var attributeId)
+                || !TryReadPropertyValueString(payload, ref position, out var value, out var truncated))
+            {
+                error = "property 字串值已截斷或格式錯誤。";
+                return false;
+            }
+
+            AddPropertyValue(new PropertyValueData(attributeId, CurrentElementTypeId, "literal")
+            {
+                Value = value,
+                ValueTruncated = truncated
+            });
+            error = null;
+            return true;
+        }
+
+        private bool TryReadCustomProperty(ReadOnlySpan<byte> payload, out string? error)
+        {
+            var position = 0;
+            if (!TryReadInt16(payload, ref position, out var attributeId)
+                || !TryReadInt16(payload, ref position, out var serializerAndFlags))
+            {
+                error = "custom property 的 attribute 或 serializer type ID 已截斷。";
+                return false;
+            }
+
+            var serializerTypeId = (short)(serializerAndFlags & ~0x4000);
+            AddPropertyValue(new PropertyValueData(attributeId, CurrentElementTypeId, "custom-binary")
+            {
+                RelatedTypeId = serializerTypeId,
+                RelatedTypeIsKnownElementId = true,
+                DataSize = payload.Length - position
+            });
+            error = null;
+            return true;
+        }
+
+        private bool TryReadReferencedProperty(
+            ReadOnlySpan<byte> payload,
+            string kind,
+            ReferenceKind referenceKind,
+            out string? error)
+        {
+            var position = 0;
+            if (!TryReadInt16(payload, ref position, out var attributeId)
+                || !TryReadInt16(payload, ref position, out var referenceId))
+            {
+                error = $"{kind} property 的 attribute 或 reference ID 已截斷。";
+                return false;
+            }
+
+            AddPropertyValue(new PropertyValueData(attributeId, CurrentElementTypeId, kind)
+            {
+                ReferenceId = referenceId,
+                ReferenceKind = referenceKind
+            });
+            error = null;
+            return true;
+        }
+
+        private bool TryReadMarkupExtensionProperty(ReadOnlySpan<byte> payload, out string? error)
+        {
+            var position = 0;
+            if (!TryReadInt16(payload, ref position, out var attributeId)
+                || !TryReadInt16(payload, ref position, out var extensionAndFlags)
+                || !TryReadInt16(payload, ref position, out var referenceId))
+            {
+                error = "markup-extension property 的 attribute、extension type 或 value ID 已截斷。";
+                return false;
+            }
+
+            var referenceKind = (extensionAndFlags & 0x4000) != 0
+                ? ReferenceKind.Type
+                : (extensionAndFlags & 0x2000) != 0
+                    ? ReferenceKind.Property
+                    : ReferenceKind.ExtensionArgument;
+            AddPropertyValue(new PropertyValueData(attributeId, CurrentElementTypeId, "markup-extension")
+            {
+                ReferenceId = referenceId,
+                ReferenceKind = referenceKind,
+                RelatedTypeId = (short)(extensionAndFlags & 0x0FFF),
+                RelatedTypeIsKnownElementId = true
+            });
+            error = null;
+            return true;
+        }
+
+        private bool TryReadConvertedProperty(ReadOnlySpan<byte> payload, out string? error)
+        {
+            var position = 0;
+            if (!TryReadInt16(payload, ref position, out var attributeId)
+                || !TryReadPropertyValueString(payload, ref position, out var value, out var truncated)
+                || !TryReadInt16(payload, ref position, out var converterTypeId))
+            {
+                error = "converted property 的字串值或 converter type ID 已截斷。";
+                return false;
+            }
+
+            AddPropertyValue(new PropertyValueData(attributeId, CurrentElementTypeId, "converted")
+            {
+                Value = value,
+                ValueTruncated = truncated,
+                RelatedTypeId = converterTypeId
+            });
             error = null;
             return true;
         }
@@ -551,6 +897,24 @@ internal static class BamlSummaryReader
             AddUsage(_properties, attributeId);
             error = null;
             return true;
+        }
+
+        private short? CurrentElementTypeId =>
+            _elementStack.Count > 0 ? _elementStack.Peek() : null;
+
+        private void AddPropertyValue(PropertyValueData value)
+        {
+            PropertyCount++;
+            PropertyValueCount++;
+            AddUsage(_properties, value.PropertyId);
+            if (_propertyValues.Count < MaxPropertyValues)
+            {
+                _propertyValues.Add(value);
+            }
+            else
+            {
+                PropertyValuesTruncated = true;
+            }
         }
 
         private void AddDeclaration<T>(Dictionary<short, T> declarations, short id, T value)
@@ -584,5 +948,34 @@ internal static class BamlSummaryReader
         private sealed record TypeDeclaration(string Name, short AssemblyId);
 
         private sealed record AttributeDeclaration(string Name, short OwnerTypeId);
+
+        private sealed record BoundedText(string Value, bool Truncated);
+
+        private sealed record PropertyValueData(short PropertyId, short? ElementTypeId, string Kind)
+        {
+            public string? Value { get; init; }
+
+            public bool ValueTruncated { get; init; }
+
+            public short? ReferenceId { get; init; }
+
+            public ReferenceKind ReferenceKind { get; init; }
+
+            public short? RelatedTypeId { get; init; }
+
+            public bool RelatedTypeIsKnownElementId { get; init; }
+
+            public int? DataSize { get; init; }
+        }
+
+        private enum ReferenceKind
+        {
+            None,
+            String,
+            Type,
+            Property,
+            ExtensionArgument,
+            StaticResource
+        }
     }
 }
