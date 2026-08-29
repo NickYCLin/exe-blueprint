@@ -103,6 +103,115 @@ public sealed class IlBodyReconstructionTests
             body);
     }
 
+    [Theory]
+    [InlineData("int", "uint", 0x34, 0x41, ">=", "<")]
+    [InlineData("int", "uint", 0x35, 0x42, ">", "<=")]
+    [InlineData("int", "uint", 0x36, 0x43, "<=", ">")]
+    [InlineData("int", "uint", 0x37, 0x44, "<", ">=")]
+    [InlineData("long", "ulong", 0x34, 0x41, ">=", "<")]
+    [InlineData("long", "ulong", 0x35, 0x42, ">", "<=")]
+    [InlineData("long", "ulong", 0x36, 0x43, "<=", ">")]
+    [InlineData("long", "ulong", 0x37, 0x44, "<", ">=")]
+    [InlineData("nint", "nuint", 0x34, 0x41, ">=", "<")]
+    [InlineData("nint", "nuint", 0x35, 0x42, ">", "<=")]
+    [InlineData("nint", "nuint", 0x36, 0x43, "<=", ">")]
+    [InlineData("nint", "nuint", 0x37, 0x44, "<", ">=")]
+    public void LowersUnsignedRelationalBranchesAcrossIfAndLoopPaths(
+        string signedType,
+        string unsignedType,
+        int shortOpcode,
+        int longOpcode,
+        string takenOperator,
+        string fallThroughOperator)
+    {
+        var ifBody = new[]
+        {
+            $"if (unchecked(({unsignedType})arg0) {fallThroughOperator} unchecked(({unsignedType})arg1))",
+            "{",
+            "    return true;",
+            "}",
+            "return false;"
+        };
+        Assert.Equal(
+            ifBody,
+            Reconstruct(
+                BuildUnsignedRelationalIf((byte)shortOpcode, shortForm: true),
+                isInstance: false,
+                returnType: "bool",
+                parameterTypes: [signedType, unsignedType]));
+        Assert.Equal(
+            ifBody,
+            Reconstruct(
+                BuildUnsignedRelationalIf((byte)longOpcode, shortForm: false),
+                isInstance: false,
+                returnType: "bool",
+                parameterTypes: [signedType, unsignedType]));
+
+        var takenCondition =
+            $"unchecked(({unsignedType})arg0) {takenOperator} unchecked(({unsignedType})arg1)";
+        Assert.Equal(
+            [
+                "arg2 = 0;",
+                $"while ({takenCondition})",
+                "{",
+                "    arg2 = (arg2 + 1);",
+                "}",
+                "return arg2;"
+            ],
+            Reconstruct(
+                BuildUnsignedRelationalWhile((byte)shortOpcode),
+                isInstance: false,
+                returnType: "int",
+                parameterTypes: [signedType, unsignedType, "int"]));
+        Assert.Equal(
+            [
+                "do",
+                "{",
+                "    arg2 = (arg2 + 1);",
+                $"}} while ({takenCondition});",
+                "return arg2;"
+            ],
+            Reconstruct(
+                BuildUnsignedRelationalDoWhile((byte)longOpcode),
+                isInstance: false,
+                returnType: "int",
+                parameterTypes: [signedType, unsignedType, "int"]));
+    }
+
+    [Fact]
+    public void RejectsUnsignedRelationalBranchesForUnknownCrossFamilyAndFloatingTypes()
+    {
+        IReadOnlyList<string>[] unsafeOperandTypes =
+        [
+            [],
+            ["int", "ulong"],
+            ["float", "float"],
+            ["double", "double"]
+        ];
+
+        foreach (var operandTypes in unsafeOperandTypes)
+        {
+            var loopTypes = operandTypes.Count == 0
+                ? null
+                : new[] { operandTypes[0], operandTypes[1], "int" };
+            Assert.Null(Reconstruct(
+                BuildUnsignedRelationalIf(0x34, shortForm: true),
+                isInstance: false,
+                returnType: "bool",
+                parameterTypes: operandTypes));
+            Assert.Null(Reconstruct(
+                BuildUnsignedRelationalWhile(0x34),
+                isInstance: false,
+                returnType: "int",
+                parameterTypes: loopTypes));
+            Assert.Null(Reconstruct(
+                BuildUnsignedRelationalDoWhile(0x41),
+                isInstance: false,
+                returnType: "int",
+                parameterTypes: loopTypes));
+        }
+    }
+
     [Fact]
     public void ReconstructsTypedTruthinessConditions()
     {
@@ -975,6 +1084,40 @@ public sealed class IlBodyReconstructionTests
             exceptionRegions,
             parameterTypes);
     }
+
+    private static byte[] BuildUnsignedRelationalIf(byte opcode, bool shortForm) => shortForm
+        ?
+        [
+            0x02, 0x03,       // ldarg.0; ldarg.1
+            opcode, 0x02,     // branch to false return
+            0x17, 0x2A,       // ldc.i4.1; ret
+            0x16, 0x2A        // ldc.i4.0; ret
+        ]
+        :
+        [
+            0x02, 0x03,                   // ldarg.0; ldarg.1
+            opcode, 0x02, 0x00, 0x00, 0x00, // branch to false return
+            0x17, 0x2A,                   // ldc.i4.1; ret
+            0x16, 0x2A                    // ldc.i4.0; ret
+        ];
+
+    private static byte[] BuildUnsignedRelationalWhile(byte opcode) =>
+    [
+        0x16, 0x10, 0x02, // arg2 = 0
+        0x2B, 0x05,       // br.s condition
+        0x04, 0x17, 0x58, 0x10, 0x02, // body: arg2 = arg2 + 1
+        0x02, 0x03,       // condition: ldarg.0; ldarg.1
+        opcode, 0xF7,     // branch back to body
+        0x04, 0x2A        // return arg2
+    ];
+
+    private static byte[] BuildUnsignedRelationalDoWhile(byte opcode) =>
+    [
+        0x04, 0x17, 0x58, 0x10, 0x02, // body: arg2 = arg2 + 1
+        0x02, 0x03,                   // condition: ldarg.0; ldarg.1
+        opcode, 0xF4, 0xFF, 0xFF, 0xFF, // branch back to body
+        0x04, 0x2A                    // return arg2
+    ];
 }
 
 internal static class SwitchFixture

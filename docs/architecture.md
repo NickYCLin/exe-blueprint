@@ -102,6 +102,8 @@ auto-property 的隱藏欄位會還原成屬性名稱，運算子方法還原成
 重建 context 也會追蹤參數、區域變數、欄位、運算式與呼叫回傳型別；`brtrue`／`brfalse` 遇到參考型別時會輸出 `is null`／`is not null`，避免把物件直接當成 C# bool 條件。
 IL enum 位元運算的整數常值會轉回另一側的 enum 型別，enum selector 的 `switch` case 常值也會套用相同型別，避免輸出無法編譯的 enum／int 混合運算。
 `div.un`／`rem.un`／`cgt.un`／`clt.un` 只在兩側型別都能確認屬於同一個 int32、int64 或 native-int stack family 時還原；運算元會先明確轉成 `uint`、`ulong` 或 `nuint`，算術結果寫回同 family 的 signed／窄型別時再使用 `unchecked` 轉型。`cgt.un` 的既有 reference/null 正規化仍保留；型別未知、跨 family 或具 unordered 語意的浮點輸入則讓整個方法 fail closed。
+
+`bge.un`／`bgt.un`／`ble.un`／`blt.un`（含 short form）沿用同一個型別閘門；前向 `if` 會輸出 unsigned fall-through 補集，迴圈與 filter 所需的 taken 分支則輸出原始關係運算。浮點 `.un` 分支包含 NaN unordered 語意，尚未能無損表示時不會退化成一般 signed C# 比較。
 IL `switch` 跳表可還原直接 return／throw 的分支，也能處理各 case 指派區域變數後回到共同 join 的形狀；這類區域變數會提升到 switch 外並依 IL locals init 語意先設成 default。
 標準 `try/catch`、`try/finally`、`fault` 與複合 `try/catch/finally` 會依 exception region metadata 的保護區域與 handler 邊界還原，不靠跳轉位置猜測；保護區可用 `leave` 正常離開，也可由 `throw` 或合法巢狀 `rethrow` 直接終止。C# 沒有 `fault` 語法，因此會輸出語意等價的 `catch` 並在 handler 尾端重新拋出。
 `catch` 支援多個 handler、未命名 catch-all、具名例外變數、重新拋出，以及 Roslyn 產生的直線運算式與可混合巢狀的 `&&`／`||` 短路 `when` filter；filter 後接一般 catch 或與 finally 複合也能還原。跨區塊的區域變數會提升到 `try` 外並依 IL locals init 語意先設成 default。

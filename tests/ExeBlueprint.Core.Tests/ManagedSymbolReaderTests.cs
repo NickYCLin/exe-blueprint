@@ -127,6 +127,51 @@ public sealed class ManagedSymbolReaderTests
         Assert.Equal(
             ["return (unchecked((nuint)left) < unchecked((nuint)right));"],
             Assert.Single(fixture.Methods, method => method.Name == nameof(UnsignedArithmeticFixture.LessThanNativeUInt)).Body);
+        var selectAtLeast = Assert.Single(
+            fixture.Methods,
+            method => method.Name == nameof(UnsignedArithmeticFixture.SelectAtLeastUInt32));
+        Assert.Contains(
+            selectAtLeast.Il,
+            instruction => instruction.Contains("blt.un", StringComparison.Ordinal));
+        Assert.Equal(
+            [
+                "if (unchecked((uint)left) >= unchecked((uint)right))",
+                "{",
+                "    return 1;",
+                "}",
+                "return 0;"
+            ],
+            selectAtLeast.Body);
+        var selectGreater = Assert.Single(
+            fixture.Methods,
+            method => method.Name == nameof(UnsignedArithmeticFixture.SelectGreaterUInt64));
+        Assert.Contains(
+            selectGreater.Il,
+            instruction => instruction.Contains("ble.un", StringComparison.Ordinal));
+        Assert.Equal(
+            [
+                "if (unchecked((ulong)left) > unchecked((ulong)right))",
+                "{",
+                "    return 1;",
+                "}",
+                "return 0;"
+            ],
+            selectGreater.Body);
+        var selectAtMost = Assert.Single(
+            fixture.Methods,
+            method => method.Name == nameof(UnsignedArithmeticFixture.SelectAtMostNativeUInt));
+        Assert.Contains(
+            selectAtMost.Il,
+            instruction => instruction.Contains("bgt.un", StringComparison.Ordinal));
+        Assert.Equal(
+            [
+                "if (unchecked((nuint)left) <= unchecked((nuint)right))",
+                "{",
+                "    return 1;",
+                "}",
+                "return 0;"
+            ],
+            selectAtMost.Body);
     }
 
     [Fact]
@@ -2516,4 +2561,34 @@ internal static class UnsignedArithmeticFixture
     public static bool GreaterThanNativeUInt(nuint left, nuint right) => left > right;
 
     public static bool LessThanNativeUInt(nuint left, nuint right) => left < right;
+
+    public static int SelectAtLeastUInt32(uint left, uint right)
+    {
+        if (left >= right)
+        {
+            return 1;
+        }
+
+        return 0;
+    }
+
+    public static int SelectGreaterUInt64(ulong left, ulong right)
+    {
+        if (left > right)
+        {
+            return 1;
+        }
+
+        return 0;
+    }
+
+    public static int SelectAtMostNativeUInt(nuint left, nuint right)
+    {
+        if (left <= right)
+        {
+            return 1;
+        }
+
+        return 0;
+    }
 }

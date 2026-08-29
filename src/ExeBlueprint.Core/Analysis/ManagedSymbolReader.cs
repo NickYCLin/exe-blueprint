@@ -2376,14 +2376,25 @@ internal static class ManagedSymbolReader
             return false;
         }
 
+        if (IsUnsignedRelationalBranch(name))
+        {
+            return TryBuildUnsignedRelationalBranchCondition(
+                context,
+                name,
+                left,
+                right,
+                branchTaken: false,
+                out condition);
+        }
+
         condition = name switch
         {
             "beq" or "beq.s" => $"{left} != {right}",
             "bne.un" or "bne.un.s" => $"{left} == {right}",
-            "bge" or "bge.s" or "bge.un" or "bge.un.s" => $"{left} < {right}",
-            "bgt" or "bgt.s" or "bgt.un" or "bgt.un.s" => $"{left} <= {right}",
-            "ble" or "ble.s" or "ble.un" or "ble.un.s" => $"{left} > {right}",
-            "blt" or "blt.s" or "blt.un" or "blt.un.s" => $"{left} >= {right}",
+            "bge" or "bge.s" => $"{left} < {right}",
+            "bgt" or "bgt.s" => $"{left} <= {right}",
+            "ble" or "ble.s" => $"{left} > {right}",
+            "blt" or "blt.s" => $"{left} >= {right}",
             _ => string.Empty
         };
 
@@ -2534,18 +2545,77 @@ internal static class ManagedSymbolReader
             return false;
         }
 
+        if (IsUnsignedRelationalBranch(name))
+        {
+            return TryBuildUnsignedRelationalBranchCondition(
+                context,
+                name,
+                left,
+                right,
+                branchTaken: true,
+                out condition);
+        }
+
         condition = name switch
         {
             "beq" or "beq.s" => $"{left} == {right}",
             "bne.un" or "bne.un.s" => $"{left} != {right}",
-            "bge" or "bge.s" or "bge.un" or "bge.un.s" => $"{left} >= {right}",
-            "bgt" or "bgt.s" or "bgt.un" or "bgt.un.s" => $"{left} > {right}",
-            "ble" or "ble.s" or "ble.un" or "ble.un.s" => $"{left} <= {right}",
-            "blt" or "blt.s" or "blt.un" or "blt.un.s" => $"{left} < {right}",
+            "bge" or "bge.s" => $"{left} >= {right}",
+            "bgt" or "bgt.s" => $"{left} > {right}",
+            "ble" or "ble.s" => $"{left} <= {right}",
+            "blt" or "blt.s" => $"{left} < {right}",
             _ => string.Empty
         };
 
         return condition.Length > 0;
+    }
+
+    private static bool IsUnsignedRelationalBranch(string name) => name is
+        "bge.un" or "bge.un.s" or
+        "bgt.un" or "bgt.un.s" or
+        "ble.un" or "ble.un.s" or
+        "blt.un" or "blt.un.s";
+
+    private static bool TryBuildUnsignedRelationalBranchCondition(
+        ReconContext context,
+        string name,
+        string left,
+        string right,
+        bool branchTaken,
+        out string condition)
+    {
+        condition = string.Empty;
+        if (!TryGetUnsignedIntegralType(context, left, right, out var unsignedType))
+        {
+            return false;
+        }
+
+        var takenOperator = name switch
+        {
+            "bge.un" or "bge.un.s" => ">=",
+            "bgt.un" or "bgt.un.s" => ">",
+            "ble.un" or "ble.un.s" => "<=",
+            "blt.un" or "blt.un.s" => "<",
+            _ => string.Empty
+        };
+        var renderedOperator = branchTaken
+            ? takenOperator
+            : takenOperator switch
+            {
+                ">=" => "<",
+                ">" => "<=",
+                "<=" => ">",
+                "<" => ">=",
+                _ => string.Empty
+            };
+        if (renderedOperator.Length == 0)
+        {
+            return false;
+        }
+
+        condition =
+            $"unchecked(({unsignedType}){left}) {renderedOperator} unchecked(({unsignedType}){right})";
+        return true;
     }
 
     // brtrue／brfalse 可直接判斷 bool、整數、managed pointer 與 object reference，C# 則要求 bool 條件。
