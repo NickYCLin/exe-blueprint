@@ -31,7 +31,7 @@ Blueprint 中介資料
 
 ## Blueprint 資料
 
-目前 schema 版本是 `0.6`，主要欄位包括：
+目前 schema 版本是 `0.7`，主要欄位包括：
 
 - `input`：輸入類型、檔案數與總大小
 - `summary`：PE、assembly、型別、方法、資源和相依關係數量
@@ -62,7 +62,7 @@ Blueprint 中介資料
 用內建的 `ExportFunctions.py` 後置腳本把函式匯出成 JSON，再由 `GhidraOutputParser` 解析進 `FileArtifact.NativeCode`。
 Ghidra 安裝目錄來自 `--ghidra` 或環境變數 `GHIDRA_INSTALL_DIR`。找不到 Ghidra、逾時或執行失敗時不會讓整體分析失敗，
 只會把 `Backend` 記成 `none` 並附上註記，同時列入報告警告。原生函式與受管 `code` 分開存放，
-所以 C#／C++／Rust／Go 產生器不會誤把原生函式當成 .NET 型別輸出。
+所以 C#／C++／Rust／Go 產生器不會誤把原生函式當成 .NET 型別輸出。headless process 的 stdout/stderr 會同步清空並只保留 bounded diagnostic tail；逾時或取消會終止整個 process tree 並等待退出。匯出 JSON 最多 32 MiB、保留 100,000 筆函式及每欄 16,384 字元，超限會透過 `functionsTruncated` 明示，非零 exit code 或 schema 錯誤不會被當成成功結果。Windows 的 Ghidra launcher 是 batch；為避免 `%NAME%` 或 `!NAME!` 被 `cmd.exe` 多層展開成另一段路徑，launcher、輸入或暫存路徑若含 literal `%` 或 `!` 會安全略過並附上原因。
 
 ## 易語言
 

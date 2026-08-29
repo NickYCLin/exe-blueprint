@@ -10,6 +10,8 @@ public sealed record NativeCodeModel
     public int FunctionCount { get; init; }
 
     public IReadOnlyList<NativeFunction> Functions { get; init; } = [];
+
+    public bool FunctionsTruncated { get; init; }
 }
 
 public sealed record NativeFunction

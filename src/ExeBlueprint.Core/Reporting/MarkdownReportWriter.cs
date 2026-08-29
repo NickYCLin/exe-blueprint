@@ -176,10 +176,12 @@ public static class MarkdownReportWriter
                 builder.AppendLine($"| {EscapeCell(function.Name)} | {EscapeCell(function.Address ?? "-")} | {EscapeCell(function.Signature ?? "-")} |");
             }
 
-            if (native.Functions.Count > MaxNativeFunctionsPerFile)
+            if (native.FunctionCount > MaxNativeFunctionsPerFile || native.FunctionsTruncated)
             {
                 builder.AppendLine();
-                builder.AppendLine($"（僅列出前 {MaxNativeFunctionsPerFile} 個，共 {native.Functions.Count} 個函式，完整內容請看 blueprint.json）");
+                var retained = Math.Min(native.Functions.Count, MaxNativeFunctionsPerFile);
+                var suffix = native.FunctionsTruncated ? "；blueprint.json 亦已達安全保留上限" : string.Empty;
+                builder.AppendLine($"（報告僅列出前 {retained} 個，共偵測 {native.FunctionCount} 個函式{suffix}）");
             }
 
             builder.AppendLine();

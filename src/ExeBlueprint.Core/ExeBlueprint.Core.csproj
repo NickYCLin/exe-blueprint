@@ -4,4 +4,10 @@
     <AssemblyName>ExeBlueprint.Core</AssemblyName>
     <RootNamespace>ExeBlueprint</RootNamespace>
   </PropertyGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="../../scripts/ghidra/ExportFunctions.py"
+                      Link="Analysis/Ghidra/ExportFunctions.py"
+                      LogicalName="ExeBlueprint.Analysis.ExportFunctions.py" />
+  </ItemGroup>
 </Project>
