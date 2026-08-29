@@ -365,7 +365,11 @@ public static class CSharpSkeletonGenerator
         {
             foreach (var statement in method.Body)
             {
-                builder.AppendLine($"{body}    {statement}");
+                var humanized = HumanizeBodyStatement(
+                    statement,
+                    type.GenericParameters,
+                    method.GenericParameters);
+                builder.AppendLine($"{body}    {humanized}");
             }
         }
         else
@@ -633,6 +637,92 @@ public static class CSharpSkeletonGenerator
         }
 
         return text;
+    }
+
+    // Method body 來自 metadata 型別文字，可能仍含 !0／!!0。只轉換程式碼 token，
+    // 保留使用者原始 string／char literal 中恰好相同的內容。
+    private static string HumanizeBodyStatement(
+        string statement,
+        IReadOnlyList<string> typeGenerics,
+        IReadOnlyList<string> methodGenerics)
+    {
+        var builder = new StringBuilder(statement.Length);
+        var position = 0;
+        while (position < statement.Length)
+        {
+            if (statement[position] is '"' or '\'')
+            {
+                AppendQuotedLiteral(builder, statement, ref position);
+                continue;
+            }
+
+            if (statement[position] != '!')
+            {
+                builder.Append(statement[position++]);
+                continue;
+            }
+
+            var isMethodParameter = position + 1 < statement.Length && statement[position + 1] == '!';
+            var digitStart = position + (isMethodParameter ? 2 : 1);
+            var digitEnd = digitStart;
+            var parameterIndex = 0;
+            var overflow = false;
+            while (digitEnd < statement.Length && statement[digitEnd] is >= '0' and <= '9')
+            {
+                var digit = statement[digitEnd] - '0';
+                if (parameterIndex > (int.MaxValue - digit) / 10)
+                {
+                    overflow = true;
+                }
+                else if (!overflow)
+                {
+                    parameterIndex = (parameterIndex * 10) + digit;
+                }
+
+                digitEnd++;
+            }
+
+            var isCompleteToken = digitEnd > digitStart
+                && (digitEnd == statement.Length
+                    || !(char.IsLetterOrDigit(statement[digitEnd]) || statement[digitEnd] == '_'));
+            var parameters = isMethodParameter ? methodGenerics : typeGenerics;
+            if (!overflow && isCompleteToken && parameterIndex < parameters.Count)
+            {
+                builder.Append(parameters[parameterIndex]);
+                position = digitEnd;
+                continue;
+            }
+
+            if (digitEnd > digitStart)
+            {
+                builder.Append(statement, position, digitEnd - position);
+                position = digitEnd;
+                continue;
+            }
+
+            builder.Append(statement[position++]);
+        }
+
+        return builder.ToString();
+    }
+
+    private static void AppendQuotedLiteral(StringBuilder builder, string statement, ref int position)
+    {
+        var quote = statement[position++];
+        builder.Append(quote);
+        while (position < statement.Length)
+        {
+            var current = statement[position++];
+            builder.Append(current);
+            if (current == '\\' && position < statement.Length)
+            {
+                builder.Append(statement[position++]);
+            }
+            else if (current == quote)
+            {
+                break;
+            }
+        }
     }
 
     private static string CleanName(string name)

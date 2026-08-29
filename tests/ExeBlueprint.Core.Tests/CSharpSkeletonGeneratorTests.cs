@@ -134,6 +134,37 @@ public sealed class CSharpSkeletonGeneratorTests
     }
 
     [Fact]
+    public async Task HumanizesGenericMetadataTokensInsideReconstructedBodies()
+    {
+        var assemblyPath = typeof(CSharpSkeletonGenericBodyFixture<>).Assembly.Location;
+        var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
+        var fixture = Assert.Single(
+            document.Files[0].Code!.Types,
+            type => type.FullName == "ExeBlueprint.Core.Tests.CSharpSkeletonGenericBodyFixture");
+
+        Assert.True(Assert.Single(fixture.Methods, method => method.Name == "TypeComparer").BodyReconstructed);
+        Assert.True(Assert.Single(fixture.Methods, method => method.Name == "MethodComparer").BodyReconstructed);
+        Assert.True(Assert.Single(fixture.Methods, method => method.Name == "MetadataLikeLiteral").BodyReconstructed);
+        Assert.True(Assert.Single(fixture.Methods, method => method.Name == "EscapedMetadataLikeLiteral").BodyReconstructed);
+
+        var source = Assert.Single(
+            CSharpSkeletonGenerator.Generate(document),
+            file => file.RelativePath.EndsWith("ExeBlueprint.Core.Tests.cs", StringComparison.Ordinal)).Content;
+
+        Assert.Contains(
+            "return System.Collections.Generic.EqualityComparer<T>.Default;",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "return System.Collections.Generic.EqualityComparer<TMethod>.Default;",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains("return \"!0 !!0\";", source, StringComparison.Ordinal);
+        Assert.Contains("return \"\\\"!0\\\" \\\\\\\\ !!0\";", source, StringComparison.Ordinal);
+        Assert.Empty(FindRawGenericTokensOutsideCommentsAndLiterals(source));
+    }
+
+    [Fact]
     public async Task InitializesStructMembersWhenInstanceConstructorExists()
     {
         var assemblyPath = typeof(StructInitializerFixture).Assembly.Location;
@@ -220,6 +251,122 @@ public sealed class CSharpSkeletonGeneratorTests
         Assert.Contains(files, file => file.RelativePath == "Demo_App/Demo_App.csproj");
         Assert.Contains(files, file => file.RelativePath == "Demo_App_2/Demo_App_2.csproj");
         Assert.Equal(files.Count, files.Select(file => file.RelativePath).Distinct(StringComparer.OrdinalIgnoreCase).Count());
+    }
+
+    private static IReadOnlyList<string> FindRawGenericTokensOutsideCommentsAndLiterals(string source)
+    {
+        var matches = new List<string>();
+        var inString = false;
+        var inCharacter = false;
+        var inLineComment = false;
+        var inBlockComment = false;
+        var escaped = false;
+        var line = 1;
+
+        for (var index = 0; index < source.Length; index++)
+        {
+            var current = source[index];
+            var next = index + 1 < source.Length ? source[index + 1] : '\0';
+
+            if (current == '\n')
+            {
+                line++;
+                inLineComment = false;
+            }
+
+            if (inLineComment)
+            {
+                continue;
+            }
+
+            if (inBlockComment)
+            {
+                if (current == '*' && next == '/')
+                {
+                    inBlockComment = false;
+                    index++;
+                }
+
+                continue;
+            }
+
+            if (inString || inCharacter)
+            {
+                if (escaped)
+                {
+                    escaped = false;
+                    continue;
+                }
+
+                if (current == '\\')
+                {
+                    escaped = true;
+                    continue;
+                }
+
+                if (inString && current == '"')
+                {
+                    inString = false;
+                }
+                else if (inCharacter && current == '\'')
+                {
+                    inCharacter = false;
+                }
+
+                continue;
+            }
+
+            if (current == '/' && next == '/')
+            {
+                inLineComment = true;
+                index++;
+                continue;
+            }
+
+            if (current == '/' && next == '*')
+            {
+                inBlockComment = true;
+                index++;
+                continue;
+            }
+
+            if (current == '"')
+            {
+                inString = true;
+                continue;
+            }
+
+            if (current == '\'')
+            {
+                inCharacter = true;
+                continue;
+            }
+
+            if (current != '!')
+            {
+                continue;
+            }
+
+            var tokenEnd = index + 1;
+            if (tokenEnd < source.Length && source[tokenEnd] == '!')
+            {
+                tokenEnd++;
+            }
+
+            var digitStart = tokenEnd;
+            while (tokenEnd < source.Length && char.IsAsciiDigit(source[tokenEnd]))
+            {
+                tokenEnd++;
+            }
+
+            if (tokenEnd > digitStart)
+            {
+                matches.Add($"line {line}: {source[index..tokenEnd]}");
+                index = tokenEnd - 1;
+            }
+        }
+
+        return matches;
     }
 
     private static FileArtifact CreateManagedArtifact(string assemblyName, IReadOnlyList<string> references) =>
