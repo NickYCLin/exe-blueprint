@@ -152,6 +152,15 @@ public sealed class CSharpSkeletonGeneratorTests
 
         Assert.True(Assert.Single(fixture.Methods, method => method.Name == "TypeComparer").BodyReconstructed);
         Assert.True(Assert.Single(fixture.Methods, method => method.Name == "MethodComparer").BodyReconstructed);
+        Assert.True(Assert.Single(fixture.Methods, method => method.Name == "EmptyTypeArray").BodyReconstructed);
+        Assert.True(Assert.Single(fixture.Methods, method => method.Name == "EmptyMethodArray").BodyReconstructed);
+        var isKnownState = Assert.Single(fixture.Methods, method => method.Name == "IsKnownState");
+        Assert.True(isKnownState.BodyReconstructed);
+        Assert.Contains(
+            isKnownState.Il,
+            instruction => instruction.Contains(
+                "System.Enum.IsDefined<ExeBlueprint.Core.Tests.GenericCallState>",
+                StringComparison.Ordinal));
         Assert.True(Assert.Single(fixture.Methods, method => method.Name == "MetadataLikeLiteral").BodyReconstructed);
         Assert.True(Assert.Single(fixture.Methods, method => method.Name == "EscapedMetadataLikeLiteral").BodyReconstructed);
 
@@ -165,6 +174,12 @@ public sealed class CSharpSkeletonGeneratorTests
             StringComparison.Ordinal);
         Assert.Contains(
             "return System.Collections.Generic.EqualityComparer<TMethod>.Default;",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains("return System.Array.Empty<T>();", source, StringComparison.Ordinal);
+        Assert.Contains("return System.Array.Empty<TMethod>();", source, StringComparison.Ordinal);
+        Assert.Contains(
+            "return System.Enum.IsDefined<ExeBlueprint.Core.Tests.GenericCallState>(unchecked((ExeBlueprint.Core.Tests.GenericCallState)0));",
             source,
             StringComparison.Ordinal);
         Assert.Contains("return \"!0 !!0\";", source, StringComparison.Ordinal);

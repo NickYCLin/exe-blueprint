@@ -422,6 +422,19 @@ public sealed class ManagedSymbolReaderTests
     }
 
     [Fact]
+    public void InstantiatesMethodSpecificationSignatureTokensAtomically()
+    {
+        var arguments = Enumerable.Range(0, 11).Select(index => $"T{index}").ToArray();
+
+        Assert.Equal(
+            "Example<T10, T1, !0>",
+            ManagedSymbolReader.InstantiateMethodSignatureType("Example<!!10, !!1, !0>", arguments));
+        Assert.Equal(
+            "Example<!!11, !!0Suffix>",
+            ManagedSymbolReader.InstantiateMethodSignatureType("Example<!!11, !!0Suffix>", arguments));
+    }
+
+    [Fact]
     public async Task ExtractsRefLikeTypeShape()
     {
         var assemblyPath = typeof(RefStructFixture).Assembly.Location;

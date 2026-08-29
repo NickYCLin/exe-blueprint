@@ -903,7 +903,8 @@ internal static class ManagedSymbolReader
         bool HasThis,
         string ReturnType,
         bool ReturnsVoid,
-        IReadOnlyList<string> ParameterTypes);
+        IReadOnlyList<string> ParameterTypes,
+        IReadOnlyList<string> GenericArguments);
 
     private const int MaxStructureDepth = 32;
 
@@ -3122,7 +3123,10 @@ internal static class ManagedSymbolReader
             return true;
         }
 
-        var call = $"{target}.{info.Name}({string.Join(", ", args)})";
+        var methodName = info.GenericArguments.Count == 0
+            ? info.Name
+            : $"{info.Name}<{string.Join(", ", info.GenericArguments)}>";
+        var call = $"{target}.{methodName}({string.Join(", ", args)})";
         if (info.ReturnsVoid)
         {
             statements.Add($"{call};");
@@ -3287,7 +3291,8 @@ internal static class ManagedSymbolReader
                     methodSignature.Header.IsInstance,
                     methodSignature.ReturnType,
                     methodSignature.ReturnType == "void",
-                    methodSignature.ParameterTypes);
+                    methodSignature.ParameterTypes,
+                    []);
 
             case HandleKind.MemberReference:
                 var member = metadata.GetMemberReference((MemberReferenceHandle)handle);
@@ -3304,11 +3309,26 @@ internal static class ManagedSymbolReader
                     memberSignature.Header.IsInstance,
                     memberSignature.ReturnType,
                     memberSignature.ReturnType == "void",
-                    memberSignature.ParameterTypes);
+                    memberSignature.ParameterTypes,
+                    []);
 
             case HandleKind.MethodSpecification:
                 var spec = metadata.GetMethodSpecification((MethodSpecificationHandle)handle);
-                return ResolveCall(metadata, MetadataTokens.GetToken(spec.Method));
+                var resolved = ResolveCall(metadata, MetadataTokens.GetToken(spec.Method));
+                if (resolved is null)
+                {
+                    return null;
+                }
+
+                var genericArguments = spec.DecodeSignature(SignatureTypeNameProvider.Instance, null);
+                return resolved with
+                {
+                    ReturnType = InstantiateMethodSignatureType(resolved.ReturnType, genericArguments),
+                    ParameterTypes = resolved.ParameterTypes
+                        .Select(type => InstantiateMethodSignatureType(type, genericArguments))
+                        .ToArray(),
+                    GenericArguments = genericArguments
+                };
 
             default:
                 return null;
@@ -3451,11 +3471,75 @@ internal static class ManagedSymbolReader
 
             case HandleKind.MethodSpecification:
                 var spec = metadata.GetMethodSpecification((MethodSpecificationHandle)handle);
-                return ResolveMemberName(metadata, MetadataTokens.GetToken(spec.Method));
+                var resolved = ResolveMemberName(metadata, MetadataTokens.GetToken(spec.Method));
+                if (resolved is null)
+                {
+                    return null;
+                }
+
+                var genericArguments = spec.DecodeSignature(SignatureTypeNameProvider.Instance, null);
+                return genericArguments.Length == 0
+                    ? resolved
+                    : $"{resolved}<{string.Join(", ", genericArguments)}>";
 
             default:
                 return null;
         }
+    }
+
+    internal static string InstantiateMethodSignatureType(
+        string signatureType,
+        IReadOnlyList<string> genericArguments)
+    {
+        if (genericArguments.Count == 0 || !signatureType.Contains("!!", StringComparison.Ordinal))
+        {
+            return signatureType;
+        }
+
+        var builder = new System.Text.StringBuilder(signatureType.Length);
+        for (var position = 0; position < signatureType.Length;)
+        {
+            if (signatureType[position] != '!' ||
+                position + 2 >= signatureType.Length ||
+                signatureType[position + 1] != '!' ||
+                !char.IsAsciiDigit(signatureType[position + 2]))
+            {
+                builder.Append(signatureType[position++]);
+                continue;
+            }
+
+            var digitEnd = position + 2;
+            var argumentIndex = 0;
+            var overflow = false;
+            while (digitEnd < signatureType.Length && char.IsAsciiDigit(signatureType[digitEnd]))
+            {
+                var digit = signatureType[digitEnd] - '0';
+                if (argumentIndex > (int.MaxValue - digit) / 10)
+                {
+                    overflow = true;
+                }
+                else if (!overflow)
+                {
+                    argumentIndex = (argumentIndex * 10) + digit;
+                }
+
+                digitEnd++;
+            }
+
+            var hasTokenBoundary = digitEnd == signatureType.Length ||
+                !(char.IsLetterOrDigit(signatureType[digitEnd]) || signatureType[digitEnd] == '_');
+            if (!overflow && hasTokenBoundary && argumentIndex < genericArguments.Count)
+            {
+                builder.Append(genericArguments[argumentIndex]);
+                position = digitEnd;
+                continue;
+            }
+
+            builder.Append(signatureType, position, digitEnd - position);
+            position = digitEnd;
+        }
+
+        return builder.ToString();
     }
 
     private static string? GetTypeName(MetadataReader metadata, EntityHandle handle)
