@@ -141,6 +141,73 @@ public sealed class IlBodyReconstructionTests
     }
 
     [Fact]
+    public void NormalizesIlBooleanEqualityWithoutChangingUnorderedComparisonSemantics()
+    {
+        byte[] equalsFalse = [0x02, 0x16, 0xFE, 0x01, 0x2A];
+        byte[] equalsTrue = [0x02, 0x17, 0xFE, 0x01, 0x2A];
+        byte[] invertedLessThanZero =
+        [
+            0x02,
+            0x23, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0xFE, 0x04,
+            0x16,
+            0xFE, 0x01,
+            0x2A
+        ];
+
+        Assert.Equal(
+            ["return !(arg0);"],
+            Reconstruct(equalsFalse, isInstance: false, returnType: "bool", parameterTypes: ["bool"]));
+        Assert.Equal(
+            ["return arg0;"],
+            Reconstruct(equalsTrue, isInstance: false, returnType: "bool", parameterTypes: ["bool"]));
+        var inverted = Assert.Single(
+            Reconstruct(
+                invertedLessThanZero,
+                isInstance: false,
+                returnType: "bool",
+                parameterTypes: ["double"])!);
+        Assert.Equal("return !((arg0 < 0));", inverted);
+        Assert.DoesNotContain(">=", inverted, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void NormalizesUnsignedReferenceNullComparison()
+    {
+        byte[] il = [0x02, 0x14, 0xFE, 0x03, 0x2A];
+        byte[] reversed = [0x14, 0x02, 0xFE, 0x03, 0x2A];
+        byte[] numeric = [0x02, 0x03, 0xFE, 0x03, 0x2A];
+
+        Assert.Equal(
+            ["return (arg0 is not null);"],
+            Reconstruct(il, isInstance: false, returnType: "bool", parameterTypes: ["object"]));
+        Assert.Null(Reconstruct(reversed, isInstance: false, returnType: "bool", parameterTypes: ["object"]));
+        Assert.Null(
+            Reconstruct(
+                numeric,
+                isInstance: false,
+                returnType: "bool",
+                parameterTypes: ["uint", "uint"]));
+    }
+
+    [Fact]
+    public void RejectsUnsignedUnorderedComparisonWithoutTypedLowering()
+    {
+        byte[] il =
+        [
+            0x02,
+            0x23, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0xFE, 0x05,
+            0x16,
+            0xFE, 0x01,
+            0x2A
+        ];
+
+        Assert.Null(
+            Reconstruct(il, isInstance: false, returnType: "bool", parameterTypes: ["double"]));
+    }
+
+    [Fact]
     public void ReconstructsTerminalSwitchCases()
     {
         // static int M(int n) => n switch { 0 => 10, 1 => 20, 2 => 30, _ => 99 };

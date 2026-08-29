@@ -2807,11 +2807,13 @@ internal static class ManagedSymbolReader
             case "ceq":
                 return TryBinary(context, stack, "==", "bool");
             case "cgt":
-            case "cgt.un":
                 return TryBinary(context, stack, ">", "bool");
+            case "cgt.un":
+                return TryUnsignedReferenceNullComparison(context, stack);
             case "clt":
-            case "clt.un":
                 return TryBinary(context, stack, "<", "bool");
+            case "clt.un":
+                return false;
             case "neg":
                 return TryUnary(context, stack, "-");
             case "not":
@@ -2924,7 +2926,11 @@ internal static class ManagedSymbolReader
         return true;
     }
 
-    private static bool TryBinary(ReconContext context, Stack<string> stack, string op, string? resultType = null)
+    private static bool TryBinary(
+        ReconContext context,
+        Stack<string> stack,
+        string op,
+        string? resultType = null)
     {
         if (stack.Count < 2)
         {
@@ -2935,6 +2941,12 @@ internal static class ManagedSymbolReader
         var left = stack.Pop();
         context.ExpressionTypes.TryGetValue(left, out var leftType);
         context.ExpressionTypes.TryGetValue(right, out var rightType);
+        if (op == "==" && TryNormalizeBooleanEquality(left, leftType, right, rightType, out var booleanEquality))
+        {
+            PushExpression(context, stack, booleanEquality, "bool");
+            return true;
+        }
+
         if (op is "&" or "|" or "^")
         {
             if (IsPotentialEnumType(leftType) && IsIntegerLiteral(right))
@@ -2955,6 +2967,54 @@ internal static class ManagedSymbolReader
         }
 
         PushExpression(context, stack, $"({left} {op} {right})", resultType);
+        return true;
+    }
+
+    private static bool TryNormalizeBooleanEquality(
+        string left,
+        string? leftType,
+        string right,
+        string? rightType,
+        out string expression)
+    {
+        if (leftType == "bool" && TryReadIlBooleanLiteral(right, rightType, out var rightValue))
+        {
+            expression = rightValue ? left : $"!({left})";
+            return true;
+        }
+
+        if (rightType == "bool" && TryReadIlBooleanLiteral(left, leftType, out var leftValue))
+        {
+            expression = leftValue ? right : $"!({right})";
+            return true;
+        }
+
+        expression = string.Empty;
+        return false;
+    }
+
+    private static bool TryReadIlBooleanLiteral(string expression, string? type, out bool value)
+    {
+        if (type == "int" && expression is "0" or "1")
+        {
+            value = expression == "1";
+            return true;
+        }
+
+        value = false;
+        return false;
+    }
+
+    private static bool TryUnsignedReferenceNullComparison(ReconContext context, Stack<string> stack)
+    {
+        if (!TryPop(stack, out var right) || !TryPop(stack, out var left) || right != "null" ||
+            !context.ExpressionTypes.TryGetValue(left, out var leftType) ||
+            !IsKnownReferenceType(context.Metadata, leftType))
+        {
+            return false;
+        }
+
+        PushExpression(context, stack, $"({left} is not null)", "bool");
         return true;
     }
 
