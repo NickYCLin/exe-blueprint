@@ -251,6 +251,20 @@ public sealed class CSharpSkeletonGeneratorTests
     }
 
     [Fact]
+    public async Task EmitsTopLevelAndNestedDelegateDeclarations()
+    {
+        var assemblyPath = typeof(GenericPredicateFixture<>).Assembly.Location;
+        var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
+        var source = Assert.Single(
+            CSharpSkeletonGenerator.Generate(document),
+            file => file.RelativePath.EndsWith("ExeBlueprint.Core.Tests.cs", StringComparison.Ordinal)).Content;
+
+        Assert.Contains("internal delegate bool GenericPredicateFixture<T>(T value);", source);
+        Assert.Contains("        public delegate T Projector(U value);", source);
+        Assert.DoesNotContain("class GenericPredicateFixture", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void GeneratesSolutionAndReferencesForRelatedAssemblies()
     {
         var document = new BlueprintDocument

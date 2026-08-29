@@ -35,7 +35,7 @@ public static class CSharpSkeletonGenerator
             var projectDirectory = project.ProjectDirectory;
 
             var emittableTypes = artifact.Code!.Types
-                .Where(type => !IsCompilerGenerated(type.Name) && type.Kind != "delegate")
+                .Where(type => !IsCompilerGenerated(type.Name))
                 .ToArray();
             var nestedTypesByDeclaringType = emittableTypes
                 .Where(type => type.IsNested && !string.IsNullOrEmpty(type.DeclaringType))
@@ -135,6 +135,12 @@ public static class CSharpSkeletonGenerator
         IReadOnlyDictionary<string, TypeModel[]> nestedTypesByDeclaringType,
         IReadOnlySet<string> refLikeTypes)
     {
+        if (type.Kind == "delegate")
+        {
+            AppendDelegate(builder, type, indent);
+            return;
+        }
+
         var declaration = BuildTypeDeclaration(type);
         builder.AppendLine($"{indent}{declaration}");
         builder.AppendLine($"{indent}{{");
@@ -347,6 +353,28 @@ public static class CSharpSkeletonGenerator
             var assignment = member.ConstantValue?.Value is string value ? $" = {value}" : "";
             builder.AppendLine($"{body}{SafeName(member.Name)}{assignment},");
         }
+    }
+
+    private static void AppendDelegate(StringBuilder builder, TypeModel type, string indent)
+    {
+        var invoke = type.Methods.FirstOrDefault(method => method.Name == "Invoke");
+        var name = CleanName(type.Name);
+        var declaredGenericParameters = type.GenericParameters
+            .Skip(type.InheritedGenericParameterCount)
+            .ToArray();
+        if (declaredGenericParameters.Length > 0)
+        {
+            name += $"<{string.Join(", ", declaredGenericParameters)}>";
+        }
+
+        var returnType = invoke is null
+            ? "void"
+            : Humanize(invoke.ReturnType, type.GenericParameters, invoke.GenericParameters);
+        var parameters = invoke is null
+            ? ""
+            : string.Join(", ", invoke.Parameters.Select(parameter =>
+                $"{Humanize(parameter.Type, type.GenericParameters, invoke.GenericParameters)} {SafeName(parameter.Name)}"));
+        builder.AppendLine($"{indent}{type.Accessibility} delegate {returnType} {name}({parameters});");
     }
 
     private static void AppendMethod(StringBuilder builder, TypeModel type, MethodModel method, string body)

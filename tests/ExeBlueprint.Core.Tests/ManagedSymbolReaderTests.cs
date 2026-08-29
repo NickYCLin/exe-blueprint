@@ -1569,6 +1569,8 @@ internal class NestedTypeFixture<T>
 {
     public sealed class Child<U>
     {
+        public delegate T Projector(U value);
+
         public T? OuterValue { get; init; }
 
         public U? InnerValue { get; init; }
@@ -1595,6 +1597,8 @@ internal sealed class NestedTypeReferenceFixture<T, U>
 internal readonly record struct StructInitializerFixture(string Value);
 
 internal sealed record NullableHashFixture(int? Value);
+
+internal delegate bool GenericPredicateFixture<T>(T value);
 
 internal sealed class RefLikePropertyFixture
 {
