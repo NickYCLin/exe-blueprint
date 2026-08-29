@@ -228,7 +228,7 @@ public static class CSharpSkeletonGenerator
                     property.IsNewSlot);
             if (type.Kind != "interface" &&
                 !property.IsAbstract &&
-                (isIndexer || IsRefLikeType(propertyType, refLikeTypes)))
+                (isIndexer || IsByRefType(propertyType) || IsRefLikeType(propertyType, refLikeTypes)))
             {
                 builder.AppendLine($"{body}{modifiers}{propertyType} {propertyName}");
                 builder.AppendLine($"{body}{{");
@@ -630,6 +630,9 @@ public static class CSharpSkeletonGenerator
             "System.RuntimeArgumentHandle" ||
             refLikeTypes.Contains(definitionName);
     }
+
+    private static bool IsByRefType(string typeName) =>
+        typeName.StartsWith("ref ", StringComparison.Ordinal);
 
     private static bool ShouldSkipMethod(MethodModel method)
     {

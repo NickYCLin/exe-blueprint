@@ -1599,8 +1599,11 @@ internal sealed record NullableHashFixture(int? Value);
 internal sealed class RefLikePropertyFixture
 {
     private readonly byte[] _buffer = [];
+    private int _value;
 
     public ReadOnlySpan<byte> Header => _buffer;
+
+    public ref int ValueRef => ref _value;
 }
 
 internal ref struct RefStructFixture
