@@ -3593,7 +3593,8 @@ internal static class ManagedSymbolReader
         "or" => "|",
         "xor" => "^",
         "shl" => "<<",
-        "shr" or "shr.un" => ">>",
+        "shr" => ">>",
+        "shr.un" => ">>>",
         _ => "?"
     };
 

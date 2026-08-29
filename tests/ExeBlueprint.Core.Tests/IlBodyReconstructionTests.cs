@@ -266,6 +266,35 @@ public sealed class IlBodyReconstructionTests
     }
 
     [Fact]
+    public void PreservesSignedAndUnsignedRightShiftSemantics()
+    {
+        byte[] signedShift = [0x02, 0x17, 0x63, 0x2A];
+        byte[] unsignedShift = [0x02, 0x17, 0x64, 0x2A];
+
+        Assert.Equal(
+            ["return (arg0 >> 1);"],
+            Reconstruct(
+                signedShift,
+                isInstance: false,
+                returnType: "int",
+                parameterTypes: ["int"]));
+        Assert.Equal(
+            ["return (arg0 >>> 1);"],
+            Reconstruct(
+                unsignedShift,
+                isInstance: false,
+                returnType: "int",
+                parameterTypes: ["int"]));
+        Assert.Equal(
+            ["return (arg0 >>> 1);"],
+            Reconstruct(
+                unsignedShift,
+                isInstance: false,
+                returnType: "long",
+                parameterTypes: ["long"]));
+    }
+
+    [Fact]
     public void ReconstructsTerminalSwitchCases()
     {
         // static int M(int n) => n switch { 0 => 10, 1 => 20, 2 => 30, _ => 99 };
