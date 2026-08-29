@@ -633,7 +633,7 @@ public static class CSharpSkeletonGenerator
         }
 
         bases.AddRange(type.Interfaces
-            .Where(ShouldEmitInterface)
+            .Where(name => ShouldEmitInterface(type, name))
             .Select(name => Humanize(name, type.GenericParameters, [])));
 
         var declaration = string.Join(" ", parts);
@@ -834,7 +834,7 @@ public static class CSharpSkeletonGenerator
         return false;
     }
 
-    internal static bool ShouldEmitInterface(string name)
+    internal static bool ShouldEmitInterface(TypeModel type, string name)
     {
         if (ContainsCompilerGeneratedTypeSegment(name))
         {
@@ -847,11 +847,105 @@ public static class CSharpSkeletonGenerator
             return true;
         }
 
-        // collection 類泛型介面仍有 explicit accessor／out 參數等契約待補；
-        // 先只輸出目前 member generator 能完整滿足的兩種介面，避免產生不可編譯骨架。
-        return name[..genericStart] is
-            "System.Collections.Generic.IEnumerator" or
-            "System.Collections.Generic.IEqualityComparer";
+        if (!TryGetSingleGenericArgument(name, genericStart, out var argument))
+        {
+            return false;
+        }
+
+        // collection 類泛型介面的 explicit accessor／out 參數契約仍待完整支援。
+        // 只有目前 member generator 確定會輸出完整公開契約時才保留介面，避免合法輸入產生 CS0535。
+        return name[..genericStart] switch
+        {
+            "System.Collections.Generic.IEnumerator" => type.Properties.Any(property =>
+                property.Name == "Current" &&
+                property.Accessibility == "public" &&
+                (property.GetterAccessibility ?? property.Accessibility) == "public" &&
+                property.HasGetter &&
+                !property.IsStatic &&
+                property.Parameters.Count == 0 &&
+                SameContractType(property.Type, argument)),
+            "System.Collections.Generic.IEqualityComparer" =>
+                HasPublicInstanceMethod(type, "Equals", "bool", [argument, argument]) &&
+                HasPublicInstanceMethod(type, "GetHashCode", "int", [argument]),
+            _ => false
+        };
+    }
+
+    private static bool TryGetSingleGenericArgument(string name, int genericStart, out string argument)
+    {
+        argument = string.Empty;
+        if (genericStart <= 0 || genericStart >= name.Length - 2 || name[^1] != '>')
+        {
+            return false;
+        }
+
+        var depth = 0;
+        for (var index = genericStart; index < name.Length; index++)
+        {
+            switch (name[index])
+            {
+                case '<':
+                    depth++;
+                    break;
+                case '>':
+                    depth--;
+                    if (depth < 0 || (depth == 0 && index != name.Length - 1))
+                    {
+                        return false;
+                    }
+
+                    break;
+                case ',' when depth == 1:
+                    return false;
+            }
+        }
+
+        if (depth != 0)
+        {
+            return false;
+        }
+
+        argument = name[(genericStart + 1)..^1].Trim();
+        return argument.Length > 0;
+    }
+
+    private static bool HasPublicInstanceMethod(
+        TypeModel type,
+        string name,
+        string returnType,
+        IReadOnlyList<string> parameterTypes) =>
+        type.Methods.Any(method =>
+            method.Name == name &&
+            method.Accessibility == "public" &&
+            !method.IsStatic &&
+            !method.IsConstructor &&
+            method.GenericParameters.Count == 0 &&
+            SameContractType(method.ReturnType, returnType) &&
+            method.Parameters.Select(parameter => NormalizeContractType(parameter.Type)).SequenceEqual(
+                parameterTypes.Select(NormalizeContractType),
+                StringComparer.Ordinal));
+
+    private static bool SameContractType(string left, string right) =>
+        string.Equals(
+            NormalizeContractType(left),
+            NormalizeContractType(right),
+            StringComparison.Ordinal);
+
+    private static string NormalizeContractType(string typeName)
+    {
+        var normalized = typeName.Trim();
+        if (!normalized.EndsWith('?'))
+        {
+            return normalized;
+        }
+
+        var withoutAnnotation = normalized[..^1].TrimEnd();
+        var digitStart = withoutAnnotation.StartsWith("!!", StringComparison.Ordinal) ? 2 : 1;
+        return withoutAnnotation.StartsWith('!') &&
+               digitStart < withoutAnnotation.Length &&
+               withoutAnnotation[digitStart..].All(character => character is >= '0' and <= '9')
+            ? withoutAnnotation
+            : normalized;
     }
 
     private static string Sanitize(string value)

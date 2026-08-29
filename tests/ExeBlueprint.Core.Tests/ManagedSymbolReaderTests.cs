@@ -1946,3 +1946,75 @@ internal static class ExceptionHandlingFixture
         }
     }
 }
+
+internal sealed class GenericEnumeratorFixture<T> : IEnumerator<T>
+{
+    public T Current => default!;
+
+    object System.Collections.IEnumerator.Current => default!;
+
+    public bool MoveNext() => false;
+
+    public void Reset()
+    {
+    }
+
+    public void Dispose()
+    {
+    }
+}
+
+internal sealed class ExplicitGenericComparerFixture<T> : IEqualityComparer<T>
+{
+    bool IEqualityComparer<T>.Equals(T? x, T? y) => EqualityComparer<T>.Default.Equals(x, y);
+
+    int IEqualityComparer<T>.GetHashCode(T obj) => EqualityComparer<T>.Default.GetHashCode(obj!);
+}
+
+internal sealed class ExplicitGenericEnumeratorFixture<T> : IEnumerator<T>
+{
+    T IEnumerator<T>.Current => default!;
+
+    object System.Collections.IEnumerator.Current => default!;
+
+    bool System.Collections.IEnumerator.MoveNext() => false;
+
+    void System.Collections.IEnumerator.Reset()
+    {
+    }
+
+    void IDisposable.Dispose()
+    {
+    }
+}
+
+internal sealed class IndexedCurrentEnumeratorDecoyFixture<T> : IEnumerator<T>
+{
+    [System.Runtime.CompilerServices.IndexerName("Current")]
+    public T this[int index] => default!;
+
+    T IEnumerator<T>.Current => default!;
+
+    object System.Collections.IEnumerator.Current => default!;
+
+    bool System.Collections.IEnumerator.MoveNext() => false;
+
+    void System.Collections.IEnumerator.Reset()
+    {
+    }
+
+    void IDisposable.Dispose()
+    {
+    }
+}
+
+internal sealed class NullableValueComparerDecoyFixture : IEqualityComparer<int>
+{
+    bool IEqualityComparer<int>.Equals(int x, int y) => x == y;
+
+    int IEqualityComparer<int>.GetHashCode(int obj) => obj;
+
+    public bool Equals(int? x, int? y) => x == y;
+
+    public int GetHashCode(int? obj) => obj.GetHashCode();
+}

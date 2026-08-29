@@ -98,6 +98,25 @@ public sealed class CSharpSkeletonGeneratorTests
     {
         var assemblyPath = typeof(GenericInterfaceFixture<>).Assembly.Location;
         var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
+        var types = document.Files[0].Code!.Types;
+        var comparer = Assert.Single(
+            types,
+            type => type.FullName == "ExeBlueprint.Core.Tests.GenericInterfaceFixture");
+        var enumerator = Assert.Single(
+            types,
+            type => type.FullName == "ExeBlueprint.Core.Tests.GenericEnumeratorFixture");
+        var explicitComparer = Assert.Single(
+            types,
+            type => type.FullName == "ExeBlueprint.Core.Tests.ExplicitGenericComparerFixture");
+        var explicitEnumerator = Assert.Single(
+            types,
+            type => type.FullName == "ExeBlueprint.Core.Tests.ExplicitGenericEnumeratorFixture");
+        var indexedCurrentDecoy = Assert.Single(
+            types,
+            type => type.FullName == "ExeBlueprint.Core.Tests.IndexedCurrentEnumeratorDecoyFixture");
+        var nullableValueDecoy = Assert.Single(
+            types,
+            type => type.FullName == "ExeBlueprint.Core.Tests.NullableValueComparerDecoyFixture");
         var source = Assert.Single(
             CSharpSkeletonGenerator.Generate(document),
             file => file.RelativePath.EndsWith("ExeBlueprint.Core.Tests.cs", StringComparison.Ordinal)).Content;
@@ -106,12 +125,53 @@ public sealed class CSharpSkeletonGeneratorTests
             "internal sealed class GenericInterfaceFixture<T> : System.Collections.Generic.IEqualityComparer<T>",
             source,
             StringComparison.Ordinal);
+        Assert.Contains(
+            "internal sealed class GenericEnumeratorFixture<T> : System.Collections.Generic.IEnumerator<T>",
+            source,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "ExplicitGenericComparerFixture<T> : System.Collections.Generic.IEqualityComparer<T>",
+            source,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "ExplicitGenericEnumeratorFixture<T> : System.Collections.Generic.IEnumerator<T>",
+            source,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "IndexedCurrentEnumeratorDecoyFixture<T> : System.Collections.Generic.IEnumerator<T>",
+            source,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "NullableValueComparerDecoyFixture : System.Collections.Generic.IEqualityComparer<int>",
+            source,
+            StringComparison.Ordinal);
         Assert.True(CSharpSkeletonGenerator.ShouldEmitInterface(
+            enumerator,
             "System.Collections.Generic.IEnumerator<!0>"));
         Assert.True(CSharpSkeletonGenerator.ShouldEmitInterface(
+            comparer,
             "System.Collections.Generic.IEqualityComparer<!0>"));
         Assert.False(CSharpSkeletonGenerator.ShouldEmitInterface(
+            comparer,
             "System.Collections.Generic.ICollection<!0>"));
+        Assert.False(CSharpSkeletonGenerator.ShouldEmitInterface(
+            explicitComparer,
+            "System.Collections.Generic.IEqualityComparer<!0>"));
+        Assert.False(CSharpSkeletonGenerator.ShouldEmitInterface(
+            explicitEnumerator,
+            "System.Collections.Generic.IEnumerator<!0>"));
+        Assert.False(CSharpSkeletonGenerator.ShouldEmitInterface(
+            indexedCurrentDecoy,
+            "System.Collections.Generic.IEnumerator<!0>"));
+        Assert.False(CSharpSkeletonGenerator.ShouldEmitInterface(
+            nullableValueDecoy,
+            "System.Collections.Generic.IEqualityComparer<int>"));
+        Assert.False(CSharpSkeletonGenerator.ShouldEmitInterface(
+            comparer,
+            "System.Collections.Generic.IEqualityComparer<!0, string>"));
+        Assert.False(CSharpSkeletonGenerator.ShouldEmitInterface(
+            comparer,
+            "System.Collections.Generic.IEqualityComparer<!0"));
         Assert.False(CSharpSkeletonGenerator.ContainsCompilerGeneratedTypeSegment(
             "System.Collections.Generic.IEnumerator<!0>"));
         Assert.True(CSharpSkeletonGenerator.ContainsCompilerGeneratedTypeSegment("Example.<State>d__1"));
