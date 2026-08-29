@@ -188,29 +188,40 @@ public static class CSharpSkeletonGenerator
 
         foreach (var property in type.Properties.Where(property => !IsCompilerGenerated(property.Name)))
         {
+            var isExplicitInterfaceMember = IsExplicitInterfaceMember(property.Name);
             var propertyType = Humanize(property.Type, type.GenericParameters, []);
             var accessors = new StringBuilder("{ ");
             if (property.HasGetter)
             {
-                AppendAccessorAccessibility(accessors, property.GetterAccessibility, property.Accessibility, property.HasSetter);
+                if (!isExplicitInterfaceMember)
+                {
+                    AppendAccessorAccessibility(accessors, property.GetterAccessibility, property.Accessibility, property.HasSetter);
+                }
+
                 accessors.Append("get; ");
             }
 
             if (property.HasSetter)
             {
-                AppendAccessorAccessibility(accessors, property.SetterAccessibility, property.Accessibility, property.HasGetter);
+                if (!isExplicitInterfaceMember)
+                {
+                    AppendAccessorAccessibility(accessors, property.SetterAccessibility, property.Accessibility, property.HasGetter);
+                }
+
                 accessors.Append("set; ");
             }
 
             accessors.Append('}');
-            var modifiers = BuildMemberModifiers(
-                type,
-                property.Accessibility,
-                property.IsStatic,
-                property.IsAbstract,
-                property.IsVirtual,
-                property.IsFinal,
-                property.IsNewSlot);
+            var modifiers = isExplicitInterfaceMember
+                ? string.Empty
+                : BuildMemberModifiers(
+                    type,
+                    property.Accessibility,
+                    property.IsStatic,
+                    property.IsAbstract,
+                    property.IsVirtual,
+                    property.IsFinal,
+                    property.IsNewSlot);
             if (type.Kind != "interface" &&
                 !property.IsAbstract &&
                 IsRefLikeType(propertyType, refLikeTypes))
@@ -220,22 +231,30 @@ public static class CSharpSkeletonGenerator
                 if (property.HasGetter)
                 {
                     var getterAccessibility = new StringBuilder();
-                    AppendAccessorAccessibility(
-                        getterAccessibility,
-                        property.GetterAccessibility,
-                        property.Accessibility,
-                        property.HasSetter);
+                    if (!isExplicitInterfaceMember)
+                    {
+                        AppendAccessorAccessibility(
+                            getterAccessibility,
+                            property.GetterAccessibility,
+                            property.Accessibility,
+                            property.HasSetter);
+                    }
+
                     builder.AppendLine($"{body}    {getterAccessibility}get => throw new global::System.NotImplementedException();");
                 }
 
                 if (property.HasSetter)
                 {
                     var setterAccessibility = new StringBuilder();
-                    AppendAccessorAccessibility(
-                        setterAccessibility,
-                        property.SetterAccessibility,
-                        property.Accessibility,
-                        property.HasGetter);
+                    if (!isExplicitInterfaceMember)
+                    {
+                        AppendAccessorAccessibility(
+                            setterAccessibility,
+                            property.SetterAccessibility,
+                            property.Accessibility,
+                            property.HasGetter);
+                    }
+
                     builder.AppendLine($"{body}    {setterAccessibility}set {{ }}");
                 }
 
@@ -403,7 +422,7 @@ public static class CSharpSkeletonGenerator
 
     private static string BuildMethodModifiers(TypeModel type, MethodModel method)
     {
-        if (type.Kind == "interface")
+        if (type.Kind == "interface" || IsExplicitInterfaceMember(method.Name))
         {
             return "";
         }
@@ -615,13 +634,17 @@ public static class CSharpSkeletonGenerator
             return true;
         }
 
-        return method.Name.StartsWith("get_", StringComparison.Ordinal)
-            || method.Name.StartsWith("set_", StringComparison.Ordinal)
-            || method.Name.StartsWith("add_", StringComparison.Ordinal)
-            || method.Name.StartsWith("remove_", StringComparison.Ordinal)
-            || method.Name.StartsWith("op_", StringComparison.Ordinal)
+        var unqualifiedName = method.Name[(method.Name.LastIndexOf('.') + 1)..];
+        return unqualifiedName.StartsWith("get_", StringComparison.Ordinal)
+            || unqualifiedName.StartsWith("set_", StringComparison.Ordinal)
+            || unqualifiedName.StartsWith("add_", StringComparison.Ordinal)
+            || unqualifiedName.StartsWith("remove_", StringComparison.Ordinal)
+            || unqualifiedName.StartsWith("op_", StringComparison.Ordinal)
             || IsCompilerGenerated(method.Name);
     }
+
+    private static bool IsExplicitInterfaceMember(string name) =>
+        name.Contains('.', StringComparison.Ordinal);
 
     private static string Humanize(string typeText, IReadOnlyList<string> typeGenerics, IReadOnlyList<string> methodGenerics)
     {

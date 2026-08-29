@@ -165,6 +165,30 @@ public sealed class CSharpSkeletonGeneratorTests
     }
 
     [Fact]
+    public async Task EmitsExplicitInterfaceMembersWithoutAccessibilityOrAccessorMethods()
+    {
+        var assemblyPath = typeof(CSharpSkeletonExplicitInterfaceFixture).Assembly.Location;
+        var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
+        var source = Assert.Single(
+            CSharpSkeletonGenerator.Generate(document),
+            file => file.RelativePath.EndsWith("ExeBlueprint.Core.Tests.cs", StringComparison.Ordinal)).Content;
+
+        Assert.Contains(
+            "string ExeBlueprint.Core.Tests.ICSharpSkeletonExplicitInterfaceFixture.Name { get; } = default!;",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "void ExeBlueprint.Core.Tests.ICSharpSkeletonExplicitInterfaceFixture.Execute()",
+            source,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "private string ExeBlueprint.Core.Tests.ICSharpSkeletonExplicitInterfaceFixture.Name",
+            source,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(".get_Name()", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task InitializesStructMembersWhenInstanceConstructorExists()
     {
         var assemblyPath = typeof(StructInitializerFixture).Assembly.Location;
