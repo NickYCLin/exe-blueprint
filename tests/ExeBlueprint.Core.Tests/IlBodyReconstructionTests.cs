@@ -172,13 +172,32 @@ public sealed class IlBodyReconstructionTests
     }
 
     [Fact]
-    public void CastsIntegerLiteralReturnedAsEnum()
+    public void CastsIntegerExpressionReturnedAsEnum()
     {
         byte[] il = [0x19, 0x2A]; // ldc.i4.3; ret
+        byte[] converted = [0x17, 0x6A, 0x2A]; // ldc.i4.1; conv.i8; ret
+        byte[] argument = [0x02, 0x2A]; // ldarg.0; ret
 
         Assert.Equal(
             ["return unchecked((System.Reflection.FieldAttributes)3);"],
             Reconstruct(il, isInstance: false, returnType: "System.Reflection.FieldAttributes"));
+        Assert.Equal(
+            ["return unchecked((Example.LongEnum)(long)(1));"],
+            Reconstruct(converted, isInstance: false, returnType: "Example.LongEnum"));
+        Assert.Equal(
+            ["return unchecked((System.Reflection.FieldAttributes)arg0);"],
+            Reconstruct(
+                argument,
+                isInstance: false,
+                returnType: "System.Reflection.FieldAttributes",
+                parameterTypes: ["int"]));
+        Assert.Equal(
+            ["return arg0;"],
+            Reconstruct(
+                argument,
+                isInstance: false,
+                returnType: "System.Reflection.FieldAttributes",
+                parameterTypes: ["System.Reflection.FieldAttributes"]));
         Assert.Equal(
             ["return 3;"],
             Reconstruct(il, isInstance: false, returnType: "int"));

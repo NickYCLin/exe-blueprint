@@ -2902,7 +2902,7 @@ internal static class ManagedSymbolReader
                     {
                         value = value == "1" ? "true" : "false";
                     }
-                    else if (IsPotentialEnumType(context.ReturnType) && IsIntegerLiteral(value))
+                    else if (IsPotentialEnumType(context.ReturnType) && IsIntegerExpression(context, value))
                     {
                         value = $"unchecked(({context.ReturnType}){value})";
                     }
@@ -3027,6 +3027,21 @@ internal static class ManagedSymbolReader
         var value = expression.TrimEnd('L', 'l', 'U', 'u');
         return long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out _);
     }
+
+    private static bool IsIntegerExpression(ReconContext context, string expression) =>
+        IsIntegerLiteral(expression) ||
+        (context.ExpressionTypes.TryGetValue(expression, out var type) && type is
+            "char" or
+            "sbyte" or
+            "byte" or
+            "short" or
+            "ushort" or
+            "int" or
+            "uint" or
+            "long" or
+            "ulong" or
+            "nint" or
+            "nuint");
 
     private static bool IsPotentialEnumType(string? type) => type is not null
         && type is not ("bool" or "char" or "sbyte" or "byte" or "short" or "ushort" or "int" or "uint"
