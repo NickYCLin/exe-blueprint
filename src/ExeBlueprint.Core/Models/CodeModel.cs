@@ -333,6 +333,9 @@ public sealed record PropertyModel
 
     public required string Accessibility { get; init; }
 
+    // 非空時代表 metadata property signature 的 index parameters。
+    public IReadOnlyList<ParameterModel> Parameters { get; init; } = [];
+
     public string? GetterAccessibility { get; init; }
 
     public string? SetterAccessibility { get; init; }

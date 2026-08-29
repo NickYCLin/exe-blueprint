@@ -31,12 +31,12 @@ Blueprint 中介資料
 
 ## Blueprint 資料
 
-目前 schema 版本是 `0.4`，主要欄位包括：
+目前 schema 版本是 `0.5`，主要欄位包括：
 
 - `input`：輸入類型、檔案數與總大小
 - `summary`：PE、assembly、型別、方法、資源和相依關係數量
 - `files`：每個檔案的格式、雜湊和分析資料，受管組件另含 `code`
-- `files[].code`：.NET 型別、巢狀宣告與 ref-like 關係、欄位、屬性、事件、方法簽章與 dispatch 旗標、入口點、方法層級呼叫圖、manifest 資源與各方法反組譯出的 IL
+- `files[].code`：.NET 型別、巢狀宣告與 ref-like 關係、欄位、含 index parameters 的屬性、事件、方法簽章與 dispatch 旗標、入口點、方法層級呼叫圖、manifest 資源與各方法反組譯出的 IL
 - `dependencies`：PE imports 與 assembly references
 - `technologies`：語言、runtime、框架和工具鏈判斷
 - `warnings`：略過或無法分析的項目

@@ -3947,17 +3947,25 @@ internal static class ManagedSymbolReader
         foreach (var handle in definition.GetProperties())
         {
             var property = metadata.GetPropertyDefinition(handle);
+            var accessors = property.GetAccessors();
             string propertyType;
+            IReadOnlyList<ParameterModel> parameters;
             try
             {
-                propertyType = property.DecodeSignature(SignatureTypeNameProvider.Instance, null).ReturnType;
+                var signature = property.DecodeSignature(SignatureTypeNameProvider.Instance, null);
+                propertyType = signature.ReturnType;
+                parameters = ReadPropertyParameters(
+                    metadata,
+                    accessors.Getter,
+                    accessors.Setter,
+                    signature.ParameterTypes);
             }
             catch (BadImageFormatException)
             {
                 propertyType = "object";
+                parameters = [];
             }
 
-            var accessors = property.GetAccessors();
             var getter = ReadAccessor(metadata, accessors.Getter);
             var setter = ReadAccessor(metadata, accessors.Setter);
             var accessorShapes = new[] { getter, setter }.OfType<AccessorShape>().ToArray();
@@ -3966,6 +3974,7 @@ internal static class ManagedSymbolReader
                 Name = metadata.GetString(property.Name),
                 Type = propertyType,
                 Accessibility = MostVisibleAccessibility(accessorShapes),
+                Parameters = parameters,
                 GetterAccessibility = getter?.Accessibility,
                 SetterAccessibility = setter?.Accessibility,
                 HasGetter = !accessors.Getter.IsNil,
@@ -3979,6 +3988,46 @@ internal static class ManagedSymbolReader
         }
 
         return properties;
+    }
+
+    private static IReadOnlyList<ParameterModel> ReadPropertyParameters(
+        MetadataReader metadata,
+        MethodDefinitionHandle getterHandle,
+        MethodDefinitionHandle setterHandle,
+        IReadOnlyList<string> parameterTypes)
+    {
+        if (parameterTypes.Count == 0)
+        {
+            return [];
+        }
+
+        var accessorHandle = !getterHandle.IsNil ? getterHandle : setterHandle;
+        Dictionary<int, string> parameterNames = [];
+        Dictionary<int, ParameterHandle> parameterHandles = [];
+        byte? nullableContext = null;
+        if (!accessorHandle.IsNil)
+        {
+            var accessor = metadata.GetMethodDefinition(accessorHandle);
+            parameterNames = ReadParameterNames(metadata, accessor);
+            parameterHandles = ReadParameterHandles(metadata, accessor);
+            nullableContext = ReadNullableContextFlag(metadata, accessor);
+        }
+
+        var parameters = new List<ParameterModel>(parameterTypes.Count);
+        for (var index = 0; index < parameterTypes.Count; index++)
+        {
+            var name = parameterNames.TryGetValue(index + 1, out var value) && !string.IsNullOrEmpty(value)
+                ? value
+                : $"arg{index}";
+            var type = ApplyTopLevelNullableAnnotation(
+                metadata,
+                parameterTypes[index],
+                parameterHandles.TryGetValue(index + 1, out var parameterHandle) ? parameterHandle : default,
+                nullableContext);
+            parameters.Add(new ParameterModel { Name = name, Type = type });
+        }
+
+        return parameters;
     }
 
     private static IReadOnlyList<EventModel> ReadEvents(MetadataReader metadata, TypeDefinition definition)

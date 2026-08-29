@@ -169,6 +169,14 @@ public sealed class CSharpSkeletonGeneratorTests
     {
         var assemblyPath = typeof(CSharpSkeletonExplicitInterfaceFixture).Assembly.Location;
         var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
+        var fixture = Assert.Single(
+            document.Files[0].Code!.Types,
+            type => type.FullName == "ExeBlueprint.Core.Tests.CSharpSkeletonExplicitInterfaceFixture");
+        var indexer = Assert.Single(fixture.Properties, property => property.Name.EndsWith(".Item", StringComparison.Ordinal));
+        var indexParameter = Assert.Single(indexer.Parameters);
+        Assert.Equal("index", indexParameter.Name);
+        Assert.Equal("int", indexParameter.Type);
+
         var source = Assert.Single(
             CSharpSkeletonGenerator.Generate(document),
             file => file.RelativePath.EndsWith("ExeBlueprint.Core.Tests.cs", StringComparison.Ordinal)).Content;
@@ -181,11 +189,21 @@ public sealed class CSharpSkeletonGeneratorTests
             "void ExeBlueprint.Core.Tests.ICSharpSkeletonExplicitInterfaceFixture.Execute()",
             source,
             StringComparison.Ordinal);
+        Assert.Contains(
+            "string ExeBlueprint.Core.Tests.ICSharpSkeletonExplicitInterfaceFixture.this[int index]",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains("public string this[string key]", source, StringComparison.Ordinal);
+        Assert.Contains("    get => throw new global::System.NotImplementedException();", source, StringComparison.Ordinal);
+        Assert.Contains("    set { }", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("this[string key] { get; set; }", source, StringComparison.Ordinal);
         Assert.DoesNotContain(
             "private string ExeBlueprint.Core.Tests.ICSharpSkeletonExplicitInterfaceFixture.Name",
             source,
             StringComparison.Ordinal);
         Assert.DoesNotContain(".get_Name()", source, StringComparison.Ordinal);
+        Assert.DoesNotContain(".get_Item(", source, StringComparison.Ordinal);
+        Assert.DoesNotContain(".set_Item(", source, StringComparison.Ordinal);
     }
 
     [Fact]

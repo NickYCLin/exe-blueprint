@@ -189,7 +189,11 @@ public static class CSharpSkeletonGenerator
         foreach (var property in type.Properties.Where(property => !IsCompilerGenerated(property.Name)))
         {
             var isExplicitInterfaceMember = IsExplicitInterfaceMember(property.Name);
+            var isIndexer = property.Parameters.Count > 0;
             var propertyType = Humanize(property.Type, type.GenericParameters, []);
+            var propertyName = isIndexer
+                ? FormatIndexerName(property, type.GenericParameters)
+                : SafeName(property.Name);
             var accessors = new StringBuilder("{ ");
             if (property.HasGetter)
             {
@@ -224,9 +228,9 @@ public static class CSharpSkeletonGenerator
                     property.IsNewSlot);
             if (type.Kind != "interface" &&
                 !property.IsAbstract &&
-                IsRefLikeType(propertyType, refLikeTypes))
+                (isIndexer || IsRefLikeType(propertyType, refLikeTypes)))
             {
-                builder.AppendLine($"{body}{modifiers}{propertyType} {SafeName(property.Name)}");
+                builder.AppendLine($"{body}{modifiers}{propertyType} {propertyName}");
                 builder.AppendLine($"{body}{{");
                 if (property.HasGetter)
                 {
@@ -265,7 +269,7 @@ public static class CSharpSkeletonGenerator
                 var initializer = ShouldInitializeSkeletonMember(type) && !property.IsAbstract
                     ? " = default!;"
                     : "";
-                builder.AppendLine($"{body}{modifiers}{propertyType} {SafeName(property.Name)} {accessors}{initializer}");
+                builder.AppendLine($"{body}{modifiers}{propertyType} {propertyName} {accessors}{initializer}");
             }
 
             wroteMember = true;
@@ -645,6 +649,20 @@ public static class CSharpSkeletonGenerator
 
     private static bool IsExplicitInterfaceMember(string name) =>
         name.Contains('.', StringComparison.Ordinal);
+
+    private static string FormatIndexerName(PropertyModel property, IReadOnlyList<string> typeGenerics)
+    {
+        var parameters = string.Join(", ", property.Parameters.Select(parameter =>
+            $"{Humanize(parameter.Type, typeGenerics, [])} {SafeName(parameter.Name)}"));
+        var separator = property.Name.LastIndexOf('.');
+        if (separator < 0)
+        {
+            return $"this[{parameters}]";
+        }
+
+        var qualifier = Humanize(property.Name[..separator], typeGenerics, []);
+        return $"{qualifier}.this[{parameters}]";
+    }
 
     private static string Humanize(string typeText, IReadOnlyList<string> typeGenerics, IReadOnlyList<string> methodGenerics)
     {
