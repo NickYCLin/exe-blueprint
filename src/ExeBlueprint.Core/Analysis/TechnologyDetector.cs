@@ -131,7 +131,8 @@ internal static class TechnologyDetector
         var paths = files.Select(file => file.RelativePath).ToArray();
         var names = files.Select(file => file.FileName).ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-        if (paths.Any(path => path.EndsWith("resources/app.asar", StringComparison.OrdinalIgnoreCase)) ||
+        if (files.Any(file => file.Format == "ASAR archive") ||
+            paths.Any(path => path.EndsWith("resources/app.asar", StringComparison.OrdinalIgnoreCase)) ||
             names.Contains("electron.exe"))
         {
             Add(detections, "electron", "Electron", "framework", 0.99, "應用程式套件含有 Electron 的 app.asar 或 electron.exe");

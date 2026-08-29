@@ -8,6 +8,16 @@ public sealed record AnalysisOptions
 
     public long MaxFileBytes { get; init; } = 4L * 1024 * 1024 * 1024;
 
+    public int MaxArchiveDepth { get; init; } = 8;
+
+    internal int MaxWorkspacePathCharacters { get; init; } = 8 * 1024 * 1024;
+
+    internal int MaxWorkspaceArchives { get; init; } = 1_024;
+
+    internal long MaxWorkspaceArchiveHeaderBytes { get; init; } = 64L * 1024 * 1024;
+
+    internal int MaxWorkspaceArchiveNodes { get; init; } = 100_000;
+
     public int BinarySignalSampleBytes { get; init; } = 4 * 1024 * 1024;
 
     // 開啟後會對原生 PE 呼叫 Ghidra headless 抽函式；沒裝 Ghidra 時只會加註記，不會失敗。

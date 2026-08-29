@@ -2,7 +2,7 @@ namespace ExeBlueprint.Models;
 
 public sealed record BlueprintDocument
 {
-    public string SchemaVersion { get; init; } = "0.7";
+    public string SchemaVersion { get; init; } = "0.8";
 
     public DateTimeOffset GeneratedAtUtc { get; init; } = DateTimeOffset.UtcNow;
 
@@ -12,11 +12,34 @@ public sealed record BlueprintDocument
 
     public IReadOnlyList<FileArtifact> Files { get; init; } = [];
 
+    public IReadOnlyList<ArchiveExpansion> Archives { get; init; } = [];
+
     public IReadOnlyList<DependencyEdge> Dependencies { get; init; } = [];
 
     public IReadOnlyList<TechnologyDetection> Technologies { get; init; } = [];
 
     public IReadOnlyList<string> Warnings { get; init; } = [];
+}
+
+public sealed record ArchiveExpansion
+{
+    public required string ContainerPath { get; init; }
+
+    public int Depth { get; init; }
+
+    public long HeaderBytes { get; init; }
+
+    public int NodeCount { get; init; }
+
+    public int PackedEntryCount { get; init; }
+
+    public int UnpackedEntryCount { get; init; }
+
+    public int LinkCount { get; init; }
+
+    public bool Complete { get; init; }
+
+    public string? Error { get; init; }
 }
 
 public sealed record InputDescriptor

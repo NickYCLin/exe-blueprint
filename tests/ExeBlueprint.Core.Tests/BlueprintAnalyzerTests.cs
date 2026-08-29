@@ -76,6 +76,24 @@ public sealed class BlueprintAnalyzerTests
     }
 
     [Fact]
+    public async Task ZipRejectsFileDirectoryConflictEvenWhenSortNeighborsDiffer()
+    {
+        await using var temp = new TemporaryDirectory();
+        var zipPath = Path.Combine(temp.Path, "conflict.zip");
+        using (var archive = ZipFile.Open(zipPath, ZipArchiveMode.Create))
+        {
+            foreach (var name in new[] { "a", "a-b", "a/child.txt" })
+            {
+                var entry = archive.CreateEntry(name);
+                await using var output = entry.Open();
+                await output.WriteAsync("x"u8.ToArray());
+            }
+        }
+
+        await Assert.ThrowsAsync<InvalidDataException>(() => new BlueprintAnalyzer().AnalyzeAsync(zipPath));
+    }
+
+    [Fact]
     public async Task DotNetBundleMarkerPreventsEmbeddedDetectorStringsFromCausingFalsePositives()
     {
         await using var temp = new TemporaryDirectory();

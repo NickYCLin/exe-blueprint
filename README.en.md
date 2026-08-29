@@ -6,7 +6,7 @@
 [![GitHub Release](https://img.shields.io/github/v/release/NickYCLin/exe-blueprint)](https://github.com/NickYCLin/exe-blueprint/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-ExeBlueprint is a cross-platform static analyzer for Windows EXE, DLL, folder, and ZIP application packages. It inspects PE files, .NET metadata and IL, dependencies, embedded resources, and WPF BAML, then exports a machine-readable software blueprint plus a readable Markdown report.
+ExeBlueprint is a cross-platform static analyzer for Windows EXE/DLL files and application inputs supplied as folders, ZIP packages, or Electron ASAR archives. It inspects PE files, .NET metadata and IL, dependencies, embedded resources, and WPF BAML, then exports a machine-readable software blueprint plus a readable Markdown report.
 
 It includes an Avalonia desktop app for Windows, macOS, and Linux, as well as a command-line interface. Analysis is static by default: ExeBlueprint does not run the input application.
 
@@ -32,7 +32,7 @@ Each archive also includes the `exe-blueprint-cli` command-line tool and checksu
 
 ## What it analyzes
 
-- Individual EXE or DLL files, folders, and ZIP application packages
+- Individual EXE or DLL files, folders, ZIP packages, and Electron ASAR archives, including bounded nested ASAR expansion
 - PE architecture, subsystem, sections, signature metadata, and imports
 - .NET assembly references, namespaces, types, fields, properties, events, methods, enum values, and inheritance
 - IL instructions, method-level call graphs, and reconstructable C# control flow
@@ -53,7 +53,7 @@ exe-blueprint-output/<input-name>-<timestamp>/
 └─ REPORT.md
 ```
 
-`blueprint.json` is intended for further automation and reconstruction workflows. `REPORT.md` is a Traditional Chinese summary for human review.
+`blueprint.json` schema 0.8 records each file's direct, directory, ZIP, or ASAR provenance and an `archives` list with ASAR expansion counts, completeness, and errors. `REPORT.md` is a Traditional Chinese summary for human review.
 
 Optional generators can also create structural starting points under:
 
@@ -79,6 +79,7 @@ Analyze an application with the CLI:
 ```powershell
 dotnet run --project .\src\ExeBlueprint.Cli -- analyze .\MyApplication
 dotnet run --project .\src\ExeBlueprint.Cli -- analyze .\MyApplication.zip
+dotnet run --project .\src\ExeBlueprint.Cli -- analyze .\resources\app.asar
 dotnet run --project .\src\ExeBlueprint.Cli -- analyze .\App.exe -o .\report
 ```
 
@@ -101,7 +102,9 @@ If Ghidra is unavailable, the rest of the analysis continues and the report reco
 
 - Analyze only software that you own or are authorized to inspect.
 - Do not commit customer binaries, credentials, private configuration, or analysis output to the repository.
-- ZIP extraction rejects path traversal and symbolic links and enforces file-count and size limits.
+- ZIP extraction rejects path traversal, cross-platform path collisions, and symbolic links and enforces file-count and size limits.
+- ASAR handling strictly validates the Chromium Pickle header, bounded JSON tree, portable paths, offsets, sizes, and data ranges before copying entries into a private staging directory. `.asar.unpacked` files must not be reparse points and must match the declared size; ASAR links are validated but never materialized as operating-system links.
+- File, byte, nesting-depth, archive-count, cumulative-header, node, and retained-path budgets apply across nested ASAR expansion. Invalid or partial archives remain visible with explicit completeness and error data instead of being reported as fully expanded.
 - Custom `.resources` types are not deserialized, and WPF objects are not instantiated during BAML inspection. BAML output includes record counts, element/property usage, file-declared mappings, WPF 10 built-in ID names, and bounded property-value samples; converters and custom binary serializers are identified but never executed, while unknown or reserved IDs remain numeric.
 - Detection and reconstructed code must be reviewed by an engineer before use.
 

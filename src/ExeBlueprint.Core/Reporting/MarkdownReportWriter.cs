@@ -84,16 +84,17 @@ public static class MarkdownReportWriter
 
         AppendCodeStructure(builder, document);
         AppendNativeFunctions(builder, document);
+        AppendArchiveExpansions(builder, document);
 
         builder.AppendLine();
         builder.AppendLine("## 檔案清單");
         builder.AppendLine();
-        builder.AppendLine("| 路徑 | 類型 | 大小 | SHA-256 |");
-        builder.AppendLine("| --- | --- | ---: | --- |");
+        builder.AppendLine("| 路徑 | 來源 | 類型 | 大小 | SHA-256 |");
+        builder.AppendLine("| --- | --- | --- | ---: | --- |");
         foreach (var file in document.Files)
         {
             var shortHash = string.IsNullOrWhiteSpace(file.Sha256) ? "-" : file.Sha256[..Math.Min(12, file.Sha256.Length)];
-            builder.AppendLine($"| `{EscapeInline(file.RelativePath)}` | {EscapeCell(file.Format)} | {FormatBytes(file.Size)} | `{shortHash}` |");
+            builder.AppendLine($"| `{EscapeInline(file.RelativePath)}` | {EscapeCell(FormatOrigin(file.Origin))} | {EscapeCell(file.Format)} | {FormatBytes(file.Size)} | `{shortHash}` |");
         }
 
         builder.AppendLine();
@@ -121,7 +122,7 @@ public static class MarkdownReportWriter
             builder.AppendLine();
             foreach (var warning in document.Warnings)
             {
-                builder.AppendLine($"- {warning}");
+                builder.AppendLine($"- {EscapeMarkdownText(warning)}");
             }
         }
 
@@ -135,6 +136,7 @@ public static class MarkdownReportWriter
     private const int MaxTypesPerFile = 20;
     private const int MaxCallEdgesPerFile = 30;
     private const int MaxNativeFunctionsPerFile = 100;
+    private const int MaxArchiveExpansions = 50;
     private const int MaxResourcesPerFile = 30;
     private const int MaxResourceEntriesPerFile = 50;
     private const int MaxBamlElementsPerFile = 50;
@@ -142,6 +144,36 @@ public static class MarkdownReportWriter
     private const int MaxStaticResourcesPerDeferredResource = 5;
     private const int MaxBamlPropertyValuesPerFile = 50;
     private const int MaxBamlPropertyValueReportChars = 200;
+
+    private static void AppendArchiveExpansions(StringBuilder builder, BlueprintDocument document)
+    {
+        if (document.Archives.Count == 0)
+        {
+            return;
+        }
+
+        builder.AppendLine();
+        builder.AppendLine("## ASAR 展開狀態");
+        builder.AppendLine();
+        builder.AppendLine("| 封裝 | 深度 | Header | 節點 | Packed | Unpacked | Link | 狀態 |");
+        builder.AppendLine("| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |");
+        foreach (var archive in document.Archives.Take(MaxArchiveExpansions))
+        {
+            var status = archive.Complete
+                ? "完整"
+                : archive.Error is { Length: > 0 } error
+                    ? $"不完整：{error}"
+                    : "不完整";
+            builder.AppendLine(
+                $"| `{EscapeInline(archive.ContainerPath)}` | {archive.Depth} | {FormatBytes(archive.HeaderBytes)} | {archive.NodeCount:N0} | {archive.PackedEntryCount:N0} | {archive.UnpackedEntryCount:N0} | {archive.LinkCount:N0} | {EscapeCell(status)} |");
+        }
+
+        if (document.Archives.Count > MaxArchiveExpansions)
+        {
+            builder.AppendLine();
+            builder.AppendLine($"（僅列出前 {MaxArchiveExpansions:N0} 筆，共 {document.Archives.Count:N0} 筆 ASAR 展開紀錄。）");
+        }
+    }
 
     private static void AppendNativeFunctions(StringBuilder builder, BlueprintDocument document)
     {
@@ -450,6 +482,36 @@ public static class MarkdownReportWriter
     private static string EscapeCell(string value) => value.Replace("|", "\\|", StringComparison.Ordinal).ReplaceLineEndings(" ");
 
     private static string EscapeInline(string value) => value.Replace("`", "'", StringComparison.Ordinal).ReplaceLineEndings(" ");
+
+    private static string EscapeMarkdownText(string value)
+    {
+        const string punctuation = "\\`*_{}[]<>()#+-.!|";
+        var normalized = value.ReplaceLineEndings(" ");
+        var builder = new StringBuilder(normalized.Length);
+        foreach (var character in normalized)
+        {
+            if (punctuation.Contains(character))
+            {
+                builder.Append('\\');
+            }
+
+            builder.Append(character);
+        }
+
+        return builder.ToString();
+    }
+
+    private static string FormatOrigin(FileOrigin origin) => origin.Kind switch
+    {
+        "directory" => "directory",
+        "zip" when origin.Container is { Length: > 0 } container => $"zip：{container}",
+        "zip" => "zip",
+        "asar" when origin.Container is { Length: > 0 } container && origin.Entry is { Length: > 0 } entry =>
+            $"asar d{origin.Depth}：{container}!/{entry}",
+        "asar" when origin.Container is { Length: > 0 } container => $"asar d{origin.Depth}：{container}",
+        "asar" => $"asar d{origin.Depth}",
+        _ => "direct"
+    };
 
     private static string FormatResourceEntry(ManagedResourceEntryModel entry)
     {

@@ -58,4 +58,68 @@ public sealed class MarkdownReportWriterTests
         Assert.Contains("`AccessText`", report);
         Assert.Contains("[88, 98)", report);
     }
+
+    [Fact]
+    public void BuildListsBoundedAsarStatusOriginsAndEscapesWarnings()
+    {
+        var archives = Enumerable.Range(0, 51)
+            .Select(index => new ArchiveExpansion
+            {
+                ContainerPath = $"archive-{index}.asar",
+                Depth = index % 3 + 1,
+                HeaderBytes = 128,
+                NodeCount = 3,
+                PackedEntryCount = 1,
+                UnpackedEntryCount = 1,
+                LinkCount = 1,
+                Complete = index != 0,
+                Error = index == 0 ? "缺少 | sidecar" : null
+            })
+            .ToArray();
+        var document = new BlueprintDocument
+        {
+            Input = new InputDescriptor
+            {
+                Name = "app.asar",
+                Kind = "asar",
+                SourcePath = "app.asar",
+                FileCount = 1,
+                TotalBytes = 2
+            },
+            Summary = new BlueprintSummary(),
+            Files =
+            [
+                new FileArtifact
+                {
+                    Id = "app.asar!/config/app.json",
+                    RelativePath = "app.asar!/config/app.json",
+                    FileName = "app.json",
+                    Size = 2,
+                    Sha256 = new string('0', 64),
+                    Category = "configuration",
+                    Format = "JSON configuration",
+                    Origin = new FileOrigin
+                    {
+                        Kind = "asar",
+                        Container = "app.asar",
+                        Entry = "config/app.json",
+                        Depth = 1
+                    }
+                }
+            ],
+            Archives = archives,
+            Warnings = ["unsafe\n# heading | table"]
+        };
+
+        var report = MarkdownReportWriter.Build(document);
+
+        Assert.Contains("## ASAR 展開狀態", report);
+        Assert.Contains("| `archive-0.asar` | 1 | 128 B | 3 | 1 | 1 | 1 | 不完整：缺少 \\| sidecar |", report);
+        Assert.Contains("| 路徑 | 來源 | 類型 | 大小 | SHA-256 |", report);
+        Assert.Contains("asar d1：app.asar!/config/app.json", report);
+        Assert.Contains("僅列出前 50 筆，共 51 筆 ASAR 展開紀錄", report);
+        Assert.DoesNotContain("`archive-50.asar`", report);
+        Assert.Contains("- unsafe \\# heading \\| table", report);
+        Assert.DoesNotContain("\n# heading", report);
+    }
 }

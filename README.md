@@ -6,9 +6,9 @@
 [![GitHub Release](https://img.shields.io/github/v/release/NickYCLin/exe-blueprint)](https://github.com/NickYCLin/exe-blueprint/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-ExeBlueprint 是跨平台的 Windows EXE、DLL 與應用程式套件靜態分析工具。它會整理 PE、.NET metadata、IL、相依關係與內嵌資源，產生可供盤點、重建或後續自動化處理的 `blueprint.json`，另外附上一份方便閱讀的 `REPORT.md`。
+ExeBlueprint 是跨平台的 Windows EXE／DLL 與應用程式套件靜態分析工具，可直接接受資料夾、ZIP 與 Electron ASAR。它會整理 PE、.NET metadata、IL、相依關係與內嵌資源，產生可供盤點、重建或後續自動化處理的 `blueprint.json`，另外附上一份方便閱讀的 `REPORT.md`。
 
-現在有圖形介面可直接選擇或拖放檔案與資料夾，也能指定輸出位置並重選最近分析成功的來源；桌面版支援 Windows、macOS 與 Linux，原本的命令列工具也會繼續提供。
+現在有圖形介面可直接選擇或拖放檔案（包含 ZIP／ASAR）與資料夾，也能指定輸出位置並重選最近分析成功的來源；桌面版支援 Windows、macOS 與 Linux，原本的命令列工具也會繼續提供。
 
 目前版本只做靜態分析，不會執行輸入程式。
 
@@ -36,7 +36,7 @@ ExeBlueprint 不是動態沙箱，也不是能完整還原所有原始碼的反�
 
 ## 目前能做什麼
 
-- 分析單一檔案、完整資料夾或 ZIP
+- 分析單一檔案、完整資料夾、ZIP 或 Electron ASAR；資料夾與 ZIP 內的 ASAR、以及有上限的巢狀 ASAR 也會展開
 - 計算每個檔案的 SHA-256
 - 讀取 PE 架構、子系統、section 與簽章資料
 - 分辨 .NET assembly 與原生 PE
@@ -53,7 +53,9 @@ ExeBlueprint 不是動態沙箱，也不是能完整還原所有原始碼的反�
 - 找出套件內可以對上的 EXE／DLL 相依關係
 - 依檔案內容辨識常見語言、runtime、框架與安裝器
 - 輸出 JSON 與繁體中文 Markdown 報告
-- 安全解開 ZIP，阻擋路徑穿越和符號連結
+- 安全解開 ZIP，阻擋路徑穿越、跨平台路徑衝突和符號連結
+- 嚴格解析 ASAR 的 Chromium Pickle header 與 JSON 索引，驗證路徑、offset、size 和範圍後才把內容複製到私人暫存目錄；外置 `.asar.unpacked` 項目會驗證大小與重新解析點，ASAR link 不會落成作業系統連結
+- ASAR 展開受到檔案數、總大小、單檔大小、巢狀深度、封存數、header、節點和路徑總量限制；無效或只完成一部分的封存會保留容器並在 JSON／報告明示原因
 
 目前已有以下辨識規則：
 
@@ -81,6 +83,7 @@ dotnet run --project .\src\ExeBlueprint.Desktop
 ```powershell
 dotnet run --project .\src\ExeBlueprint.Cli -- analyze .\MyApplication
 dotnet run --project .\src\ExeBlueprint.Cli -- analyze .\MyApplication.zip
+dotnet run --project .\src\ExeBlueprint.Cli -- analyze .\resources\app.asar
 dotnet run --project .\src\ExeBlueprint.Cli -- analyze .\App.exe -o .\report
 ```
 
@@ -136,10 +139,11 @@ src/ExeBlueprint.Desktop/bin/Release/net10.0/win-x64/publish/ExeBlueprint.exe
 
 ## 報告內容
 
-`blueprint.json` 是後續專案重建和轉語言要共用的資料格式，內容包含：
+`blueprint.json` 目前使用 schema `0.8`，是後續專案重建和轉語言要共用的資料格式，內容包含：
 
 - 輸入套件摘要
-- 每個檔案的格式與雜湊
+- 每個檔案的格式、雜湊與來源資訊（provenance；直接輸入、資料夾、ZIP 或 ASAR，以及直接容器、項目和深度）
+- ASAR 封存的 header／節點／packed／unpacked／link 數量，以及完整或不完整狀態與原因
 - PE 與 .NET metadata
 - .NET 型別、欄位、屬性、事件、方法簽章、方法層級呼叫圖與各方法反組譯出的 IL
 - 語言、框架和工具鏈判斷
@@ -150,7 +154,7 @@ src/ExeBlueprint.Desktop/bin/Release/net10.0/win-x64/publish/ExeBlueprint.exe
 
 ## 接下來要做的功能
 
-- 解開 Inno Setup、NSIS、MSI、PyInstaller 與 Electron 套件
+- 解開 Inno Setup、NSIS、MSI、PyInstaller 與 Electron 外層安裝封裝（Electron ASAR 已支援）
 - 深化原生 PE 分析：把 Ghidra 的函式進一步還原成呼叫圖與程式碼（目前先列出函式清單）
 - 擴充中介模型，補上 UI 與設定（函式、型別、欄位、屬性、事件、呼叫圖、內嵌 manifest 資源清單、`.resources` 標準鍵值，以及 WPF BAML record、flat element tree、檔內與內建型別／屬性 ID、可安全讀取的 property 值、simple deferred resource 關係已完成 .NET 部分；接著要支援 complex key／verbose StaticResource 與自訂資源型別）
 - 補齊例外處理與型別引用，讓骨架能直接編譯成多專案 solution（目前會產生 `.slnx` 與套件內的 `ProjectReference`，class 與具 instance constructor 的 struct skeleton 成員會有 `default!` initializer，已保留完整命名空間、泛型巢狀型別、ref struct、方法與運算式的 nullable 語意及欄位／屬性／事件修飾詞，能區分 virtual、override、sealed override 與 final 介面實作，並還原 if／if-else、while／do-while、標準 switch、try/catch、含混合巢狀短路條件的 catch filter、try/finally、以 catch/rethrow 等價表示的 fault、複合 try/catch/finally、terminal try、indexer、參考型別 null 分支、bool／char／enum 呼叫常值、enum 位元運算與 switch case、enum 成員常值與區域變數型別）

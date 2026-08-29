@@ -16,6 +16,8 @@ public sealed record FileArtifact
 
     public required string Format { get; init; }
 
+    public FileOrigin Origin { get; init; } = new();
+
     public bool IsPortableExecutable { get; init; }
 
     public bool IsExecutable { get; init; }
@@ -49,6 +51,17 @@ public sealed record FileArtifact
     public NativeCodeModel? NativeCode { get; init; }
 
     public string? AnalysisError { get; init; }
+}
+
+public sealed record FileOrigin
+{
+    public string Kind { get; init; } = "direct";
+
+    public string? Container { get; init; }
+
+    public string? Entry { get; init; }
+
+    public int Depth { get; init; }
 }
 
 public sealed record TechnologyDetection

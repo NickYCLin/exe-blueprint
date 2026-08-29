@@ -57,11 +57,11 @@ public sealed partial class MainWindow : Window
         {
             var files = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
             {
-                Title = "選擇要分析的程式或壓縮檔",
+                Title = "選擇要分析的程式、壓縮檔或 ASAR",
                 AllowMultiple = false,
                 FileTypeFilter =
                 [
-                    new FilePickerFileType("程式與壓縮檔") { Patterns = ["*.exe", "*.dll", "*.zip"] },
+                    new FilePickerFileType("程式、壓縮檔與 ASAR") { Patterns = ["*.exe", "*.dll", "*.zip", "*.asar"] },
                     new FilePickerFileType("所有檔案") { Patterns = ["*"] }
                 ]
             });
@@ -238,7 +238,7 @@ public sealed partial class MainWindow : Window
         var inputPath = InputPathBox.Text?.Trim();
         if (string.IsNullOrWhiteSpace(inputPath))
         {
-            ShowError("請先選擇要分析的檔案、資料夾或 ZIP。");
+            ShowError("請先選擇要分析的檔案、資料夾、ZIP 或 ASAR。");
             return;
         }
 

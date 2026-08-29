@@ -3,7 +3,7 @@
 ExeBlueprint 把輸入端、分析流程和輸出端分開。新增一種語言時，不需要改寫整個工具。
 
 ```text
-檔案／資料夾／ZIP
+檔案／資料夾／ZIP／ASAR
         ↓
 安全匯入與檔案盤點
         ↓
@@ -22,7 +22,7 @@ Blueprint 中介資料
 
 ## 目前完成
 
-`ExeBlueprint.Core` 已包含輸入盤點、ZIP 安全解壓、檔案分類、PE／.NET 讀取、.NET 型別／欄位／屬性／事件／方法與 enum 常值抽取、方法層級呼叫圖、技術辨識、相依關係、報告產生，以及 .NET 型別的 C# 骨架產生。
+`ExeBlueprint.Core` 已包含輸入盤點、ZIP 安全解壓、Electron ASAR 與有上限的巢狀 ASAR 展開、檔案分類、PE／.NET 讀取、.NET 型別／欄位／屬性／事件／方法與 enum 常值抽取、方法層級呼叫圖、技術辨識、相依關係、報告產生，以及 .NET 型別的 C# 骨架產生。
 
 `ExeBlueprint.Application.BlueprintExportService` 負責串接分析、JSON、Markdown 與各語言骨架輸出。
 `ExeBlueprint.Cli` 和 Avalonia 製作的 `ExeBlueprint.Desktop` 都呼叫這個服務，所以兩種入口的分析結果與覆寫保護一致。
@@ -31,12 +31,14 @@ Blueprint 中介資料
 
 ## Blueprint 資料
 
-目前 schema 版本是 `0.7`，主要欄位包括：
+目前 schema 版本是 `0.8`，主要欄位包括：
 
 - `input`：輸入類型、檔案數與總大小
 - `summary`：PE、assembly、型別、方法、資源和相依關係數量
-- `files`：每個檔案的格式、雜湊和分析資料，受管組件另含 `code`
+- `files`：每個檔案的格式、雜湊、來源資訊（provenance）和分析資料，受管組件另含 `code`
+- `files[].origin`：`direct`、`directory`、`zip` 或 `asar` 來源；需要時保存直接容器、容器內項目與展開深度，讓 staging 實體路徑不會外洩或取代邏輯路徑
 - `files[].code`：.NET 型別、巢狀宣告與 ref-like 關係、欄位、含 index parameters 的屬性、事件、方法簽章與 dispatch 旗標、入口點、方法層級呼叫圖、manifest 資源與各方法反組譯出的 IL
+- `archives`：每次 ASAR 展開的容器路徑、深度、header 大小、節點與 packed／unpacked／link 數量，以及 `complete`／`error` 狀態
 - `dependencies`：PE imports 與 assembly references
 - `technologies`：語言、runtime、框架和工具鏈判斷
 - `warnings`：略過或無法分析的項目
@@ -44,6 +46,14 @@ Blueprint 中介資料
 `.resources` 內的鍵值會放在 manifest 資源的 `entries`。字串、數字、布林、字元、日期與時間可轉成文字；一般位元組陣列和 stream 只記大小，檔名為 `.baml` 時會另外整理 MSBAML 檔頭版本、record 總數、各類型數量、element／property 使用次數，並用 BAML 檔案自行宣告的 assembly、type、attribute、string 對照表解析使用中的 ID。負值 ID 會依 [dotnet/wpf v10.0.11 的官方內建表](https://github.com/dotnet/wpf/tree/v10.0.11/src/Microsoft.DotNet.Wpf/src/PresentationFramework/System/Windows/Markup/Baml2006) 解析，保留號或超出已知範圍的 ID 則維持數字。BAML element 以有上限的 flat node 清單保存 node ID、parent ID、depth、record start/end byte offset、content/complex parent property、child count 與 property value count，避免惡意深度造成遞迴序列化風險，也為 deferred value 定位保留依據；property value 也帶 element ID，可直接與節點對接。不平衡的 element 或 property scope 不會假裝成完整 tree，而會設定 `elementTreeComplete` 與錯誤原因。直接字串、字串表與型別參照、MarkupExtension argument、converter 輸入字串、custom binary 大小及 deferred StaticResource ID 會放在 `propertyValues`；simple deferred ResourceDictionary 另會保存 string/type key、相對與絕對 value 範圍、shared flags、對應 element，以及每個 key 自己的 optimized StaticResource 表。record 56 只用所在 value 的 key-local ID 解參照，不會誤查全域 string/type 表。complex key、verbose StaticResource、nested StaticResource indirection 目前會設定 `deferredResourcesComplete=false` 和明確原因，不會猜測關係。解析器不載入 WPF assembly、不執行 converter／serializer，也不建立 UI 物件。自訂資源型別不會反序列化，只保留完整型別名稱與原始資料大小。單一 assembly 最多保留 5,000 筆鍵值、單一文字值最多保留 4,096 字元；BAML 最多掃描 100,000 筆 record、每類最多保留 2,000 個 symbol、每檔最多保留 2,000 個 element、2,000 筆 property value、2,000 筆 deferred resource 與 2,000 筆 deferred StaticResource，每個 metadata 字串最多讀取 8,192 bytes，property value 最多保留 4,096 個字元，截斷狀態和解析錯誤都會明確記錄。
 
 後續加入 complex deferred key、原生呼叫圖或更細的控制流程時會再提升 schema 版本，舊欄位維持相容。
+
+## ZIP／ASAR 安全匯入
+
+ZIP 只會把通過 portable path、重複／檔案目錄衝突、重新解析點與大小檢查的普通檔案寫進私人暫存目錄。ASAR 會先嚴格解析 8-byte 外層 Chromium Pickle、bounded header Pickle 與 strict UTF-8 JSON tree，再驗證每個項目的 portable path、十進位 offset、size、資料範圍和非完全相同的重疊範圍。實體 staging 檔名是 opaque 名稱；分類、報告和相依解析一律使用保留下來的邏輯路徑。
+
+分析器會保留 ASAR 容器本身，並把 packed 項目以 streaming copy 寫入隨機私人暫存目錄；Unix-like 系統會把目錄權限縮到 mode `0700`。`.asar.unpacked` 只接受索引指定、大小相符且路徑中沒有重新解析點的檔案，讀取時仍會複製到私人 staging，避免把外部路徑直接當成展開結果。ASAR link 會驗證 target、循環與 hop 上限，但不建立作業系統 symlink；有 link、遺失 sidecar、無效 nested ASAR 或達到深度上限時，容器仍會留在 `files`，相對應的 `archives[].complete` 會是 `false` 並附上原因。
+
+預設工作區最多保留 25,000 個檔案、20 GiB 邏輯總大小、單檔 4 GiB，archive depth 最多 8；另外會限制 ASAR 嘗試數、單一與累計 header、累計節點和保留路徑字元總量。所有 nested ASAR 共用同一組工作區 budget，不會在每一層重新歸零。取消或失敗時會清除私人暫存資料；Markdown 只列出 bounded archive 狀態，JSON 則保留完整的 archive 統計與 complete/error 契約。
 
 ## 分析器分層
 

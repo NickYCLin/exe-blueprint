@@ -15,12 +15,21 @@ internal sealed class FileAnalyzer
     public async Task<FileArtifact> AnalyzeAsync(
         string fullPath,
         string relativePath,
+        CancellationToken cancellationToken) =>
+        await AnalyzeAsync(fullPath, relativePath, new FileOrigin(), cancellationToken).ConfigureAwait(false);
+
+    public async Task<FileArtifact> AnalyzeAsync(
+        string fullPath,
+        string relativePath,
+        FileOrigin origin,
         CancellationToken cancellationToken)
     {
+        ArgumentNullException.ThrowIfNull(origin);
+
         var info = new FileInfo(fullPath);
         if (info.Length > _options.MaxFileBytes)
         {
-            return CreateSkippedArtifact(relativePath, info, "檔案超過單檔分析上限");
+            return CreateSkippedArtifact(relativePath, info, origin, "檔案超過單檔分析上限");
         }
 
         try
@@ -33,7 +42,7 @@ internal sealed class FileAnalyzer
             var pe = await PeAnalyzer.TryAnalyzeAsync(fullPath, cancellationToken).ConfigureAwait(false);
 
             var (category, format) = pe is null
-                ? FileClassifier.Classify(fullPath, signals.Header)
+                ? FileClassifier.Classify(relativePath, signals.Header)
                 : (pe.IsLibrary ? "library" : "executable", pe.IsManaged ? ".NET Portable Executable" : "Native Portable Executable");
             var technologies = TechnologyDetector.DetectFile(relativePath, pe, signals);
             var code = pe?.IsManaged == true
@@ -47,11 +56,12 @@ internal sealed class FileAnalyzer
             {
                 Id = relativePath,
                 RelativePath = relativePath,
-                FileName = info.Name,
+                FileName = GetLogicalFileName(relativePath),
                 Size = info.Length,
                 Sha256 = sha256,
                 Category = category,
                 Format = format,
+                Origin = origin,
                 IsPortableExecutable = pe is not null,
                 IsExecutable = pe?.IsExecutable == true,
                 IsLibrary = pe?.IsLibrary == true,
@@ -72,7 +82,7 @@ internal sealed class FileAnalyzer
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or BadImageFormatException or InvalidDataException)
         {
-            return CreateSkippedArtifact(relativePath, info, exception.Message);
+            return CreateSkippedArtifact(relativePath, info, origin, exception.Message);
         }
     }
 
@@ -89,15 +99,23 @@ internal sealed class FileAnalyzer
         return Convert.ToHexString(hash).ToLowerInvariant();
     }
 
-    private static FileArtifact CreateSkippedArtifact(string relativePath, FileInfo info, string error) => new()
-    {
-        Id = relativePath,
-        RelativePath = relativePath,
-        FileName = info.Name,
-        Size = info.Exists ? info.Length : 0,
-        Sha256 = string.Empty,
-        Category = "unknown",
-        Format = "Unanalyzed",
-        AnalysisError = error
-    };
+    private static FileArtifact CreateSkippedArtifact(
+        string relativePath,
+        FileInfo info,
+        FileOrigin origin,
+        string error) => new()
+        {
+            Id = relativePath,
+            RelativePath = relativePath,
+            FileName = GetLogicalFileName(relativePath),
+            Size = info.Exists ? info.Length : 0,
+            Sha256 = string.Empty,
+            Category = "unknown",
+            Format = "Unanalyzed",
+            Origin = origin,
+            AnalysisError = error
+        };
+
+    private static string GetLogicalFileName(string relativePath) =>
+        Path.GetFileName(relativePath.Replace('\\', '/'));
 }

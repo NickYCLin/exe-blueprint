@@ -75,7 +75,7 @@
                      FontSize="27"
                      FontWeight="Bold"
                      Foreground="White" />
-          <TextBlock Text="把 EXE、DLL、資料夾或 ZIP 整理成可重建的程式藍圖"
+          <TextBlock Text="把 EXE、DLL、資料夾、ZIP 或 ASAR 整理成可重建的程式藍圖"
                      FontSize="14"
                      Foreground="#C7D2E4" />
         </StackPanel>
@@ -100,7 +100,7 @@
             <StackPanel Spacing="4">
               <TextBlock Classes="sectionTitle" Text="1. 選擇分析來源" />
               <TextBlock Classes="hint"
-                         Text="程式只做靜態分析，不會執行你選擇的 EXE 或 DLL。" />
+                         Text="程式只做靜態分析，不會執行你選擇的程式或封存內容。" />
             </StackPanel>
 
             <Border x:Name="InputDropZone" Classes="dropZone">
@@ -123,16 +123,16 @@
                              FontWeight="SemiBold"
                              Foreground="#334155" />
                   <TextBlock Classes="hint"
-                             Text="一次接受一個 EXE、DLL、ZIP 或資料夾" />
+                             Text="一次接受一個 EXE、DLL、ZIP、ASAR 或資料夾" />
                 </StackPanel>
               </Grid>
             </Border>
 
             <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="10">
               <StackPanel>
-                <TextBlock Classes="fieldLabel" Text="檔案、資料夾或 ZIP" />
+                <TextBlock Classes="fieldLabel" Text="檔案、資料夾、ZIP 或 ASAR" />
                 <TextBox x:Name="InputPathBox"
-                         PlaceholderText="例如 C:\Apps\MyProgram 或 /opt/my-program"
+                         PlaceholderText="例如 C:\Apps\MyProgram、app.asar 或 /opt/my-program"
                          TextChanged="OnInputPathChanged" />
               </StackPanel>
               <Button x:Name="ChooseFileButton"

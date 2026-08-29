@@ -1,6 +1,6 @@
 @echo off
 rem ExeBlueprint launcher. Double-click to get a prompt, or drag an
-rem EXE / DLL / folder / ZIP onto this file to analyze it.
+rem EXE / DLL / folder / ZIP / ASAR onto this file to analyze it.
 rem (Kept ASCII-only so it works on every Windows locale. Chinese help is in README.txt.)
 setlocal
 pushd "%~dp0"
@@ -29,7 +29,7 @@ echo ============================================================
 echo   ExeBlueprint - Windows app analyzer ^(command-line tool^)
 echo ============================================================
 echo.
-echo   Option 1: drag an EXE / DLL / folder / ZIP onto run.bat
+echo   Option 1: drag an EXE / DLL / folder / ZIP / ASAR onto run.bat
 echo   Option 2: paste a path below and press Enter
 echo.
 echo   Full instructions (Chinese) are in README.txt.

@@ -15,29 +15,19 @@ public sealed class BlueprintAnalyzer
 
         await using var workspace = await InputWorkspace.OpenAsync(
             inputPath,
-            options.MaxFiles,
-            options.MaxTotalBytes,
+            options,
             cancellationToken).ConfigureAwait(false);
 
         var warnings = workspace.Warnings.ToList();
-        var paths = workspace.EnumerateFiles(options.MaxFiles, warnings)
-            .Select(path => new InputFile(path, workspace.GetRelativePath(path)))
-            .OrderBy(file => file.RelativePath, StringComparer.OrdinalIgnoreCase)
-            .ToArray();
-        var totalBytes = paths.Sum(file => new FileInfo(file.FullPath).Length);
-        if (totalBytes > options.MaxTotalBytes)
-        {
-            throw new InvalidDataException($"輸入總大小超過限制：{options.MaxTotalBytes:N0} bytes");
-        }
-
         var fileAnalyzer = new FileAnalyzer(options);
-        var artifacts = new List<FileArtifact>(paths.Length);
-        foreach (var file in paths)
+        var artifacts = new List<FileArtifact>(workspace.Files.Count);
+        foreach (var file in workspace.Files)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var artifact = await fileAnalyzer.AnalyzeAsync(
-                file.FullPath,
-                file.RelativePath,
+                file.PhysicalPath,
+                file.LogicalPath,
+                file.Origin,
                 cancellationToken).ConfigureAwait(false);
             artifacts.Add(artifact);
             if (!string.IsNullOrWhiteSpace(artifact.AnalysisError))
@@ -63,10 +53,11 @@ public sealed class BlueprintAnalyzer
                 Kind = workspace.Kind,
                 SourcePath = workspace.Name,
                 FileCount = artifacts.Count,
-                TotalBytes = totalBytes
+                TotalBytes = workspace.TotalBytes
             },
             Summary = summary,
             Files = artifacts,
+            Archives = workspace.Archives,
             Dependencies = dependencies,
             Technologies = technologies,
             Warnings = warnings.Distinct(StringComparer.OrdinalIgnoreCase).ToArray()
@@ -103,11 +94,23 @@ public sealed class BlueprintAnalyzer
             throw new ArgumentOutOfRangeException(nameof(options), "檔案大小限制必須大於零。");
         }
 
+        if (options.MaxArchiveDepth <= 0 || options.MaxArchiveDepth > 64)
+        {
+            throw new ArgumentOutOfRangeException(nameof(options), "MaxArchiveDepth 必須介於 1 到 64。");
+        }
+
+        if (options.MaxWorkspacePathCharacters <= 0 ||
+            options.MaxWorkspaceArchives <= 0 ||
+            options.MaxWorkspaceArchiveHeaderBytes <= 0 ||
+            options.MaxWorkspaceArchiveNodes <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(options), "workspace 安全限制必須大於零。");
+        }
+
         if (options.BinarySignalSampleBytes < 4096)
         {
             throw new ArgumentOutOfRangeException(nameof(options), "BinarySignalSampleBytes 不得小於 4096。");
         }
     }
 
-    private sealed record InputFile(string FullPath, string RelativePath);
 }

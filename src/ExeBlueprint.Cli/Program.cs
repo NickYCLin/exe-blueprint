@@ -53,6 +53,9 @@ static async Task<int> RunAsync(string[] args, CancellationToken cancellationTok
         var document = result.Document;
         Console.WriteLine($"完成：{result.OutputDirectory}");
         Console.WriteLine($"檔案：{document.Input.FileCount:N0}");
+        var asarFiles = document.Files.Where(file => file.Origin.Kind == "asar").ToArray();
+        var maxArchiveDepth = asarFiles.Length == 0 ? 0 : asarFiles.Max(file => file.Origin.Depth);
+        Console.WriteLine($"ASAR 展開檔案：{asarFiles.Length:N0}；最大深度：{maxArchiveDepth:N0}");
         Console.WriteLine($"PE 執行檔：{document.Summary.ExecutableCount:N0}");
         Console.WriteLine($"程式庫：{document.Summary.LibraryCount:N0}");
         Console.WriteLine($"型別／方法：{document.Summary.TypeCount:N0}／{document.Summary.MethodCount:N0}");
@@ -81,7 +84,7 @@ static ParsedArguments ParseArguments(string[] args)
     var index = args[0].Equals("analyze", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
     if (index >= args.Length || args[index].StartsWith('-'))
     {
-        throw new ArgumentException("請指定要分析的檔案、資料夾或 ZIP。");
+        throw new ArgumentException("請指定要分析的檔案、資料夾、ZIP 或 ASAR。");
     }
 
     var inputPath = args[index++];
@@ -161,8 +164,8 @@ static void PrintHelp()
     Console.WriteLine("ExeBlueprint - Windows 應用程式套件分析工具");
     Console.WriteLine();
     Console.WriteLine("用法：");
-    Console.WriteLine("  exe-blueprint analyze <檔案|資料夾|ZIP> [選項]");
-    Console.WriteLine("  exe-blueprint <檔案|資料夾|ZIP> [選項]");
+    Console.WriteLine("  exe-blueprint analyze <檔案|資料夾|ZIP|ASAR> [選項]");
+    Console.WriteLine("  exe-blueprint <檔案|資料夾|ZIP|ASAR> [選項]");
     Console.WriteLine();
     Console.WriteLine("選項：");
     Console.WriteLine("  -o, --output <目錄>  指定輸出目錄");
