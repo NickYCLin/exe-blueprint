@@ -2834,11 +2834,11 @@ internal static class ManagedSymbolReader
             case "cgt":
                 return TryBinary(context, stack, ">", "bool");
             case "cgt.un":
-                return TryUnsignedReferenceNullComparison(context, stack);
+                return TryUnsignedComparison(context, stack, ">", allowReferenceNull: true);
             case "clt":
                 return TryBinary(context, stack, "<", "bool");
             case "clt.un":
-                return false;
+                return TryUnsignedComparison(context, stack, "<", allowReferenceNull: false);
             case "neg":
                 return TryUnary(context, stack, "-");
             case "not":
@@ -3015,6 +3015,60 @@ internal static class ManagedSymbolReader
 
         var right = stack.Pop();
         var left = stack.Pop();
+        if (!TryGetUnsignedIntegralType(context, left, right, out var unsignedType))
+        {
+            return false;
+        }
+
+        var expression =
+            $"(unchecked(({unsignedType}){left}) {op} unchecked(({unsignedType}){right}))";
+        PushExpression(context, stack, expression, unsignedType);
+        context.UnsignedIntegralExpressions.Add(expression);
+        return true;
+    }
+
+    private static bool TryUnsignedComparison(
+        ReconContext context,
+        Stack<string> stack,
+        string op,
+        bool allowReferenceNull)
+    {
+        if (stack.Count < 2)
+        {
+            return false;
+        }
+
+        var right = stack.Pop();
+        var left = stack.Pop();
+        if (allowReferenceNull
+            && right == "null"
+            && context.ExpressionTypes.TryGetValue(left, out var leftType)
+            && IsKnownReferenceType(context.Metadata, leftType))
+        {
+            PushExpression(context, stack, $"({left} is not null)", "bool");
+            return true;
+        }
+
+        if (!TryGetUnsignedIntegralType(context, left, right, out var unsignedType))
+        {
+            return false;
+        }
+
+        PushExpression(
+            context,
+            stack,
+            $"(unchecked(({unsignedType}){left}) {op} unchecked(({unsignedType}){right}))",
+            "bool");
+        return true;
+    }
+
+    private static bool TryGetUnsignedIntegralType(
+        ReconContext context,
+        string left,
+        string right,
+        out string unsignedType)
+    {
+        unsignedType = string.Empty;
         if (!context.ExpressionTypes.TryGetValue(left, out var leftType)
             || !context.ExpressionTypes.TryGetValue(right, out var rightType))
         {
@@ -3027,23 +3081,14 @@ internal static class ManagedSymbolReader
             return false;
         }
 
-        var unsignedType = stackFamily switch
+        unsignedType = stackFamily switch
         {
             0 => "uint",
             1 => "ulong",
             2 => "nuint",
-            _ => null
+            _ => string.Empty
         };
-        if (unsignedType is null)
-        {
-            return false;
-        }
-
-        var expression =
-            $"(unchecked(({unsignedType}){left}) {op} unchecked(({unsignedType}){right}))";
-        PushExpression(context, stack, expression, unsignedType);
-        context.UnsignedIntegralExpressions.Add(expression);
-        return true;
+        return unsignedType.Length > 0;
     }
 
     private static bool TryNormalizeBooleanEquality(
@@ -3079,19 +3124,6 @@ internal static class ManagedSymbolReader
 
         value = false;
         return false;
-    }
-
-    private static bool TryUnsignedReferenceNullComparison(ReconContext context, Stack<string> stack)
-    {
-        if (!TryPop(stack, out var right) || !TryPop(stack, out var left) || right != "null" ||
-            !context.ExpressionTypes.TryGetValue(left, out var leftType) ||
-            !IsKnownReferenceType(context.Metadata, leftType))
-        {
-            return false;
-        }
-
-        PushExpression(context, stack, $"({left} is not null)", "bool");
-        return true;
     }
 
     private static bool IsIntegerLiteral(string expression)

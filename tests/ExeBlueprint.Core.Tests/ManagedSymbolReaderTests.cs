@@ -89,7 +89,7 @@ public sealed class ManagedSymbolReaderTests
     }
 
     [Fact]
-    public async Task ReconstructsCompilerGeneratedUnsignedDivisionAndFieldStore()
+    public async Task ReconstructsCompilerGeneratedUnsignedArithmetic()
     {
         var assemblyPath = typeof(UnsignedArithmeticFixture).Assembly.Location;
         var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
@@ -109,6 +109,24 @@ public sealed class ManagedSymbolReaderTests
                 "return ExeBlueprint.Core.Tests.UnsignedArithmeticFixture.Stored;"
             ],
             Assert.Single(fixture.Methods, method => method.Name == nameof(UnsignedArithmeticFixture.StoreSignedField)).Body);
+        Assert.Equal(
+            ["return (unchecked((uint)left) > unchecked((uint)right));"],
+            Assert.Single(fixture.Methods, method => method.Name == nameof(UnsignedArithmeticFixture.GreaterThanUInt32)).Body);
+        Assert.Equal(
+            ["return (unchecked((uint)left) < unchecked((uint)right));"],
+            Assert.Single(fixture.Methods, method => method.Name == nameof(UnsignedArithmeticFixture.LessThanUInt32)).Body);
+        Assert.Equal(
+            ["return (unchecked((ulong)left) > unchecked((ulong)right));"],
+            Assert.Single(fixture.Methods, method => method.Name == nameof(UnsignedArithmeticFixture.GreaterThanUInt64)).Body);
+        Assert.Equal(
+            ["return (unchecked((ulong)left) < unchecked((ulong)right));"],
+            Assert.Single(fixture.Methods, method => method.Name == nameof(UnsignedArithmeticFixture.LessThanUInt64)).Body);
+        Assert.Equal(
+            ["return (unchecked((nuint)left) > unchecked((nuint)right));"],
+            Assert.Single(fixture.Methods, method => method.Name == nameof(UnsignedArithmeticFixture.GreaterThanNativeUInt)).Body);
+        Assert.Equal(
+            ["return (unchecked((nuint)left) < unchecked((nuint)right));"],
+            Assert.Single(fixture.Methods, method => method.Name == nameof(UnsignedArithmeticFixture.LessThanNativeUInt)).Body);
     }
 
     [Fact]
@@ -2486,4 +2504,16 @@ internal static class UnsignedArithmeticFixture
         Stored = unchecked((int)((uint)left % (uint)right));
         return Stored;
     }
+
+    public static bool GreaterThanUInt32(uint left, uint right) => left > right;
+
+    public static bool LessThanUInt32(uint left, uint right) => left < right;
+
+    public static bool GreaterThanUInt64(ulong left, ulong right) => left > right;
+
+    public static bool LessThanUInt64(ulong left, ulong right) => left < right;
+
+    public static bool GreaterThanNativeUInt(nuint left, nuint right) => left > right;
+
+    public static bool LessThanNativeUInt(nuint left, nuint right) => left < right;
 }

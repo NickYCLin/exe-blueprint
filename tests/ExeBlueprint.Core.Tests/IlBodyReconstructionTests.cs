@@ -208,7 +208,8 @@ public sealed class IlBodyReconstructionTests
     {
         byte[] il = [0x02, 0x14, 0xFE, 0x03, 0x2A];
         byte[] reversed = [0x14, 0x02, 0xFE, 0x03, 0x2A];
-        byte[] numeric = [0x02, 0x03, 0xFE, 0x03, 0x2A];
+        byte[] twoReferences = [0x02, 0x03, 0xFE, 0x03, 0x2A];
+        byte[] lessThanNull = [0x02, 0x14, 0xFE, 0x05, 0x2A];
 
         Assert.Equal(
             ["return (arg0 is not null);"],
@@ -216,27 +217,73 @@ public sealed class IlBodyReconstructionTests
         Assert.Null(Reconstruct(reversed, isInstance: false, returnType: "bool", parameterTypes: ["object"]));
         Assert.Null(
             Reconstruct(
-                numeric,
+                twoReferences,
                 isInstance: false,
                 returnType: "bool",
-                parameterTypes: ["uint", "uint"]));
+                parameterTypes: ["object", "object"]));
+        Assert.Null(
+            Reconstruct(
+                lessThanNull,
+                isInstance: false,
+                returnType: "bool",
+                parameterTypes: ["object"]));
+    }
+
+    [Theory]
+    [InlineData("int", "uint")]
+    [InlineData("long", "ulong")]
+    [InlineData("nint", "nuint")]
+    public void LowersUnsignedComparisonsForKnownStackFamilies(
+        string signedType,
+        string unsignedType)
+    {
+        byte[] greaterThan = [0x02, 0x03, 0xFE, 0x03, 0x2A];
+        byte[] lessThan = [0x02, 0x03, 0xFE, 0x05, 0x2A];
+
+        Assert.Equal(
+            [$"return (unchecked(({unsignedType})arg0) > unchecked(({unsignedType})arg1));"],
+            Reconstruct(
+                greaterThan,
+                isInstance: false,
+                returnType: "bool",
+                parameterTypes: [signedType, unsignedType]));
+        Assert.Equal(
+            [$"return (unchecked(({unsignedType})arg0) < unchecked(({unsignedType})arg1));"],
+            Reconstruct(
+                lessThan,
+                isInstance: false,
+                returnType: "bool",
+                parameterTypes: [signedType, unsignedType]));
     }
 
     [Fact]
-    public void RejectsUnsignedUnorderedComparisonWithoutTypedLowering()
+    public void RejectsUnsignedComparisonsForUnknownCrossFamilyAndFloatingTypes()
     {
-        byte[] il =
+        byte[][] operations =
         [
-            0x02,
-            0x23, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0xFE, 0x05,
-            0x16,
-            0xFE, 0x01,
-            0x2A
+            [0x02, 0x03, 0xFE, 0x03, 0x2A],
+            [0x02, 0x03, 0xFE, 0x05, 0x2A]
         ];
 
-        Assert.Null(
-            Reconstruct(il, isInstance: false, returnType: "bool", parameterTypes: ["double"]));
+        foreach (var il in operations)
+        {
+            Assert.Null(Reconstruct(il, isInstance: false, returnType: "bool"));
+            Assert.Null(Reconstruct(
+                il,
+                isInstance: false,
+                returnType: "bool",
+                parameterTypes: ["int", "ulong"]));
+            Assert.Null(Reconstruct(
+                il,
+                isInstance: false,
+                returnType: "bool",
+                parameterTypes: ["float", "float"]));
+            Assert.Null(Reconstruct(
+                il,
+                isInstance: false,
+                returnType: "bool",
+                parameterTypes: ["double", "double"]));
+        }
     }
 
     [Theory]
