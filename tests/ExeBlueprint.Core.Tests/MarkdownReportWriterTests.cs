@@ -43,6 +43,10 @@ public sealed class MarkdownReportWriterTests
         Assert.Contains(
             "BAML 0.96，24 筆 record，2 個 element／4 個 property／根節點 BamlFixture.MainWindow，1009 B",
             report);
+        Assert.Contains("BAML element tree：", report);
+        Assert.Contains("`BamlFixture.MainWindow`", report);
+        Assert.Contains("`Grid`", report);
+        Assert.Contains("`ContentControl.Content`", report);
         Assert.Contains("BAML property 值：", report);
         Assert.Contains("`Window.Title`", report);
         Assert.Contains("`MainWindow`", report);

@@ -10,6 +10,7 @@ internal static class BamlSummaryReader
     private const int HeaderSize = 28;
     private const int MaxRecords = 100_000;
     private const int MaxSymbols = 2_000;
+    private const int MaxElements = 2_000;
     private const int MaxMetadataStringBytes = 8_192;
     private const int MaxPropertyValues = 2_000;
     private const int MaxPropertyValueBytes = 16_384;
@@ -131,7 +132,8 @@ internal static class BamlSummaryReader
                     writerVersion,
                     recordCounts,
                     false,
-                    $"BAML record {GetRecordName(recordType)} ({recordType}) 的長度規則不受支援，停止於 offset {recordOffset}。");
+                    $"BAML record {GetRecordName(recordType)} ({recordType}) 的長度規則不受支援，停止於 offset {recordOffset}。",
+                    symbols);
             }
 
             if (payloadSize == VariableRecord)
@@ -146,7 +148,8 @@ internal static class BamlSummaryReader
                         writerVersion,
                         recordCounts,
                         false,
-                        $"BAML record {GetRecordName(recordType)} ({recordType}) 的長度欄位已截斷。");
+                        $"BAML record {GetRecordName(recordType)} ({recordType}) 的長度欄位已截斷。",
+                        symbols);
                 }
 
                 var sizeFieldLength = position - sizeFieldOffset;
@@ -160,10 +163,11 @@ internal static class BamlSummaryReader
                         writerVersion,
                         recordCounts,
                         false,
-                        $"BAML record {GetRecordName(recordType)} ({recordType}) 的長度超出資料範圍。");
+                        $"BAML record {GetRecordName(recordType)} ({recordType}) 的長度超出資料範圍。",
+                        symbols);
                 }
 
-                if (!symbols.TryReadRecord(recordType, data[position..(int)nextPosition], out var symbolError))
+                if (!symbols.TryReadRecord(recordType, recordOffset, data[position..(int)nextPosition], out var symbolError))
                 {
                     return Partial(
                         signature,
@@ -189,11 +193,12 @@ internal static class BamlSummaryReader
                         writerVersion,
                         recordCounts,
                         false,
-                        $"BAML record {GetRecordName(recordType)} ({recordType}) 的內容已截斷。");
+                        $"BAML record {GetRecordName(recordType)} ({recordType}) 的內容已截斷。",
+                        symbols);
                 }
 
                 var nextPosition = position + payloadSize;
-                if (!symbols.TryReadRecord(recordType, data[position..nextPosition], out var symbolError))
+                if (!symbols.TryReadRecord(recordType, recordOffset, data[position..nextPosition], out var symbolError))
                 {
                     return Partial(
                         signature,
@@ -227,6 +232,11 @@ internal static class BamlSummaryReader
             RootElementTypeId = symbols.RootElementTypeId,
             RootElementType = symbols.ResolveRootElementType(),
             ElementTypes = symbols.BuildElementTypes(),
+            Elements = symbols.BuildElements(),
+            ElementsTruncated = symbols.ElementsTruncated,
+            ElementTreeComplete = !truncated && symbols.ElementTreeComplete,
+            ElementTreeError = symbols.ElementTreeError
+                ?? (truncated ? "BAML record 達解析上限，element tree 可能不完整。" : null),
             Properties = symbols.BuildProperties(),
             PropertyValueCount = symbols.PropertyValueCount,
             PropertyValues = symbols.BuildPropertyValues(),
@@ -322,6 +332,10 @@ internal static class BamlSummaryReader
             RootElementTypeId = symbols?.RootElementTypeId,
             RootElementType = symbols?.ResolveRootElementType(),
             ElementTypes = symbols?.BuildElementTypes() ?? [],
+            Elements = symbols?.BuildElements() ?? [],
+            ElementsTruncated = symbols?.ElementsTruncated ?? false,
+            ElementTreeComplete = false,
+            ElementTreeError = symbols?.ElementTreeError ?? error,
             Properties = symbols?.BuildProperties() ?? [],
             PropertyValueCount = symbols?.PropertyValueCount ?? 0,
             PropertyValues = symbols?.BuildPropertyValues() ?? [],
@@ -445,8 +459,11 @@ internal static class BamlSummaryReader
         private readonly Dictionary<short, BoundedText> _strings = [];
         private readonly Dictionary<short, int> _elementTypes = [];
         private readonly Dictionary<short, int> _properties = [];
+        private readonly List<ElementData> _elements = [];
         private readonly List<PropertyValueData> _propertyValues = [];
-        private readonly Stack<short> _elementStack = [];
+        private readonly Stack<ElementContext> _elementStack = [];
+        private readonly Stack<PropertyScope> _propertyScopes = [];
+        private string? _elementTreeError;
 
         public int ElementCount { get; private set; }
 
@@ -458,15 +475,33 @@ internal static class BamlSummaryReader
 
         public bool Truncated { get; private set; }
 
+        public bool ElementsTruncated { get; private set; }
+
+        public bool ElementTreeComplete =>
+            !ElementsTruncated
+            && _elementStack.Count == 0
+            && _propertyScopes.Count == 0
+            && _elementTreeError is null;
+
+        public string? ElementTreeError =>
+            _elementTreeError
+            ?? (ElementsTruncated ? $"BAML element 超過 {MaxElements:N0} 個安全解析上限。" : null)
+            ?? (_elementStack.Count > 0 ? $"BAML 結束時仍有 {_elementStack.Count} 個 element 未關閉。" : null)
+            ?? (_propertyScopes.Count > 0 ? $"BAML 結束時仍有 {_propertyScopes.Count} 個 property scope 未關閉。" : null);
+
         public bool PropertyValuesTruncated { get; private set; }
 
-        public bool TryReadRecord(byte recordType, ReadOnlySpan<byte> payload, out string? error)
+        public bool TryReadRecord(
+            byte recordType,
+            int recordOffset,
+            ReadOnlySpan<byte> payload,
+            out string? error)
         {
             error = null;
             return recordType switch
             {
-                3 => TryReadElement(payload, out error),
-                4 => TryReadElementEnd(out error),
+                3 => TryReadElement(payload, recordOffset, out error),
+                4 => TryReadElementEnd(recordOffset, out error),
                 28 => TryReadAssembly(payload, out error),
                 29 => TryReadType(payload, hasSerializer: false, out error),
                 30 => TryReadType(payload, hasSerializer: true, out error),
@@ -479,8 +514,10 @@ internal static class BamlSummaryReader
                 35 => TryReadMarkupExtensionProperty(payload, out error),
                 36 => TryReadConvertedProperty(payload, out error),
                 56 => TryReadReferencedProperty(payload, "static-resource", ReferenceKind.StaticResource, out error),
-                7 or 9 or 11 or 13 or 18 or 46
-                    => TryReadProperty(payload, out error),
+                7 or 9 or 11 or 13 => TryReadPropertyScopeStart(recordType, payload, out error),
+                8 or 10 or 12 or 14 => TryReadPropertyScopeEnd(recordType, out error),
+                46 => TryReadContentProperty(payload, out error),
+                18 => TryReadProperty(payload, out error),
                 _ => true
             };
         }
@@ -509,6 +546,39 @@ internal static class BamlSummaryReader
                                 ? assembly
                                 : null,
                         Count = pair.Value
+                    };
+                })
+                .ToArray();
+
+        public IReadOnlyList<BamlElementModel> BuildElements() =>
+            _elements
+                .Select(element =>
+                {
+                    var (parentPropertyName, parentPropertyOwnerType) = element.ParentPropertyId is { } parentPropertyId
+                        ? ResolveProperty(parentPropertyId)
+                        : (null, null);
+                    var (contentPropertyName, contentPropertyOwnerType) = element.ContentPropertyId is { } contentPropertyId
+                        ? ResolveProperty(contentPropertyId)
+                        : (null, null);
+                    return new BamlElementModel
+                    {
+                        Id = element.Id,
+                        ParentId = element.ParentId,
+                        Depth = element.Depth,
+                        StartOffset = element.StartOffset,
+                        EndOffset = element.EndOffset,
+                        TypeId = element.TypeId,
+                        Type = ResolveTypeName(element.TypeId),
+                        IsInjected = element.IsInjected,
+                        CreateUsingTypeConverter = element.CreateUsingTypeConverter,
+                        ParentPropertyId = element.ParentPropertyId,
+                        ParentPropertyName = parentPropertyName,
+                        ParentPropertyOwnerType = parentPropertyOwnerType,
+                        ContentPropertyId = element.ContentPropertyId,
+                        ContentPropertyName = contentPropertyName,
+                        ContentPropertyOwnerType = contentPropertyOwnerType,
+                        ChildCount = element.ChildCount,
+                        PropertyValueCount = element.PropertyValueCount
                     };
                 })
                 .ToArray();
@@ -557,6 +627,7 @@ internal static class BamlSummaryReader
                         PropertyName = propertyName,
                         PropertyOwnerType = propertyOwnerType,
                         ElementTypeId = value.ElementTypeId,
+                        ElementId = value.ElementId,
                         ElementType = value.ElementTypeId is { } elementTypeId
                             ? ResolveTypeName(elementTypeId)
                             : null,
@@ -745,28 +816,151 @@ internal static class BamlSummaryReader
             return true;
         }
 
-        private bool TryReadElement(ReadOnlySpan<byte> payload, out string? error)
+        private bool TryReadElement(ReadOnlySpan<byte> payload, int recordOffset, out string? error)
         {
             var position = 0;
-            if (!TryReadInt16(payload, ref position, out var typeId))
+            if (!TryReadInt16(payload, ref position, out var typeId) || position >= payload.Length)
             {
-                error = "element type ID 已截斷。";
+                error = "element type ID 或 flags 已截斷。";
                 return false;
             }
 
+            var flags = payload[position];
+            var parent = _elementStack.TryPeek(out var parentContext) ? parentContext : null;
+            short? parentPropertyId = null;
+            if (parent is not null)
+            {
+                parentPropertyId = _propertyScopes.TryPeek(out var propertyScope)
+                    && propertyScope.ElementId == parent.Id
+                        ? propertyScope.PropertyId
+                        : parent.ContentPropertyId;
+            }
+
+            var elementId = ElementCount;
+            ElementData? element = null;
+            if (_elements.Count < MaxElements)
+            {
+                element = new ElementData(
+                    elementId,
+                    parent?.Id,
+                    _elementStack.Count,
+                    recordOffset,
+                    typeId,
+                    parentPropertyId,
+                    (flags & 2) != 0,
+                    (flags & 1) != 0);
+                _elements.Add(element);
+            }
+            else
+            {
+                ElementsTruncated = true;
+            }
+
+            parent?.Data?.IncrementChildCount();
             RootElementTypeId ??= typeId;
             ElementCount++;
             AddUsage(_elementTypes, typeId);
-            _elementStack.Push(typeId);
+            _elementStack.Push(new ElementContext(elementId, typeId, element));
             error = null;
             return true;
         }
 
-        private bool TryReadElementEnd(out string? error)
+        private bool TryReadElementEnd(int recordOffset, out string? error)
         {
-            if (_elementStack.Count > 0)
+            if (!_elementStack.TryPop(out var elementContext))
             {
-                _elementStack.Pop();
+                SetElementTreeError($"offset {recordOffset} 出現沒有對應 start 的 ElementEnd。 ");
+                error = null;
+                return true;
+            }
+
+            if (_propertyScopes.TryPeek(out var propertyScope)
+                && propertyScope.ElementId == elementContext.Id)
+            {
+                SetElementTreeError($"element {elementContext.Id} 結束時仍有 property scope 未關閉。");
+                while (_propertyScopes.TryPeek(out propertyScope)
+                       && propertyScope.ElementId == elementContext.Id)
+                {
+                    _propertyScopes.Pop();
+                }
+            }
+
+            elementContext.Data?.SetEndOffset(recordOffset);
+            error = null;
+            return true;
+        }
+
+        private bool TryReadPropertyScopeStart(
+            byte recordType,
+            ReadOnlySpan<byte> payload,
+            out string? error)
+        {
+            var position = 0;
+            if (!TryReadInt16(payload, ref position, out var attributeId))
+            {
+                error = "property scope attribute ID 已截斷。";
+                return false;
+            }
+
+            PropertyCount++;
+            AddUsage(_properties, attributeId);
+            var elementId = CurrentElementId;
+            if (elementId is null)
+            {
+                SetElementTreeError("element 外出現 property scope start。");
+            }
+
+            _propertyScopes.Push(new PropertyScope(elementId, attributeId, recordType));
+            error = null;
+            return true;
+        }
+
+        private bool TryReadPropertyScopeEnd(byte recordType, out string? error)
+        {
+            if (!_propertyScopes.TryPeek(out var scope))
+            {
+                SetElementTreeError("出現沒有對應 start 的 property scope end。");
+            }
+            else if (scope.ElementId != CurrentElementId)
+            {
+                SetElementTreeError(
+                    $"element {CurrentElementId?.ToString() ?? "-"} 出現屬於 element {scope.ElementId?.ToString() ?? "-"} 的 property scope end。");
+            }
+            else if (scope.StartRecordType != recordType - 1)
+            {
+                SetElementTreeError(
+                    $"property scope {scope.StartRecordType} 由不相符的 record {recordType} 結束。");
+            }
+            else
+            {
+                _propertyScopes.Pop();
+            }
+
+            error = null;
+            return true;
+        }
+
+        private void SetElementTreeError(string error) =>
+            _elementTreeError ??= error.TrimEnd();
+
+        private bool TryReadContentProperty(ReadOnlySpan<byte> payload, out string? error)
+        {
+            var position = 0;
+            if (!TryReadInt16(payload, ref position, out var attributeId))
+            {
+                error = "content property attribute ID 已截斷。";
+                return false;
+            }
+
+            PropertyCount++;
+            AddUsage(_properties, attributeId);
+            if (_elementStack.TryPeek(out var elementContext))
+            {
+                elementContext.SetContentProperty(attributeId);
+            }
+            else
+            {
+                SetElementTreeError("element 外出現 ContentProperty。");
             }
 
             error = null;
@@ -900,13 +1094,21 @@ internal static class BamlSummaryReader
         }
 
         private short? CurrentElementTypeId =>
-            _elementStack.Count > 0 ? _elementStack.Peek() : null;
+            _elementStack.TryPeek(out var element) ? element.TypeId : null;
+
+        private int? CurrentElementId =>
+            _elementStack.TryPeek(out var element) ? element.Id : null;
 
         private void AddPropertyValue(PropertyValueData value)
         {
+            value = value with { ElementId = CurrentElementId };
             PropertyCount++;
             PropertyValueCount++;
             AddUsage(_properties, value.PropertyId);
+            if (_elementStack.TryPeek(out var elementContext))
+            {
+                elementContext.Data?.IncrementPropertyValueCount();
+            }
             if (_propertyValues.Count < MaxPropertyValues)
             {
                 _propertyValues.Add(value);
@@ -951,8 +1153,73 @@ internal static class BamlSummaryReader
 
         private sealed record BoundedText(string Value, bool Truncated);
 
+        private sealed class ElementContext(int id, short typeId, ElementData? data)
+        {
+            public int Id { get; } = id;
+
+            public short TypeId { get; } = typeId;
+
+            public ElementData? Data { get; } = data;
+
+            public short? ContentPropertyId { get; private set; }
+
+            public void SetContentProperty(short propertyId)
+            {
+                ContentPropertyId = propertyId;
+                if (Data is not null)
+                {
+                    Data.ContentPropertyId = propertyId;
+                }
+            }
+        }
+
+        private sealed class ElementData(
+            int id,
+            int? parentId,
+            int depth,
+            int startOffset,
+            short typeId,
+            short? parentPropertyId,
+            bool isInjected,
+            bool createUsingTypeConverter)
+        {
+            public int Id { get; } = id;
+
+            public int? ParentId { get; } = parentId;
+
+            public int Depth { get; } = depth;
+
+            public int StartOffset { get; } = startOffset;
+
+            public int? EndOffset { get; private set; }
+
+            public short TypeId { get; } = typeId;
+
+            public short? ParentPropertyId { get; } = parentPropertyId;
+
+            public bool IsInjected { get; } = isInjected;
+
+            public bool CreateUsingTypeConverter { get; } = createUsingTypeConverter;
+
+            public short? ContentPropertyId { get; set; }
+
+            public int ChildCount { get; private set; }
+
+            public int PropertyValueCount { get; private set; }
+
+            public void IncrementChildCount() => ChildCount++;
+
+            public void IncrementPropertyValueCount() => PropertyValueCount++;
+
+            public void SetEndOffset(int endOffset) => EndOffset = endOffset;
+        }
+
+        private sealed record PropertyScope(int? ElementId, short PropertyId, byte StartRecordType);
+
         private sealed record PropertyValueData(short PropertyId, short? ElementTypeId, string Kind)
         {
+            public int? ElementId { get; init; }
+
             public string? Value { get; init; }
 
             public bool ValueTruncated { get; init; }

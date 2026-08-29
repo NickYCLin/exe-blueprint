@@ -37,7 +37,7 @@ Each archive also includes the `exe-blueprint-cli` command-line tool and checksu
 - .NET assembly references, namespaces, types, fields, properties, events, methods, enum values, and inheritance
 - IL instructions, method-level call graphs, and reconstructable C# control flow
 - Embedded manifest resources and safe decoding of standard `.resources` values
-- WPF `.baml` header versions, record summaries, element/property usage, file-declared or built-in WPF type/property ID mappings, and property strings/references that can be read without invoking converters or serializers
+- WPF `.baml` header versions, record summaries, element/property usage, a bounded flat element tree with parent/content/complex-property links, file-declared or built-in WPF type/property ID mappings, and property strings/references that can be read without invoking converters or serializers
 - Common runtime, framework, language, installer, and toolchain fingerprints
 - Optional Ghidra headless results for native PE functions
 

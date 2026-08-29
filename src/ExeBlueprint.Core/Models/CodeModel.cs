@@ -111,6 +111,16 @@ public sealed record BamlSummaryModel
 
     public IReadOnlyList<BamlTypeUsageModel> ElementTypes { get; init; } = [];
 
+    // 以 flat node + parent ID 表示，避免深層 BAML 造成遞迴序列化風險。
+    public IReadOnlyList<BamlElementModel> Elements { get; init; } = [];
+
+    public bool ElementsTruncated { get; init; }
+
+    public bool ElementTreeComplete { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? ElementTreeError { get; init; }
+
     public IReadOnlyList<BamlPropertyUsageModel> Properties { get; init; } = [];
 
     // 具有可安全摘要之 inline value 或 reference 的 property record 總數。
@@ -150,6 +160,52 @@ public sealed record BamlTypeUsageModel
     public required int Count { get; init; }
 }
 
+public sealed record BamlElementModel
+{
+    public required int Id { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public int? ParentId { get; init; }
+
+    public required int Depth { get; init; }
+
+    public required int StartOffset { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public int? EndOffset { get; init; }
+
+    public required int TypeId { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? Type { get; init; }
+
+    public bool IsInjected { get; init; }
+
+    public bool CreateUsingTypeConverter { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public int? ParentPropertyId { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? ParentPropertyName { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? ParentPropertyOwnerType { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public int? ContentPropertyId { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? ContentPropertyName { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? ContentPropertyOwnerType { get; init; }
+
+    public int ChildCount { get; init; }
+
+    public int PropertyValueCount { get; init; }
+}
+
 public sealed record BamlPropertyUsageModel
 {
     public required int Id { get; init; }
@@ -175,6 +231,9 @@ public sealed record BamlPropertyValueModel
 
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     public int? ElementTypeId { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public int? ElementId { get; init; }
 
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     public string? ElementType { get; init; }

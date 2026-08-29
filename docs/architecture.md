@@ -31,7 +31,7 @@ Blueprint 中介資料
 
 ## Blueprint 資料
 
-目前 schema 版本是 `0.3`，主要欄位包括：
+目前 schema 版本是 `0.4`，主要欄位包括：
 
 - `input`：輸入類型、檔案數與總大小
 - `summary`：PE、assembly、型別、方法、資源和相依關係數量
@@ -41,9 +41,9 @@ Blueprint 中介資料
 - `technologies`：語言、runtime、框架和工具鏈判斷
 - `warnings`：略過或無法分析的項目
 
-`.resources` 內的鍵值會放在 manifest 資源的 `entries`。字串、數字、布林、字元、日期與時間可轉成文字；一般位元組陣列和 stream 只記大小，檔名為 `.baml` 時會另外整理 MSBAML 檔頭版本、record 總數、各類型數量、element／property 使用次數，並用 BAML 檔案自行宣告的 assembly、type、attribute、string 對照表解析使用中的 ID。負值 ID 會依 [dotnet/wpf v10.0.11 的官方內建表](https://github.com/dotnet/wpf/tree/v10.0.11/src/Microsoft.DotNet.Wpf/src/PresentationFramework/System/Windows/Markup/Baml2006) 解析，保留號或超出已知範圍的 ID 則維持數字。BAML property 的直接字串、字串表與型別參照、MarkupExtension argument、converter 輸入字串、custom binary 大小及 deferred StaticResource ID 會放在 `propertyValues`，並附上當下 element 與 property 名稱；解析器不載入 WPF assembly、不執行 converter／serializer，也不建立 UI 物件。自訂資源型別不會反序列化，只保留完整型別名稱與原始資料大小。單一 assembly 最多保留 5,000 筆鍵值、單一文字值最多保留 4,096 字元；BAML 最多掃描 100,000 筆 record、每類最多保留 2,000 個 symbol、每檔最多保留 2,000 筆 property value，每個 metadata 字串最多讀取 8,192 bytes，property value 最多保留 4,096 個字元，截斷狀態和解析錯誤都會明確記錄。
+`.resources` 內的鍵值會放在 manifest 資源的 `entries`。字串、數字、布林、字元、日期與時間可轉成文字；一般位元組陣列和 stream 只記大小，檔名為 `.baml` 時會另外整理 MSBAML 檔頭版本、record 總數、各類型數量、element／property 使用次數，並用 BAML 檔案自行宣告的 assembly、type、attribute、string 對照表解析使用中的 ID。負值 ID 會依 [dotnet/wpf v10.0.11 的官方內建表](https://github.com/dotnet/wpf/tree/v10.0.11/src/Microsoft.DotNet.Wpf/src/PresentationFramework/System/Windows/Markup/Baml2006) 解析，保留號或超出已知範圍的 ID 則維持數字。BAML element 以有上限的 flat node 清單保存 node ID、parent ID、depth、record start/end byte offset、content/complex parent property、child count 與 property value count，避免惡意深度造成遞迴序列化風險，也為 deferred value 定位保留依據；property value 也帶 element ID，可直接與節點對接。不平衡的 element 或 property scope 不會假裝成完整 tree，而會設定 `elementTreeComplete` 與錯誤原因。直接字串、字串表與型別參照、MarkupExtension argument、converter 輸入字串、custom binary 大小及 deferred StaticResource ID 會放在 `propertyValues`；解析器不載入 WPF assembly、不執行 converter／serializer，也不建立 UI 物件。自訂資源型別不會反序列化，只保留完整型別名稱與原始資料大小。單一 assembly 最多保留 5,000 筆鍵值、單一文字值最多保留 4,096 字元；BAML 最多掃描 100,000 筆 record、每類最多保留 2,000 個 symbol、每檔最多保留 2,000 個 element 與 2,000 筆 property value，每個 metadata 字串最多讀取 8,192 bytes，property value 最多保留 4,096 個字元，截斷狀態和解析錯誤都會明確記錄。
 
-後續加入可還原 UI tree 的 element 關係、deferred resource 連結和更細的控制流程時會再提升 schema 版本，舊欄位維持相容。
+後續加入 deferred resource 連結和更細的控制流程時會再提升 schema 版本，舊欄位維持相容。
 
 ## 分析器分層
 

@@ -137,6 +137,7 @@ public static class MarkdownReportWriter
     private const int MaxNativeFunctionsPerFile = 100;
     private const int MaxResourcesPerFile = 30;
     private const int MaxResourceEntriesPerFile = 50;
+    private const int MaxBamlElementsPerFile = 50;
     private const int MaxBamlPropertyValuesPerFile = 50;
     private const int MaxBamlPropertyValueReportChars = 200;
 
@@ -303,6 +304,50 @@ public static class MarkdownReportWriter
                     builder.AppendLine($"（報告最多列出 {MaxResourceEntriesPerFile} 筆資源鍵值，完整內容與截斷狀態請看 blueprint.json）");
                 }
 
+                var bamlElements = code.Resources
+                    .SelectMany(resource => resource.Entries
+                        .Where(entry => entry.Baml is not null)
+                        .SelectMany(entry => entry.Baml!.Elements
+                            .Select(element => (Resource: resource.Name, Entry: entry.Name, Element: element))))
+                    .Take(MaxBamlElementsPerFile)
+                    .ToArray();
+                if (bamlElements.Length > 0)
+                {
+                    builder.AppendLine();
+                    builder.AppendLine("BAML element tree：");
+                    builder.AppendLine();
+                    builder.AppendLine("| 資源 | BAML | 節點 | Parent | Element | 經由 property | 子節點 | 值 |");
+                    builder.AppendLine("| --- | --- | ---: | ---: | --- | --- | ---: | ---: |");
+                    foreach (var item in bamlElements)
+                    {
+                        builder.AppendLine(
+                            $"| `{EscapeInline(item.Resource)}` | `{EscapeInline(item.Entry)}` | {item.Element.Id} | {(item.Element.ParentId?.ToString(CultureInfo.InvariantCulture) ?? "-")} | {FormatBamlElementType(item.Element)} | {FormatBamlParentProperty(item.Element)} | {item.Element.ChildCount} | {item.Element.PropertyValueCount} |");
+                    }
+                }
+
+                var totalBamlElements = code.Resources
+                    .SelectMany(resource => resource.Entries)
+                    .Where(entry => entry.Baml is not null)
+                    .Sum(entry => entry.Baml!.ElementCount);
+                if (totalBamlElements > MaxBamlElementsPerFile
+                    || code.Resources.SelectMany(resource => resource.Entries)
+                        .Any(entry => entry.Baml?.ElementsTruncated == true))
+                {
+                    builder.AppendLine();
+                    builder.AppendLine($"（報告最多列出 {MaxBamlElementsPerFile} 個 BAML element，完整 flat tree 與截斷狀態請看 blueprint.json）");
+                }
+
+                foreach (var item in code.Resources
+                             .SelectMany(resource => resource.Entries
+                                 .Where(entry => entry.Baml?.ElementTreeComplete == false)
+                                 .Select(entry => (Resource: resource.Name, Entry: entry)))
+                             .Take(10))
+                {
+                    builder.AppendLine();
+                    builder.AppendLine(
+                        $"- `{EscapeInline(item.Resource)}` / `{EscapeInline(item.Entry.Name)}` element tree 不完整：{EscapeCell(item.Entry.Baml!.ElementTreeError ?? "已達解析上限")}");
+                }
+
                 var bamlPropertyValues = code.Resources
                     .SelectMany(resource => resource.Entries
                         .Where(entry => entry.Baml is not null)
@@ -428,6 +473,41 @@ public static class MarkdownReportWriter
         }
 
         return value.ElementTypeId is { } elementTypeId ? $"type ID {elementTypeId}" : "-";
+    }
+
+    private static string FormatBamlElementType(BamlElementModel element)
+    {
+        if (element.Type is { } elementType)
+        {
+            var flags = new List<string>();
+            if (element.IsInjected)
+            {
+                flags.Add("injected");
+            }
+
+            if (element.CreateUsingTypeConverter)
+            {
+                flags.Add("converter");
+            }
+
+            var suffix = flags.Count == 0 ? string.Empty : $"（{string.Join("、", flags)}）";
+            return $"`{EscapeInline(EscapeCell(elementType))}`{suffix}";
+        }
+
+        return $"type ID {element.TypeId}";
+    }
+
+    private static string FormatBamlParentProperty(BamlElementModel element)
+    {
+        if (element.ParentPropertyName is not { } propertyName)
+        {
+            return element.ParentPropertyId is { } propertyId ? $"property ID {propertyId}" : "-";
+        }
+
+        var qualifiedName = element.ParentPropertyOwnerType is { } ownerType
+            ? $"{ownerType}.{propertyName}"
+            : propertyName;
+        return $"`{EscapeInline(EscapeCell(qualifiedName))}`";
     }
 
     private static string FormatBamlProperty(BamlPropertyValueModel value)

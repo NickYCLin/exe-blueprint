@@ -759,6 +759,25 @@ public sealed class ManagedSymbolReaderTests
         Assert.Equal(1, customElement.Count);
         var builtInElement = Assert.Single(bamlEntry.Baml.ElementTypes, item => item.Id == -254);
         Assert.Equal("Grid", builtInElement.Name);
+        Assert.False(bamlEntry.Baml.ElementsTruncated);
+        Assert.True(bamlEntry.Baml.ElementTreeComplete);
+        Assert.Null(bamlEntry.Baml.ElementTreeError);
+        Assert.Equal(2, bamlEntry.Baml.Elements.Count);
+        var rootElement = Assert.Single(bamlEntry.Baml.Elements, item => item.ParentId is null);
+        Assert.Equal(0, rootElement.Id);
+        Assert.Equal("BamlFixture.MainWindow", rootElement.Type);
+        Assert.Equal(0, rootElement.Depth);
+        Assert.True(rootElement.StartOffset > 0);
+        Assert.NotNull(rootElement.EndOffset);
+        Assert.True(rootElement.EndOffset > rootElement.StartOffset);
+        Assert.Equal(1, rootElement.ChildCount);
+        Assert.Equal(3, rootElement.PropertyValueCount);
+        Assert.Equal("Content", rootElement.ContentPropertyName);
+        var gridElement = Assert.Single(bamlEntry.Baml.Elements, item => item.ParentId == rootElement.Id);
+        Assert.Equal("Grid", gridElement.Type);
+        Assert.Equal(1, gridElement.Depth);
+        Assert.Equal("Content", gridElement.ParentPropertyName);
+        Assert.Equal("ContentControl", gridElement.ParentPropertyOwnerType);
         var titleProperty = Assert.Single(bamlEntry.Baml.Properties, item => item.Id == 0);
         Assert.Equal("Title", titleProperty.Name);
         Assert.Equal("Window", titleProperty.OwnerType);
@@ -780,6 +799,7 @@ public sealed class ManagedSymbolReaderTests
         Assert.Equal("BamlFixture.MainWindow", titleValue.ElementType);
         Assert.Equal("converted", titleValue.Kind);
         Assert.Equal("MainWindow", titleValue.Value);
+        Assert.Equal(rootElement.Id, titleValue.ElementId);
         Assert.Contains(
             bamlEntry.Baml.PropertyValues,
             item => item.PropertyName == "Width" && item.Value == "800");
@@ -811,6 +831,10 @@ public sealed class ManagedSymbolReaderTests
         Assert.Equal(4, bamlJson.GetProperty("propertyCount").GetInt32());
         Assert.Equal("BamlFixture.MainWindow", bamlJson.GetProperty("rootElementType").GetString());
         Assert.Equal(2, bamlJson.GetProperty("elementTypes").GetArrayLength());
+        Assert.Equal(2, bamlJson.GetProperty("elements").GetArrayLength());
+        Assert.False(bamlJson.GetProperty("elementsTruncated").GetBoolean());
+        Assert.True(bamlJson.GetProperty("elementTreeComplete").GetBoolean());
+        Assert.False(bamlJson.TryGetProperty("elementTreeError", out _));
         Assert.Equal(4, bamlJson.GetProperty("properties").GetArrayLength());
         Assert.Equal(3, bamlJson.GetProperty("propertyValueCount").GetInt32());
         Assert.Equal(3, bamlJson.GetProperty("propertyValues").GetArrayLength());
@@ -915,6 +939,27 @@ public sealed class ManagedSymbolReaderTests
         Assert.Equal(0, truncated.RecordCount);
         Assert.NotNull(truncated.Error);
 
+        using var partialAfterClosedTreeStream = new MemoryStream();
+        partialAfterClosedTreeStream.Write(CreateBamlHeader());
+        using (var writer = new BinaryWriter(
+                   partialAfterClosedTreeStream,
+                   System.Text.Encoding.UTF8,
+                   leaveOpen: true))
+        {
+            writer.Write((byte)3);
+            writer.Write((short)-254);
+            writer.Write((byte)0);
+            writer.Write((byte)4);
+            writer.Write((byte)47);
+        }
+
+        var partialAfterClosedTree = BamlSummaryReader.Read(partialAfterClosedTreeStream.ToArray());
+        Assert.Equal("partial", partialAfterClosedTree.Status);
+        Assert.Equal(1, partialAfterClosedTree.ElementCount);
+        Assert.Single(partialAfterClosedTree.Elements);
+        Assert.False(partialAfterClosedTree.ElementTreeComplete);
+        Assert.Contains("NamedElementStart", partialAfterClosedTree.ElementTreeError);
+
         var invalidTypeMap = CreateBamlHeader()
             .Concat(new byte[] { 29, 2, 0 })
             .ToArray();
@@ -939,6 +984,11 @@ public sealed class ManagedSymbolReaderTests
         Assert.Equal("parsed", boundedSymbols.Status);
         Assert.Equal(2_001, boundedSymbols.ElementCount);
         Assert.Equal(2_000, boundedSymbols.ElementTypes.Count);
+        Assert.Equal(2_000, boundedSymbols.Elements.Count);
+        Assert.True(boundedSymbols.ElementsTruncated);
+        Assert.False(boundedSymbols.ElementTreeComplete);
+        Assert.NotNull(boundedSymbols.ElementTreeError);
+        Assert.Equal(1_999, boundedSymbols.Elements[^1].Depth);
         Assert.True(boundedSymbols.SymbolsTruncated);
 
         using var manyValues = new MemoryStream();
@@ -1007,6 +1057,170 @@ public sealed class ManagedSymbolReaderTests
         Assert.Equal(-254, summary.RootElementTypeId);
         Assert.Equal("Grid", summary.RootElementType);
         Assert.Equal("Grid", Assert.Single(summary.ElementTypes).Name);
+    }
+
+    [Fact]
+    public void BuildsBoundedFlatBamlElementTreeWithPropertyRelationships()
+    {
+        using var stream = new MemoryStream();
+        stream.Write(CreateBamlHeader());
+        using (var writer = new BinaryWriter(stream, System.Text.Encoding.UTF8, leaveOpen: true))
+        {
+            writer.Write((byte)3);
+            writer.Write((short)-254);
+            writer.Write((byte)1);
+
+            writer.Write((byte)46);
+            writer.Write((short)-14);
+
+            writer.Write((byte)3);
+            writer.Write((short)-1);
+            writer.Write((byte)0);
+            WriteBamlVariableRecord(writer, 5, payload =>
+            {
+                payload.Write((short)-1);
+                payload.Write("child");
+            });
+            writer.Write((byte)4);
+
+            writer.Write((byte)7);
+            writer.Write((short)-57);
+            writer.Write((byte)3);
+            writer.Write((short)-1);
+            writer.Write((byte)2);
+            writer.Write((byte)46);
+            writer.Write((short)-14);
+            writer.Write((byte)3);
+            writer.Write((short)-254);
+            writer.Write((byte)0);
+            writer.Write((byte)4);
+            writer.Write((byte)4);
+            writer.Write((byte)8);
+
+            writer.Write((byte)4);
+            writer.Write((byte)2);
+        }
+
+        var summary = BamlSummaryReader.Read(stream.ToArray());
+
+        Assert.Equal("parsed", summary.Status);
+        Assert.Equal(4, summary.ElementCount);
+        Assert.Equal(4, summary.Elements.Count);
+        Assert.False(summary.ElementsTruncated);
+        Assert.True(summary.ElementTreeComplete);
+        Assert.Null(summary.ElementTreeError);
+        var root = summary.Elements[0];
+        Assert.Equal("Grid", root.Type);
+        Assert.True(root.CreateUsingTypeConverter);
+        Assert.Equal(2, root.ChildCount);
+        Assert.Equal("Content", root.ContentPropertyName);
+        var contentChild = summary.Elements[1];
+        Assert.Equal(root.Id, contentChild.ParentId);
+        Assert.Equal("Content", contentChild.ParentPropertyName);
+        Assert.Equal(1, contentChild.PropertyValueCount);
+        var scopedChild = summary.Elements[2];
+        Assert.Equal(root.Id, scopedChild.ParentId);
+        Assert.Equal("Width", scopedChild.ParentPropertyName);
+        Assert.True(scopedChild.IsInjected);
+        Assert.Equal(1, scopedChild.ChildCount);
+        var nestedChild = summary.Elements[3];
+        Assert.Equal(scopedChild.Id, nestedChild.ParentId);
+        Assert.Equal("Content", nestedChild.ParentPropertyName);
+        var childValue = Assert.Single(summary.PropertyValues);
+        Assert.Equal(contentChild.Id, childValue.ElementId);
+        Assert.Equal("child", childValue.Value);
+
+        var unmatchedEnd = BamlSummaryReader.Read(
+            CreateBamlHeader().Concat(new byte[] { 4, 2 }).ToArray());
+        Assert.Equal("parsed", unmatchedEnd.Status);
+        Assert.False(unmatchedEnd.ElementTreeComplete);
+        Assert.Contains("沒有對應", unmatchedEnd.ElementTreeError);
+
+        using var unclosedScopeStream = new MemoryStream();
+        unclosedScopeStream.Write(CreateBamlHeader());
+        using (var writer = new BinaryWriter(
+                   unclosedScopeStream,
+                   System.Text.Encoding.UTF8,
+                   leaveOpen: true))
+        {
+            writer.Write((byte)3);
+            writer.Write((short)-254);
+            writer.Write((byte)0);
+            writer.Write((byte)7);
+            writer.Write((short)-57);
+            writer.Write((byte)4);
+            writer.Write((byte)2);
+        }
+
+        var unclosedScope = BamlSummaryReader.Read(unclosedScopeStream.ToArray());
+        Assert.Equal("parsed", unclosedScope.Status);
+        Assert.False(unclosedScope.ElementTreeComplete);
+        Assert.Contains("scope 未關閉", unclosedScope.ElementTreeError);
+
+        using var mismatchedScopeStream = new MemoryStream();
+        mismatchedScopeStream.Write(CreateBamlHeader());
+        using (var writer = new BinaryWriter(
+                   mismatchedScopeStream,
+                   System.Text.Encoding.UTF8,
+                   leaveOpen: true))
+        {
+            writer.Write((byte)3);
+            writer.Write((short)-254);
+            writer.Write((byte)0);
+            writer.Write((byte)7);
+            writer.Write((short)-57);
+            writer.Write((byte)10);
+            writer.Write((byte)4);
+            writer.Write((byte)2);
+        }
+
+        var mismatchedScope = BamlSummaryReader.Read(mismatchedScopeStream.ToArray());
+        Assert.False(mismatchedScope.ElementTreeComplete);
+        Assert.Contains("不相符", mismatchedScope.ElementTreeError);
+
+        using var ancestorScopeEndStream = new MemoryStream();
+        ancestorScopeEndStream.Write(CreateBamlHeader());
+        using (var writer = new BinaryWriter(
+                   ancestorScopeEndStream,
+                   System.Text.Encoding.UTF8,
+                   leaveOpen: true))
+        {
+            writer.Write((byte)3);
+            writer.Write((short)-254);
+            writer.Write((byte)0);
+            writer.Write((byte)7);
+            writer.Write((short)-57);
+            writer.Write((byte)3);
+            writer.Write((short)-1);
+            writer.Write((byte)0);
+            writer.Write((byte)8);
+            writer.Write((byte)4);
+            writer.Write((byte)4);
+            writer.Write((byte)2);
+        }
+
+        var ancestorScopeEnd = BamlSummaryReader.Read(ancestorScopeEndStream.ToArray());
+        Assert.False(ancestorScopeEnd.ElementTreeComplete);
+        Assert.Contains("屬於 element 0", ancestorScopeEnd.ElementTreeError);
+
+        using var outOfElementScopeStream = new MemoryStream();
+        outOfElementScopeStream.Write(CreateBamlHeader());
+        using (var writer = new BinaryWriter(
+                   outOfElementScopeStream,
+                   System.Text.Encoding.UTF8,
+                   leaveOpen: true))
+        {
+            writer.Write((byte)7);
+            writer.Write((short)-57);
+            writer.Write((byte)8);
+            writer.Write((byte)46);
+            writer.Write((short)-14);
+            writer.Write((byte)2);
+        }
+
+        var outOfElementScope = BamlSummaryReader.Read(outOfElementScopeStream.ToArray());
+        Assert.False(outOfElementScope.ElementTreeComplete);
+        Assert.Contains("element 外", outOfElementScope.ElementTreeError);
     }
 
     [Fact]
@@ -1106,7 +1320,7 @@ public sealed class ManagedSymbolReaderTests
         var assemblyPath = typeof(BlueprintAnalyzer).Assembly.Location;
         var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
 
-        Assert.Equal("0.3", document.SchemaVersion);
+        Assert.Equal("0.4", document.SchemaVersion);
         Assert.True(document.Summary.TypeCount > 0);
         Assert.True(document.Summary.MethodCount > 0);
         Assert.Equal(document.Files[0].Code!.TypeCount, document.Summary.TypeCount);
