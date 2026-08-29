@@ -657,7 +657,10 @@ internal static class ManagedSymbolReader
 
             var metadata = peReader.GetMetadataReader();
             var signature = metadata.GetStandaloneSignature(body.LocalSignature);
-            return signature.DecodeLocalSignature(SignatureTypeNameProvider.Instance, null);
+            return signature
+                .DecodeLocalSignature(SignatureTypeNameProvider.Instance, null)
+                .Select(type => type.Text)
+                .ToArray();
         }
         catch (Exception exception) when (exception is BadImageFormatException or InvalidOperationException)
         {
@@ -2667,9 +2670,13 @@ internal static class ManagedSymbolReader
             return $"{expression} is {(branchWhenTrue ? "not null" : "null")}";
         }
 
+        if (type.EndsWith('*') || type.StartsWith("delegate*", StringComparison.Ordinal))
+        {
+            return $"{expression} {(branchWhenTrue ? "!=" : "==")} null";
+        }
+
         if (type.StartsWith('!') ||
             type.StartsWith("ref ", StringComparison.Ordinal) ||
-            type.EndsWith('*') ||
             type is "TypedReference" or "method*")
         {
             return branchWhenTrue ? expression : $"!({expression})";
@@ -3258,6 +3265,7 @@ internal static class ManagedSymbolReader
             or "object" or "TypedReference" or "method*")
         && !type.StartsWith('!')
         && !type.StartsWith("ref ", StringComparison.Ordinal)
+        && !type.StartsWith("delegate*", StringComparison.Ordinal)
         && !type.EndsWith('*')
         && !type.EndsWith(']');
 
@@ -3691,7 +3699,8 @@ internal static class ManagedSymbolReader
         or "TypedReference"
         || parameterType.StartsWith('!')
         || parameterType.StartsWith("ref ", StringComparison.Ordinal)
-        || parameterType.EndsWith('*');
+        || parameterType.EndsWith('*')
+        || parameterType.StartsWith("delegate*", StringComparison.Ordinal);
 
     private static string FormatCharLiteral(char value) => value switch
     {
@@ -3718,8 +3727,8 @@ internal static class ManagedSymbolReader
                     methodSignature.ParameterTypes.Length,
                     methodSignature.Header.IsInstance,
                     methodSignature.ReturnType,
-                    methodSignature.ReturnType == "void",
-                    methodSignature.ParameterTypes,
+                    methodSignature.ReturnType.Text == "void",
+                    methodSignature.ParameterTypes.Select(type => type.Text).ToArray(),
                     []);
 
             case HandleKind.MemberReference:
@@ -3736,8 +3745,8 @@ internal static class ManagedSymbolReader
                     memberSignature.ParameterTypes.Length,
                     memberSignature.Header.IsInstance,
                     memberSignature.ReturnType,
-                    memberSignature.ReturnType == "void",
-                    memberSignature.ParameterTypes,
+                    memberSignature.ReturnType.Text == "void",
+                    memberSignature.ParameterTypes.Select(type => type.Text).ToArray(),
                     []);
 
             case HandleKind.MethodSpecification:
@@ -3748,7 +3757,10 @@ internal static class ManagedSymbolReader
                     return null;
                 }
 
-                var genericArguments = spec.DecodeSignature(SignatureTypeNameProvider.Instance, null);
+                var genericArguments = spec
+                    .DecodeSignature(SignatureTypeNameProvider.Instance, null)
+                    .Select(type => type.Text)
+                    .ToArray();
                 return resolved with
                 {
                     ReturnType = InstantiateMethodSignatureType(resolved.ReturnType, genericArguments),
@@ -5815,7 +5827,7 @@ internal static class ManagedSymbolReader
                     metadata,
                     accessors.Getter,
                     accessors.Setter,
-                    signature.ParameterTypes);
+                    signature.ParameterTypes.Select(type => type.Text).ToArray());
             }
             catch (BadImageFormatException)
             {
@@ -6048,20 +6060,141 @@ internal static class ManagedSymbolReader
     };
 }
 
-internal sealed class SignatureTypeNameProvider : ISignatureTypeProvider<string, object?>
+internal readonly record struct SignatureCustomModifier(string Type, bool IsRequired);
+
+internal sealed record SignatureTypeName(
+    string Text,
+    ImmutableArray<SignatureCustomModifier> OuterCustomModifiers,
+    bool HasNestedCustomModifiers,
+    bool IsRestrictedGenericArgument)
 {
+    public SignatureTypeName(string text)
+        : this(text, [], false, false)
+    {
+    }
+
+    public static implicit operator string(SignatureTypeName value) => value.Text;
+
+    public static implicit operator SignatureTypeName(string value) => new(value);
+
+    public override string ToString() => Text;
+}
+
+internal sealed class SignatureTypeNameProvider : ISignatureTypeProvider<SignatureTypeName, object?>
+{
+    private static readonly IReadOnlySet<string> SupportedFunctionPointerCallingConventions =
+        new HashSet<string>(StringComparer.Ordinal)
+        {
+            "Cdecl",
+            "Fastcall",
+            "MemberFunction",
+            "Stdcall",
+            "SuppressGCTransition",
+            "Swift",
+            "Thiscall"
+        };
+
     public static readonly SignatureTypeNameProvider Instance = new();
 
-    public string GetArrayType(string elementType, ArrayShape shape) =>
-        $"{elementType}[{new string(',', Math.Max(shape.Rank - 1, 0))}]";
+    public SignatureTypeName GetArrayType(SignatureTypeName elementType, ArrayShape shape) =>
+        Wrap(
+            $"{elementType.Text}[{new string(',', Math.Max(shape.Rank - 1, 0))}]",
+            elementType,
+            isRestrictedGenericArgument: false);
 
-    public string GetByReferenceType(string elementType) => $"ref {elementType}";
+    public SignatureTypeName GetByReferenceType(SignatureTypeName elementType) =>
+        Wrap($"ref {elementType.Text}", elementType, isRestrictedGenericArgument: true);
 
-    public string GetFunctionPointerType(MethodSignature<string> signature) => "method*";
-
-    public string GetGenericInstantiation(string genericType, ImmutableArray<string> typeArguments)
+    public SignatureTypeName GetFunctionPointerType(MethodSignature<SignatureTypeName> signature)
     {
-        var segments = genericType.Split('.');
+        if (signature.Header.Kind != SignatureKind.Method ||
+            signature.Header.IsGeneric ||
+            signature.Header.IsInstance ||
+            signature.Header.HasExplicitThis ||
+            signature.GenericParameterCount != 0 ||
+            signature.RequiredParameterCount != signature.ParameterTypes.Length ||
+            signature.ReturnType.Text is "ref void" or "TypedReference" or "ref TypedReference" ||
+            signature.ReturnType.HasNestedCustomModifiers ||
+            signature.ParameterTypes.Any(parameter =>
+                parameter.Text is "void" or "ref void" ||
+                parameter.HasNestedCustomModifiers ||
+                parameter.OuterCustomModifiers.Length > 0))
+        {
+            return new SignatureTypeName("nint");
+        }
+
+        var conventions = new List<string>();
+        var prefix = signature.Header.CallingConvention switch
+        {
+            SignatureCallingConvention.Default => " managed",
+            SignatureCallingConvention.Unmanaged => " unmanaged",
+            SignatureCallingConvention.CDecl => AddConvention("Cdecl"),
+            SignatureCallingConvention.StdCall => AddConvention("Stdcall"),
+            SignatureCallingConvention.ThisCall => AddConvention("Thiscall"),
+            SignatureCallingConvention.FastCall => AddConvention("Fastcall"),
+            _ => string.Empty
+        };
+        if (prefix.Length == 0)
+        {
+            return new SignatureTypeName("nint");
+        }
+
+        const string callConventionPrefix = "System.Runtime.CompilerServices.CallConv";
+        // Metadata stores the outermost modifier first, which is the reverse of
+        // the source-level unmanaged[...] convention order.
+        foreach (var modifier in signature.ReturnType.OuterCustomModifiers.Reverse())
+        {
+            if (modifier.IsRequired ||
+                !modifier.Type.StartsWith(callConventionPrefix, StringComparison.Ordinal))
+            {
+                return new SignatureTypeName("nint");
+            }
+
+            var convention = modifier.Type[callConventionPrefix.Length..];
+            if (!SupportedFunctionPointerCallingConventions.Contains(convention))
+            {
+                return new SignatureTypeName("nint");
+            }
+
+            conventions.Add(convention);
+        }
+
+        if (prefix == " managed" && conventions.Count > 0)
+        {
+            return new SignatureTypeName("nint");
+        }
+
+        if (prefix == " unmanaged" && conventions.Count > 0)
+        {
+            prefix += $"[{string.Join(", ", conventions)}]";
+        }
+
+        return new SignatureTypeName(
+            $"delegate*{prefix}<" +
+            string.Join(", ", signature.ParameterTypes.Select(parameter => parameter.Text).Append(signature.ReturnType.Text)) +
+            ">",
+            [],
+            HasNestedCustomModifiers: false,
+            IsRestrictedGenericArgument: true);
+
+        string AddConvention(string convention)
+        {
+            conventions.Add(convention);
+            return " unmanaged";
+        }
+    }
+
+    public SignatureTypeName GetGenericInstantiation(
+        SignatureTypeName genericType,
+        ImmutableArray<SignatureTypeName> typeArguments)
+    {
+        if (genericType.IsRestrictedGenericArgument ||
+            typeArguments.Any(type => type.IsRestrictedGenericArgument))
+        {
+            return new SignatureTypeName("nint");
+        }
+
+        var segments = genericType.Text.Split('.');
         var rendered = new string[segments.Length];
         var argumentIndex = 0;
         var foundArity = false;
@@ -6088,81 +6221,133 @@ internal sealed class SignatureTypeNameProvider : ISignatureTypeProvider<string,
             }
 
             rendered[index] =
-                $"{segment[..backtick]}<{string.Join(", ", typeArguments.Skip(argumentIndex).Take(arity))}>";
+                $"{segment[..backtick]}<{string.Join(", ", typeArguments.Skip(argumentIndex).Take(arity).Select(type => type.Text))}>";
             argumentIndex += arity;
         }
 
         return foundArity && argumentIndex == typeArguments.Length
-            ? string.Join('.', rendered)
+            ? CreateGenericInstantiation(string.Join('.', rendered), genericType, typeArguments)
             : FormatLegacyGenericInstantiation(genericType, typeArguments);
     }
 
-    public string GetGenericMethodParameter(object? genericContext, int index) => $"!!{index}";
+    public SignatureTypeName GetGenericMethodParameter(object? genericContext, int index) => new($"!!{index}");
 
-    public string GetGenericTypeParameter(object? genericContext, int index) => $"!{index}";
+    public SignatureTypeName GetGenericTypeParameter(object? genericContext, int index) => new($"!{index}");
 
-    public string GetModifiedType(string modifier, string unmodifiedType, bool isRequired) => unmodifiedType;
+    public SignatureTypeName GetModifiedType(
+        SignatureTypeName modifier,
+        SignatureTypeName unmodifiedType,
+        bool isRequired) =>
+        unmodifiedType with
+        {
+            OuterCustomModifiers = unmodifiedType.OuterCustomModifiers.Add(
+                new SignatureCustomModifier(modifier.Text, isRequired))
+        };
 
-    public string GetPinnedType(string elementType) => elementType;
+    public SignatureTypeName GetPinnedType(SignatureTypeName elementType) =>
+        Wrap(elementType.Text, elementType, elementType.IsRestrictedGenericArgument);
 
-    public string GetPointerType(string elementType) => $"{elementType}*";
+    public SignatureTypeName GetPointerType(SignatureTypeName elementType) =>
+        Wrap($"{elementType.Text}*", elementType, isRestrictedGenericArgument: true);
 
-    public string GetPrimitiveType(PrimitiveTypeCode typeCode) => typeCode switch
+    public SignatureTypeName GetPrimitiveType(PrimitiveTypeCode typeCode)
     {
-        PrimitiveTypeCode.Boolean => "bool",
-        PrimitiveTypeCode.Byte => "byte",
-        PrimitiveTypeCode.SByte => "sbyte",
-        PrimitiveTypeCode.Char => "char",
-        PrimitiveTypeCode.Int16 => "short",
-        PrimitiveTypeCode.UInt16 => "ushort",
-        PrimitiveTypeCode.Int32 => "int",
-        PrimitiveTypeCode.UInt32 => "uint",
-        PrimitiveTypeCode.Int64 => "long",
-        PrimitiveTypeCode.UInt64 => "ulong",
-        PrimitiveTypeCode.Single => "float",
-        PrimitiveTypeCode.Double => "double",
-        PrimitiveTypeCode.IntPtr => "nint",
-        PrimitiveTypeCode.UIntPtr => "nuint",
-        PrimitiveTypeCode.Object => "object",
-        PrimitiveTypeCode.String => "string",
-        PrimitiveTypeCode.Void => "void",
-        PrimitiveTypeCode.TypedReference => "TypedReference",
-        _ => typeCode.ToString()
-    };
+        var text = typeCode switch
+        {
+            PrimitiveTypeCode.Boolean => "bool",
+            PrimitiveTypeCode.Byte => "byte",
+            PrimitiveTypeCode.SByte => "sbyte",
+            PrimitiveTypeCode.Char => "char",
+            PrimitiveTypeCode.Int16 => "short",
+            PrimitiveTypeCode.UInt16 => "ushort",
+            PrimitiveTypeCode.Int32 => "int",
+            PrimitiveTypeCode.UInt32 => "uint",
+            PrimitiveTypeCode.Int64 => "long",
+            PrimitiveTypeCode.UInt64 => "ulong",
+            PrimitiveTypeCode.Single => "float",
+            PrimitiveTypeCode.Double => "double",
+            PrimitiveTypeCode.IntPtr => "nint",
+            PrimitiveTypeCode.UIntPtr => "nuint",
+            PrimitiveTypeCode.Object => "object",
+            PrimitiveTypeCode.String => "string",
+            PrimitiveTypeCode.Void => "void",
+            PrimitiveTypeCode.TypedReference => "TypedReference",
+            _ => typeCode.ToString()
+        };
+        return new SignatureTypeName(
+            text,
+            [],
+            HasNestedCustomModifiers: false,
+            IsRestrictedGenericArgument: typeCode == PrimitiveTypeCode.TypedReference);
+    }
 
-    public string GetSZArrayType(string elementType) => $"{elementType}[]";
+    public SignatureTypeName GetSZArrayType(SignatureTypeName elementType) =>
+        Wrap($"{elementType.Text}[]", elementType, isRestrictedGenericArgument: false);
 
-    public string GetTypeFromDefinition(MetadataReader reader, TypeDefinitionHandle handle, byte rawTypeKind)
+    public SignatureTypeName GetTypeFromDefinition(
+        MetadataReader reader,
+        TypeDefinitionHandle handle,
+        byte rawTypeKind)
     {
         var definition = reader.GetTypeDefinition(handle);
         var name = reader.GetString(definition.Name);
         var declaringType = definition.GetDeclaringType();
         if (!declaringType.IsNil)
         {
-            return $"{GetTypeFromDefinition(reader, declaringType, rawTypeKind)}.{name}";
+            return new SignatureTypeName($"{GetTypeFromDefinition(reader, declaringType, rawTypeKind).Text}.{name}");
         }
 
         var namespaceName = reader.GetString(definition.Namespace);
-        return string.IsNullOrEmpty(namespaceName) ? name : $"{namespaceName}.{name}";
+        return new SignatureTypeName(string.IsNullOrEmpty(namespaceName) ? name : $"{namespaceName}.{name}");
     }
 
-    public string GetTypeFromReference(MetadataReader reader, TypeReferenceHandle handle, byte rawTypeKind)
+    public SignatureTypeName GetTypeFromReference(
+        MetadataReader reader,
+        TypeReferenceHandle handle,
+        byte rawTypeKind)
     {
         var reference = reader.GetTypeReference(handle);
         var name = reader.GetString(reference.Name);
         if (reference.ResolutionScope.Kind == HandleKind.TypeReference)
         {
-            return $"{GetTypeFromReference(reader, (TypeReferenceHandle)reference.ResolutionScope, rawTypeKind)}.{name}";
+            return new SignatureTypeName(
+                $"{GetTypeFromReference(reader, (TypeReferenceHandle)reference.ResolutionScope, rawTypeKind).Text}.{name}");
         }
 
         var namespaceName = reader.GetString(reference.Namespace);
-        return string.IsNullOrEmpty(namespaceName) ? name : $"{namespaceName}.{name}";
+        return new SignatureTypeName(string.IsNullOrEmpty(namespaceName) ? name : $"{namespaceName}.{name}");
     }
 
-    private static string FormatLegacyGenericInstantiation(
-        string genericType,
-        ImmutableArray<string> typeArguments) =>
-        $"{StripQualifiedArity(genericType)}<{string.Join(", ", typeArguments)}>";
+    private static SignatureTypeName FormatLegacyGenericInstantiation(
+        SignatureTypeName genericType,
+        ImmutableArray<SignatureTypeName> typeArguments) =>
+        CreateGenericInstantiation(
+            $"{StripQualifiedArity(genericType.Text)}<{string.Join(", ", typeArguments.Select(type => type.Text))}>",
+            genericType,
+            typeArguments);
+
+    private static SignatureTypeName CreateGenericInstantiation(
+        string text,
+        SignatureTypeName genericType,
+        ImmutableArray<SignatureTypeName> typeArguments) =>
+        new(
+            text,
+            [],
+            HasAnyCustomModifiers(genericType) || typeArguments.Any(HasAnyCustomModifiers),
+            IsRestrictedGenericArgument: false);
+
+    private static SignatureTypeName Wrap(
+        string text,
+        SignatureTypeName elementType,
+        bool isRestrictedGenericArgument) =>
+        new(
+            text,
+            [],
+            HasAnyCustomModifiers(elementType),
+            isRestrictedGenericArgument);
+
+    private static bool HasAnyCustomModifiers(SignatureTypeName type) =>
+        type.HasNestedCustomModifiers || type.OuterCustomModifiers.Length > 0;
 
     private static string StripQualifiedArity(string name) =>
         string.Join('.', name.Split('.').Select(StripArity));
@@ -6173,7 +6358,7 @@ internal sealed class SignatureTypeNameProvider : ISignatureTypeProvider<string,
         return backtick < 0 ? name : name[..backtick];
     }
 
-    public string GetTypeFromSpecification(
+    public SignatureTypeName GetTypeFromSpecification(
         MetadataReader reader,
         object? genericContext,
         TypeSpecificationHandle handle,

@@ -693,19 +693,19 @@ public sealed class ManagedSymbolReaderTests
 
         Assert.Equal(
             "Example.Outer<!0, !1>.Nested",
-            provider.GetGenericInstantiation("Example.Outer`2.Nested", ["!0", "!1"]));
+            provider.GetGenericInstantiation("Example.Outer`2.Nested", ["!0", "!1"]).Text);
         Assert.Equal(
             "Example.Outer<!0>.Child<!!0>.Leaf",
-            provider.GetGenericInstantiation("Example.Outer`1.Child`1.Leaf", ["!0", "!!0"]));
+            provider.GetGenericInstantiation("Example.Outer`1.Child`1.Leaf", ["!0", "!!0"]).Text);
         Assert.Equal(
             "Example.Legacy<!0>",
-            provider.GetGenericInstantiation("Example.Legacy", ["!0"]));
+            provider.GetGenericInstantiation("Example.Legacy", ["!0"]).Text);
         Assert.Equal(
             "Example.Outer.Child<!0>",
-            provider.GetGenericInstantiation("Example.Outer`1.Child`1", ["!0"]));
+            provider.GetGenericInstantiation("Example.Outer`1.Child`1", ["!0"]).Text);
         Assert.Equal(
             "Example.Outer.Child<!0, !1, !!0>",
-            provider.GetGenericInstantiation("Example.Outer`1.Child`1", ["!0", "!1", "!!0"]));
+            provider.GetGenericInstantiation("Example.Outer`1.Child`1", ["!0", "!1", "!!0"]).Text);
     }
 
     [Fact]
