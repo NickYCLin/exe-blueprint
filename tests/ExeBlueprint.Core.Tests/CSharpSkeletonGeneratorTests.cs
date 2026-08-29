@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using ExeBlueprint.Analysis;
 using ExeBlueprint.Generation;
 using ExeBlueprint.Models;
@@ -227,6 +228,499 @@ public sealed class CSharpSkeletonGeneratorTests
             "public ExeBlueprint.Core.Tests.NestedTypeFixture<T>.Child<U>.State State { get; set; } = default!;",
             source,
             StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task EmitsVarianceAndSafeGenericConstraintClauses()
+    {
+        var assemblyPath = typeof(GenericConstraintFixture<,,,,,>).Assembly.Location;
+        var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
+        var source = Assert.Single(
+            CSharpSkeletonGenerator.Generate(document),
+            file => file.RelativePath.EndsWith("ExeBlueprint.Core.Tests.cs", StringComparison.Ordinal))
+            .Content
+            .ReplaceLineEndings("\n");
+
+        Assert.Contains("internal interface IGenericVarianceFixture<out TOut, in TIn>", source);
+        Assert.Contains(
+            "internal delegate TResult GenericVarianceDelegateFixture<out TResult, in TArgument>(TArgument value)\n" +
+            "    where TResult : class?\n" +
+            "    where TArgument : notnull;",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "internal class GenericConstraintFixture<TClass, TNullableClass, TStruct, TUnmanaged, TNotNull, TConstructed>\n" +
+            "    where TClass : class\n" +
+            "    where TNullableClass : class?\n" +
+            "    where TStruct : struct\n" +
+            "    where TUnmanaged : unmanaged\n" +
+            "    where TNotNull : notnull\n" +
+            "    where TConstructed : ExeBlueprint.Core.Tests.GenericConstraintBaseFixture, " +
+            "ExeBlueprint.Core.Tests.IGenericConstraintInterfaceFixture, new()",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "    public static void Method<TMethodClass, TMethodNullable, TMethodNew, TMethodLink>()\n" +
+            "        where TMethodClass : class\n" +
+            "        where TMethodNullable : class?\n" +
+            "        where TMethodNew : ExeBlueprint.Core.Tests.IGenericConstraintInterfaceFixture, new()\n" +
+            "        where TMethodLink : TNotNull",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "    internal class Nested<TNested>\n" +
+            "        where TNested : TNotNull",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "internal sealed class OrderedConstraintFixture<TFirst, TSecond, TValue>\n" +
+            "    where TFirst : ExeBlueprint.Core.Tests.GenericConstraintBaseFixture\n" +
+            "    where TSecond : ExeBlueprint.Core.Tests.GenericConstraintBaseFixture\n" +
+            "    where TValue : ExeBlueprint.Core.Tests.GenericConstraintBaseFixture, TFirst, TSecond, " +
+            "ExeBlueprint.Core.Tests.IGenericConstraintInterfaceFixture",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "internal interface IAllowsRefStructFixture<T>\n" +
+            "    where T : allows ref struct",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "internal sealed class NullableLocalConstraintFixture<TLocalBase, TLocalInterface, TParameter, TLinked>\n" +
+            "    where TLocalBase : ExeBlueprint.Core.Tests.GenericConstraintBaseFixture?\n" +
+            "    where TLocalInterface : ExeBlueprint.Core.Tests.IGenericConstraintInterfaceFixture?\n" +
+            "    where TParameter : class?\n" +
+            "    where TLinked : TParameter?",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "    public static void Method<TMethod>()\n" +
+            "        where TMethod : TParameter?",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "    internal sealed class Nested<TNested>\n" +
+            "        where TNested : TParameter?",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "internal sealed class KeywordGenericConstraintFixture<@class, @required, @record, @file, @scoped, @closed, @__arglist>\n" +
+            "    where @class : ExeBlueprint.Core.Tests.IGenericConstraintInterfaceFixture\n" +
+            "    where @required : ExeBlueprint.Core.Tests.IGenericConstraintInterfaceFixture\n" +
+            "    where @record : ExeBlueprint.Core.Tests.IGenericConstraintInterfaceFixture\n" +
+            "    where @file : ExeBlueprint.Core.Tests.IGenericConstraintInterfaceFixture\n" +
+            "    where @scoped : ExeBlueprint.Core.Tests.IGenericConstraintInterfaceFixture\n" +
+            "    where @closed : ExeBlueprint.Core.Tests.IGenericConstraintInterfaceFixture\n" +
+            "    where @__arglist : ExeBlueprint.Core.Tests.IGenericConstraintInterfaceFixture",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "    public static @class Echo<@struct>(@class value, @struct other)\n" +
+            "        where @struct : @class",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "internal class NullableTypeConstraintFixture<TBase, TInterface, TConstructed>\n{",
+            source,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("where TBase :", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("where TInterface :", source, StringComparison.Ordinal);
+
+        var whereClauses = source
+            .Split('\n')
+            .Select(line => line.Trim())
+            .Where(line => line.StartsWith("where ", StringComparison.Ordinal))
+            .ToArray();
+        Assert.DoesNotContain(whereClauses, line => line.Contains("System.ValueType", StringComparison.Ordinal));
+        Assert.DoesNotContain(whereClauses, line => line is "where TStruct : struct, new()");
+        Assert.DoesNotContain(whereClauses, line => line is "where TUnmanaged : unmanaged, new()");
+
+        Assert.Contains(
+            "    public abstract T Echo<T>(T value)\n" +
+            "        where T : class;",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "    public override T Echo<T>(T value)\n" +
+            "    {",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "    T ExeBlueprint.Core.Tests.IGenericConstraintMethodFixture.Echo<T>(T value)\n" +
+            "    {",
+            source,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void OmitsWholeOwnerClausesWhenGenericMetadataIsNotRepresentable()
+    {
+        static GenericParameterModel Parameter(
+            string name,
+            int position,
+            IReadOnlyList<GenericTypeConstraintModel> constraints,
+            bool valueType = false,
+            bool defaultConstructor = false,
+            bool allowsRefStruct = false,
+            bool notNull = false,
+            bool unmanaged = false) =>
+            new()
+            {
+                Position = position,
+                Name = name,
+                RawAttributes = 0,
+                Variance = "none",
+                NotNullableValueTypeConstraint = valueType,
+                NotNullConstraint = notNull,
+                DefaultConstructorConstraint = defaultConstructor,
+                AllowsRefStruct = allowsRefStruct,
+                HasUnmanagedAttribute = unmanaged,
+                Nullability = "oblivious",
+                TypeConstraints = constraints,
+                Complete = true
+            };
+
+        static GenericTypeConstraintModel Constraint(
+            string type,
+            string kind,
+            IReadOnlyList<string>? requiredModifiers = null,
+            string nullability = "oblivious") =>
+            new()
+            {
+                Type = type,
+                Kind = kind,
+                Nullability = nullability,
+                RequiredModifiers = requiredModifiers ?? [],
+                Complete = true
+            };
+
+        static TypeModel Type(
+            string name,
+            IReadOnlyList<string> names,
+            IReadOnlyList<GenericParameterModel> details) =>
+            new()
+            {
+                FullName = $"Demo.{name}",
+                Namespace = "Demo",
+                Name = name,
+                Kind = "class",
+                Accessibility = "public",
+                GenericParameters = names,
+                GenericParameterDetails = details,
+                GenericParametersComplete = true
+            };
+
+        var unsupportedModifier = Type(
+            "UnsupportedModifier",
+            ["TValid", "TUnsafe"],
+            [
+                Parameter("TValid", 0, [], defaultConstructor: true),
+                Parameter(
+                    "TUnsafe",
+                    1,
+                    [Constraint("Demo.IMarker", "interface", ["Demo.RequiredModifier"])])
+            ]);
+        var missingValueConstructor = Type(
+            "MissingValueConstructor",
+            ["T"],
+            [Parameter("T", 0, [Constraint("System.ValueType", "value-type-marker")], valueType: true)]);
+        var classAllowsRefStruct = Type(
+            "ClassAllowsRefStruct",
+            ["T"],
+            [Parameter("T", 0, [Constraint("Demo.Base", "class")], allowsRefStruct: true)]);
+        var unresolvedToken = Type(
+            "UnresolvedToken",
+            ["T"],
+            [Parameter("T", 0, [Constraint("!10", "type-parameter")])]);
+        var selfCycle = Type(
+            "SelfCycle",
+            ["T"],
+            [Parameter("T", 0, [Constraint("!0", "type-parameter")])]);
+        var mutualCycle = Type(
+            "MutualCycle",
+            ["T", "U"],
+            [
+                Parameter("T", 0, [Constraint("!1", "type-parameter")]),
+                Parameter("U", 1, [Constraint("!0", "type-parameter")])
+            ]);
+        var valueTarget = Type(
+            "ValueTarget",
+            ["TValue", "TDependent"],
+            [
+                Parameter(
+                    "TValue",
+                    0,
+                    [Constraint("System.ValueType", "value-type-marker")],
+                    valueType: true,
+                    defaultConstructor: true),
+                Parameter(
+                    "TDependent",
+                    1,
+                    [Constraint("!0", "type-parameter", nullability: "annotated")])
+            ]);
+        var duplicateNullableIdentity = Type(
+            "DuplicateNullableIdentity",
+            ["T"],
+            [
+                Parameter(
+                    "T",
+                    0,
+                    [
+                        Constraint("Demo.IMarker", "interface"),
+                        Constraint("Demo.IMarker", "interface", nullability: "annotated")
+                    ])
+            ]);
+        var conflictingTransitiveBases = Type(
+            "ConflictingTransitiveBases",
+            ["TFirst", "TSecond", "TValue"],
+            [
+                Parameter("TFirst", 0, [Constraint("Demo.FirstBase", "class")]),
+                Parameter("TSecond", 1, [Constraint("Demo.SecondBase", "class")]),
+                Parameter(
+                    "TValue",
+                    2,
+                    [
+                        Constraint("!0", "type-parameter"),
+                        Constraint("!1", "type-parameter")
+                    ])
+            ]);
+        var transitiveBaseAllowsRefStruct = Type(
+            "TransitiveBaseAllowsRefStruct",
+            ["TBase", "TValue"],
+            [
+                Parameter("TBase", 0, [Constraint("Demo.Base", "class")]),
+                Parameter(
+                    "TValue",
+                    1,
+                    [Constraint("!0", "type-parameter")],
+                    allowsRefStruct: true)
+            ]);
+        var shadowingOuter = Type(
+            "ShadowingOuter",
+            ["T"],
+            [Parameter("T", 0, [])]);
+        var shadowingNested = Type(
+            "Nested",
+            ["T", "T", "U"],
+            [
+                Parameter("T", 0, []),
+                Parameter("T", 1, []),
+                Parameter(
+                    "U",
+                    2,
+                    [Constraint("!0", "type-parameter")])
+            ]) with
+        {
+            FullName = "Demo.ShadowingOuter.Nested",
+            IsNested = true,
+            DeclaringType = "Demo.ShadowingOuter",
+            InheritedGenericParameterCount = 1
+        };
+        var shadowingMethodOwner = Type(
+            "ShadowingMethodOwner",
+            ["T"],
+            [Parameter("T", 0, [])]) with
+        {
+            Methods =
+            [
+                new MethodModel
+                {
+                    Name = "Method",
+                    Signature = "void Method<T, U>()",
+                    ReturnType = "void",
+                    Accessibility = "public",
+                    GenericParameters = ["T", "U"],
+                    GenericParameterDetails =
+                    [
+                        Parameter("T", 0, []),
+                        Parameter(
+                            "U",
+                            1,
+                            [Constraint("!0", "type-parameter", nullability: "annotated")])
+                    ]
+                }
+            ]
+        };
+        var constructedConstraint = Type(
+            "ConstructedConstraint",
+            ["T"],
+            [Parameter("T", 0, [Constraint("Demo.IRefOnly<int>", "interface")])]);
+        var rawGenericDefinitionConstraint = Type(
+            "RawGenericDefinitionConstraint",
+            ["T"],
+            [Parameter("T", 0, [Constraint("Demo.IRefOnly`1", "interface")])]);
+        var ambiguousNotNullKeyword = Type(
+            "AmbiguousNotNullKeyword",
+            ["notnull"],
+            [Parameter("notnull", 0, [], notNull: true)]);
+        var ambiguousUnmanagedKeyword = Type(
+            "AmbiguousUnmanagedKeyword",
+            ["unmanaged"],
+            [
+                Parameter(
+                    "unmanaged",
+                    0,
+                    [
+                        Constraint(
+                            "System.ValueType",
+                            "value-type-marker",
+                            ["System.Runtime.InteropServices.UnmanagedType"])
+                    ],
+                    valueType: true,
+                    defaultConstructor: true,
+                    unmanaged: true)
+            ]);
+        TypeModel[] types =
+        [
+            unsupportedModifier,
+            missingValueConstructor,
+            classAllowsRefStruct,
+            unresolvedToken,
+            selfCycle,
+            mutualCycle,
+            valueTarget,
+            duplicateNullableIdentity,
+            conflictingTransitiveBases,
+            transitiveBaseAllowsRefStruct,
+            shadowingOuter,
+            shadowingNested,
+            shadowingMethodOwner,
+            constructedConstraint,
+            rawGenericDefinitionConstraint,
+            ambiguousNotNullKeyword,
+            ambiguousUnmanagedKeyword
+        ];
+        var artifact = CreateManagedArtifact("Demo", []) with
+        {
+            Code = new CodeModel
+            {
+                Kind = "managed",
+                NamespaceCount = 1,
+                TypeCount = types.Length,
+                Types = types
+            }
+        };
+        var document = new BlueprintDocument
+        {
+            Input = new InputDescriptor
+            {
+                Name = "generic-metadata",
+                Kind = "file",
+                SourcePath = "Demo.dll",
+                FileCount = 1,
+                TotalBytes = 0
+            },
+            Summary = new BlueprintSummary(),
+            Files = [artifact]
+        };
+
+        var source = Assert.Single(
+            CSharpSkeletonGenerator.Generate(document),
+            file => file.RelativePath == "Demo/Demo.cs").Content.ReplaceLineEndings("\n");
+
+        Assert.Contains("public class UnsupportedModifier<TValid, TUnsafe>\n{", source);
+        Assert.Contains("public class MissingValueConstructor<T>\n{", source);
+        Assert.Contains("public class ClassAllowsRefStruct<T>\n{", source);
+        Assert.Contains("public class UnresolvedToken<T>\n{", source);
+        Assert.Contains("public class SelfCycle<T>\n{", source);
+        Assert.Contains("public class MutualCycle<T, U>\n{", source);
+        Assert.Contains("public class ValueTarget<TValue, TDependent>\n{", source);
+        Assert.Contains("public class DuplicateNullableIdentity<T>\n{", source);
+        Assert.Contains("public class ConflictingTransitiveBases<TFirst, TSecond, TValue>\n{", source);
+        Assert.Contains("public class TransitiveBaseAllowsRefStruct<TBase, TValue>\n{", source);
+        Assert.Contains("public class ShadowingOuter<T>\n{", source);
+        Assert.Contains("    public class Nested<T, U>\n    {", source);
+        Assert.Contains("public class ShadowingMethodOwner<T>\n{", source);
+        Assert.Contains("    public void Method<T, U>()\n    {", source);
+        Assert.Contains("public class ConstructedConstraint<T>\n{", source);
+        Assert.Contains("public class RawGenericDefinitionConstraint<T>\n{", source);
+        Assert.Contains("public class AmbiguousNotNullKeyword<@notnull>\n{", source);
+        Assert.Contains("public class AmbiguousUnmanagedKeyword<@unmanaged>\n{", source);
+        Assert.DoesNotContain("Demo.IRefOnly<int>", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("Demo.IRefOnly`1", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("where ", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GeneratedGenericConstraintSubsetBuildsInRelease()
+    {
+        var assemblyPath = typeof(GenericConstraintFixture<,,,,,>).Assembly.Location;
+        var analyzed = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
+        var artifact = Assert.Single(analyzed.Files);
+        var includedTypes = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "ExeBlueprint.Core.Tests.GenericConstraintBaseFixture",
+            "ExeBlueprint.Core.Tests.IGenericConstraintInterfaceFixture",
+            "ExeBlueprint.Core.Tests.GenericConstraintFixture",
+            "ExeBlueprint.Core.Tests.GenericConstraintFixture.Nested",
+            "ExeBlueprint.Core.Tests.IGenericVarianceFixture",
+            "ExeBlueprint.Core.Tests.GenericVarianceDelegateFixture",
+            "ExeBlueprint.Core.Tests.IAllowsRefStructFixture",
+            "ExeBlueprint.Core.Tests.GenericConstraintOverrideBaseFixture",
+            "ExeBlueprint.Core.Tests.GenericConstraintOverrideFixture",
+            "ExeBlueprint.Core.Tests.IGenericConstraintMethodFixture",
+            "ExeBlueprint.Core.Tests.ExplicitGenericConstraintMethodFixture",
+            "ExeBlueprint.Core.Tests.OrderedConstraintFixture",
+            "ExeBlueprint.Core.Tests.NullableLocalConstraintFixture",
+            "ExeBlueprint.Core.Tests.NullableLocalConstraintFixture.Nested",
+            "ExeBlueprint.Core.Tests.KeywordGenericConstraintFixture"
+        };
+        var filteredTypes = artifact.Code!.Types
+            .Where(type => includedTypes.Contains(type.FullName))
+            .ToArray();
+        Assert.Equal(includedTypes.Count, filteredTypes.Length);
+        var filteredArtifact = artifact with
+        {
+            ManagedReferences = [],
+            Code = artifact.Code with
+            {
+                NamespaceCount = 1,
+                TypeCount = filteredTypes.Length,
+                MethodCount = filteredTypes.Sum(type => type.Methods.Count),
+                Types = filteredTypes
+            }
+        };
+        var document = analyzed with { Files = [filteredArtifact] };
+        var generatedFiles = CSharpSkeletonGenerator.Generate(document);
+
+        await using var temp = new TemporaryDirectory();
+        foreach (var file in generatedFiles)
+        {
+            var path = Path.Combine(temp.Path, file.RelativePath);
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            await File.WriteAllTextAsync(path, file.Content);
+        }
+
+        var startInfo = new ProcessStartInfo("dotnet")
+        {
+            WorkingDirectory = temp.Path,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false
+        };
+        startInfo.ArgumentList.Add("build");
+        startInfo.ArgumentList.Add("Reconstructed.slnx");
+        startInfo.ArgumentList.Add("-c");
+        startInfo.ArgumentList.Add("Release");
+        startInfo.ArgumentList.Add("--nologo");
+        startInfo.Environment["DOTNET_CLI_HOME"] = Path.Combine(temp.Path, ".dotnet-home");
+        startInfo.Environment["DOTNET_CLI_TELEMETRY_OPTOUT"] = "1";
+        using var process = Assert.IsType<Process>(Process.Start(startInfo));
+        var standardOutput = process.StandardOutput.ReadToEndAsync();
+        var standardError = process.StandardError.ReadToEndAsync();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+        try
+        {
+            await process.WaitForExitAsync(timeout.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            process.Kill(entireProcessTree: true);
+            throw;
+        }
+
+        var buildOutput = (await standardOutput) + (await standardError);
+        Assert.True(process.ExitCode == 0, buildOutput);
     }
 
     [Fact]
@@ -608,4 +1102,27 @@ public sealed class CSharpSkeletonGeneratorTests
                 ]
             }
         };
+
+    private sealed class TemporaryDirectory : IAsyncDisposable
+    {
+        public TemporaryDirectory()
+        {
+            Path = System.IO.Path.Combine(
+                System.IO.Path.GetTempPath(),
+                $"exe-blueprint-csharp-generic-{Guid.NewGuid():N}");
+            Directory.CreateDirectory(Path);
+        }
+
+        public string Path { get; }
+
+        public ValueTask DisposeAsync()
+        {
+            if (Directory.Exists(Path))
+            {
+                Directory.Delete(Path, recursive: true);
+            }
+
+            return ValueTask.CompletedTask;
+        }
+    }
 }

@@ -5,10 +5,31 @@ namespace ExeBlueprint.Generation;
 
 // 把 CodeModel 轉成可閱讀的 C# 骨架。
 // 這是「轉語言」鏈路的第一步：還原型別與成員的形狀，能安全結構化的方法也帶回方法體。
-// 產出的程式碼用來對照與接手改寫，不保證能直接編譯（泛型限制、外部依賴等尚未完整還原）。
+// 產出的程式碼用來對照與接手改寫，不保證能直接編譯（外部依賴等尚未完整還原）。
 public static class CSharpSkeletonGenerator
 {
     private const int MaxIlLinesInBody = 40;
+    private const int MaxGenericConstraintDependencyDepth = 64;
+    private static readonly HashSet<string> CSharpReservedKeywords = new(StringComparer.Ordinal)
+    {
+        "abstract", "as", "base", "bool", "break", "byte", "case", "catch", "char", "checked",
+        "class", "const", "continue", "decimal", "default", "delegate", "do", "double", "else", "enum",
+        "event", "explicit", "extern", "false", "finally", "fixed", "float", "for", "foreach", "goto",
+        "if", "implicit", "in", "int", "interface", "internal", "is", "lock", "long", "namespace", "new",
+        "null", "object", "operator", "out", "override", "params", "private", "protected", "public",
+        "readonly", "ref", "return", "sbyte", "sealed", "short", "sizeof", "stackalloc", "static",
+        "string", "struct", "switch", "this", "throw", "true", "try", "typeof", "uint", "ulong",
+        "unchecked", "unsafe", "ushort", "using", "virtual", "void", "volatile", "while",
+
+        // Contextual keywords are escaped too. Several of them become grammar tokens specifically in
+        // generic declarations or constraints (for example required, record, notnull and unmanaged).
+        "_", "add", "alias", "allows", "and", "ascending", "assembly", "async", "await", "by", "closed",
+        "descending", "dynamic", "equals", "extension", "field", "file", "from", "get", "global", "group", "init",
+        "into", "join", "let", "managed", "method", "module", "nameof", "nint", "not", "notnull", "nuint",
+        "on", "or", "orderby", "param", "partial", "property", "record", "remove", "required", "safe", "scoped",
+        "select", "set", "type", "typevar", "union", "unmanaged", "value", "var", "when", "where", "with", "yield",
+        "__arglist", "__makeref", "__reftype", "__refvalue"
+    };
 
     public static IReadOnlyList<GeneratedFile> Generate(BlueprintDocument document)
     {
@@ -142,7 +163,12 @@ public static class CSharpSkeletonGenerator
         }
 
         var declaration = BuildTypeDeclaration(type);
-        builder.AppendLine($"{indent}{declaration}");
+        AppendConstrainedDeclaration(
+            builder,
+            $"{indent}{declaration}",
+            indent + "    ",
+            BuildTypeConstraintClauses(type),
+            terminator: "");
         builder.AppendLine($"{indent}{{");
         var body = indent + "    ";
 
@@ -364,7 +390,7 @@ public static class CSharpSkeletonGenerator
             .ToArray();
         if (declaredGenericParameters.Length > 0)
         {
-            name += $"<{string.Join(", ", declaredGenericParameters)}>";
+            name += $"<{string.Join(", ", FormatDeclaredTypeParameters(type))}>";
         }
 
         var returnType = invoke is null
@@ -374,7 +400,12 @@ public static class CSharpSkeletonGenerator
             ? ""
             : string.Join(", ", invoke.Parameters.Select(parameter =>
                 $"{Humanize(parameter.Type, type.GenericParameters, invoke.GenericParameters)} {SafeName(parameter.Name)}"));
-        builder.AppendLine($"{indent}{type.Accessibility} delegate {returnType} {name}({parameters});");
+        AppendConstrainedDeclaration(
+            builder,
+            $"{indent}{type.Accessibility} delegate {returnType} {name}({parameters})",
+            indent + "    ",
+            BuildTypeConstraintClauses(type),
+            terminator: ";");
     }
 
     private static void AppendMethod(StringBuilder builder, TypeModel type, MethodModel method, string body)
@@ -398,18 +429,29 @@ public static class CSharpSkeletonGenerator
         var modifiers = BuildMethodModifiers(type, method);
         var generics = method.GenericParameters.Count == 0
             ? ""
-            : $"<{string.Join(", ", method.GenericParameters)}>";
+            : $"<{string.Join(", ", method.GenericParameters.Select(FormatGenericParameterIdentifier))}>";
         var returnType = Humanize(method.ReturnType, type.GenericParameters, method.GenericParameters);
         var header = $"{body}{modifiers}{returnType} {SafeName(method.Name)}{generics}({parameters})";
+        var constraintClauses = BuildMethodConstraintClauses(type, method);
 
         var noBody = type.Kind == "interface" || method.IsAbstract;
         if (noBody)
         {
-            builder.AppendLine($"{header};");
+            AppendConstrainedDeclaration(
+                builder,
+                header,
+                body + "    ",
+                constraintClauses,
+                terminator: ";");
             return;
         }
 
-        builder.AppendLine(header);
+        AppendConstrainedDeclaration(
+            builder,
+            header,
+            body + "    ",
+            constraintClauses,
+            terminator: "");
         builder.AppendLine($"{body}{{");
 
         if (method.BodyReconstructed)
@@ -621,7 +663,7 @@ public static class CSharpSkeletonGenerator
             .ToArray();
         if (declaredGenericParameters.Length > 0)
         {
-            name += $"<{string.Join(", ", declaredGenericParameters)}>";
+            name += $"<{string.Join(", ", FormatDeclaredTypeParameters(type))}>";
         }
 
         parts.Add(name);
@@ -645,6 +687,712 @@ public static class CSharpSkeletonGenerator
 
         return bases.Count == 0 ? declaration : $"{declaration} : {string.Join(", ", bases)}";
     }
+
+    private static void AppendConstrainedDeclaration(
+        StringBuilder builder,
+        string declaration,
+        string constraintIndent,
+        IReadOnlyList<string> constraintClauses,
+        string terminator)
+    {
+        if (constraintClauses.Count == 0)
+        {
+            builder.AppendLine(declaration + terminator);
+            return;
+        }
+
+        builder.AppendLine(declaration);
+        for (var index = 0; index < constraintClauses.Count; index++)
+        {
+            builder.Append(constraintIndent).Append(constraintClauses[index]);
+            if (index == constraintClauses.Count - 1)
+            {
+                builder.Append(terminator);
+            }
+
+            builder.AppendLine();
+        }
+    }
+
+    private static IReadOnlyList<string> FormatDeclaredTypeParameters(TypeModel type)
+    {
+        if (type.InheritedGenericParameterCount < 0 ||
+            type.InheritedGenericParameterCount > type.GenericParameters.Count)
+        {
+            return type.GenericParameters;
+        }
+
+        var names = type.GenericParameters
+            .Skip(type.InheritedGenericParameterCount)
+            .Select(FormatGenericParameterIdentifier)
+            .ToArray();
+        if (type.Kind is not ("interface" or "delegate") ||
+            !TryGetCompleteGenericParameterDetails(
+                type.GenericParameters,
+                type.GenericParameterDetails,
+                type.GenericParametersComplete,
+                out var details))
+        {
+            return names;
+        }
+
+        return details
+            .Skip(type.InheritedGenericParameterCount)
+            .Select(parameter => parameter.Variance switch
+            {
+                "out" => $"out {FormatGenericParameterIdentifier(parameter.Name)}",
+                "in" => $"in {FormatGenericParameterIdentifier(parameter.Name)}",
+                _ => FormatGenericParameterIdentifier(parameter.Name)
+            })
+            .ToArray();
+    }
+
+    private static IReadOnlyList<string> BuildTypeConstraintClauses(TypeModel type)
+    {
+        if (type.InheritedGenericParameterCount < 0 ||
+            type.InheritedGenericParameterCount > type.GenericParameters.Count ||
+            !TryGetCompleteGenericParameterDetails(
+                type.GenericParameters,
+                type.GenericParameterDetails,
+                type.GenericParametersComplete,
+                out var details))
+        {
+            return [];
+        }
+
+        return TryBuildConstraintClauses(
+            details.Skip(type.InheritedGenericParameterCount),
+            ownerUsesMethodParameters: false,
+            new GenericConstraintEmissionContext(type.GenericParameters, details, [], []),
+            out var clauses)
+            ? clauses
+            : [];
+    }
+
+    private static IReadOnlyList<string> BuildMethodConstraintClauses(TypeModel type, MethodModel method)
+    {
+        // Override 與 explicit interface implementation 會從原宣告繼承 constraints；
+        // C# 不允許在實作端完整重複，否則會產生 CS0460。
+        if (IsExplicitInterfaceMember(method.Name) ||
+            method.IsVirtual && !method.IsNewSlot ||
+            !TryGetCompleteGenericParameterDetails(
+                method.GenericParameters,
+                method.GenericParameterDetails,
+                method.GenericParametersComplete,
+                out var details))
+        {
+            return [];
+        }
+
+        IReadOnlyList<GenericParameterModel>? typeDetails = null;
+        if (TryGetCompleteGenericParameterDetails(
+                type.GenericParameters,
+                type.GenericParameterDetails,
+                type.GenericParametersComplete,
+                out var completeTypeDetails))
+        {
+            typeDetails = completeTypeDetails;
+        }
+
+        return TryBuildConstraintClauses(
+            details,
+            ownerUsesMethodParameters: true,
+            new GenericConstraintEmissionContext(
+                type.GenericParameters,
+                typeDetails,
+                method.GenericParameters,
+                details),
+            out var clauses)
+            ? clauses
+            : [];
+    }
+
+    private static bool TryGetCompleteGenericParameterDetails(
+        IReadOnlyList<string> names,
+        IReadOnlyList<GenericParameterModel> details,
+        bool ownerComplete,
+        out IReadOnlyList<GenericParameterModel> completeDetails)
+    {
+        completeDetails = details;
+        if (!ownerComplete || names.Count != details.Count)
+        {
+            return false;
+        }
+
+        for (var index = 0; index < details.Count; index++)
+        {
+            var parameter = details[index];
+            if (!parameter.Complete ||
+                parameter.Position != index ||
+                parameter.Name != names[index] ||
+                parameter.Variance is not ("none" or "out" or "in") ||
+                parameter.TypeConstraints.Any(constraint => !constraint.Complete))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static bool TryBuildConstraintClauses(
+        IEnumerable<GenericParameterModel> parameters,
+        bool ownerUsesMethodParameters,
+        GenericConstraintEmissionContext context,
+        out IReadOnlyList<string> clauses)
+    {
+        var ownerParameters = parameters.ToArray();
+        if (!HasAcyclicOwnerConstraints(ownerParameters, ownerUsesMethodParameters))
+        {
+            clauses = [];
+            return false;
+        }
+
+        var result = new List<string>();
+        var traitCache = new Dictionary<GenericParameterReference, GenericParameterTraits>();
+        foreach (var parameter in ownerParameters)
+        {
+            if (!TryBuildConstraintValues(
+                    parameter,
+                    ownerUsesMethodParameters,
+                    context,
+                    traitCache,
+                    out var constraints))
+            {
+                clauses = [];
+                return false;
+            }
+
+            if (constraints.Count > 0)
+            {
+                result.Add(
+                    $"where {FormatGenericParameterIdentifier(parameter.Name)} : " +
+                    string.Join(", ", constraints));
+            }
+        }
+
+        clauses = result;
+        return true;
+    }
+
+    private static bool TryBuildConstraintValues(
+        GenericParameterModel parameter,
+        bool isMethodParameter,
+        GenericConstraintEmissionContext context,
+        Dictionary<GenericParameterReference, GenericParameterTraits> traitCache,
+        out IReadOnlyList<string> values)
+    {
+        values = [];
+        var parameterReference = new GenericParameterReference(
+            isMethodParameter,
+            parameter.Position);
+        if (!TryGetGenericParameterTraits(
+                parameterReference,
+                context,
+                traitCache,
+                [],
+                out _))
+        {
+            return false;
+        }
+
+        var result = new List<string>();
+        if (parameter.NotNullableValueTypeConstraint)
+        {
+            result.Add(parameter.HasUnmanagedAttribute ? "unmanaged" : "struct");
+        }
+        else if (parameter.ReferenceTypeConstraint)
+        {
+            switch (parameter.Nullability)
+            {
+                case "annotated":
+                    result.Add("class?");
+                    break;
+                case "oblivious":
+                case "not-annotated":
+                    result.Add("class");
+                    break;
+                default:
+                    return false;
+            }
+        }
+        else if (parameter.NotNullConstraint)
+        {
+            result.Add("notnull");
+        }
+
+        var ordinaryConstraints = new List<(GenericTypeConstraintModel Constraint, int Index)>();
+        var valueTypeMarkers = 0;
+        for (var index = 0; index < parameter.TypeConstraints.Count; index++)
+        {
+            var constraint = parameter.TypeConstraints[index];
+            if (!constraint.Complete)
+            {
+                return false;
+            }
+
+            if (constraint.Kind == "value-type-marker")
+            {
+                valueTypeMarkers++;
+                if (!IsRepresentedValueTypeMarker(parameter, constraint))
+                {
+                    return false;
+                }
+
+                continue;
+            }
+
+            if (constraint.Kind is not ("class" or "type-parameter" or "interface") ||
+                constraint.RequiredModifiers.Count > 0 ||
+                constraint.OptionalModifiers.Count > 0)
+            {
+                return false;
+            }
+
+            ordinaryConstraints.Add((constraint, index));
+        }
+
+        if (valueTypeMarkers != (parameter.NotNullableValueTypeConstraint ? 1 : 0))
+        {
+            return false;
+        }
+
+        var renderedConstraints = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var item in ordinaryConstraints
+                     .OrderBy(item => ConstraintKindOrder(item.Constraint.Kind))
+                     .ThenBy(item => item.Index))
+        {
+            if (!TryRenderTypeConstraint(
+                    item.Constraint,
+                    context,
+                    out var rendered,
+                    out var identity,
+                    out _) ||
+                !renderedConstraints.Add(identity))
+            {
+                return false;
+            }
+
+            result.Add(rendered);
+        }
+
+        if (parameter.DefaultConstructorConstraint &&
+            !parameter.NotNullableValueTypeConstraint)
+        {
+            result.Add("new()");
+        }
+
+        if (parameter.AllowsRefStruct)
+        {
+            result.Add("allows ref struct");
+        }
+
+        values = result;
+        return true;
+    }
+
+    private static bool IsRepresentedValueTypeMarker(
+        GenericParameterModel parameter,
+        GenericTypeConstraintModel constraint)
+    {
+        if (constraint.Type != "System.ValueType" ||
+            constraint.OptionalModifiers.Count > 0 ||
+            constraint.Nullability == "annotated")
+        {
+            return false;
+        }
+
+        return parameter.HasUnmanagedAttribute
+            ? constraint.RequiredModifiers.SequenceEqual(
+                ["System.Runtime.InteropServices.UnmanagedType"],
+                StringComparer.Ordinal)
+            : constraint.RequiredModifiers.Count == 0;
+    }
+
+    private static int ConstraintKindOrder(string kind) => kind switch
+    {
+        "class" => 0,
+        "type-parameter" => 1,
+        _ => 2
+    };
+
+    private static bool TryRenderTypeConstraint(
+        GenericTypeConstraintModel constraint,
+        GenericConstraintEmissionContext context,
+        out string rendered,
+        out string identity,
+        out GenericParameterReference? referencedParameter)
+    {
+        rendered = string.Empty;
+        identity = string.Empty;
+        referencedParameter = null;
+        if (constraint.NullableFlags.Count > 1 ||
+            constraint.NullableFlags.Any(flag => flag > 2) ||
+            constraint.Kind is "class" or "interface" &&
+            (constraint.Type.Contains('<', StringComparison.Ordinal) ||
+             constraint.Type.Contains('`', StringComparison.Ordinal)) ||
+            !HasUnshadowedGenericParameterReferences(constraint.Type, context) ||
+            !TryHumanize(constraint.Type, context.TypeNames, context.MethodNames, out rendered))
+        {
+            return false;
+        }
+
+        if (constraint.Kind == "type-parameter")
+        {
+            if (!TryParseGenericParameterReference(constraint.Type, out var reference) ||
+                !TryResolveGenericParameter(reference, context, out _))
+            {
+                return false;
+            }
+
+            referencedParameter = reference;
+        }
+
+        identity = rendered.EndsWith("?", StringComparison.Ordinal)
+            ? rendered[..^1]
+            : rendered;
+
+        switch (constraint.Nullability)
+        {
+            case "annotated":
+                if (!rendered.EndsWith("?", StringComparison.Ordinal))
+                {
+                    rendered += "?";
+                }
+
+                break;
+            case "oblivious":
+            case "not-annotated":
+                break;
+            default:
+                return false;
+        }
+
+        return constraint.Kind != "class" ||
+               identity is not ("System.Object" or "System.Array" or "System.ValueType");
+    }
+
+    private static bool HasUnshadowedGenericParameterReferences(
+        string type,
+        GenericConstraintEmissionContext context)
+    {
+        var position = 0;
+        while (position < type.Length)
+        {
+            if (type[position] != '!')
+            {
+                position++;
+                continue;
+            }
+
+            var isMethodParameter = position + 1 < type.Length && type[position + 1] == '!';
+            var digitStart = position + (isMethodParameter ? 2 : 1);
+            var digitEnd = digitStart;
+            var parameterIndex = 0;
+            var overflow = false;
+            while (digitEnd < type.Length && type[digitEnd] is >= '0' and <= '9')
+            {
+                var digit = type[digitEnd] - '0';
+                if (parameterIndex > (int.MaxValue - digit) / 10)
+                {
+                    overflow = true;
+                }
+                else if (!overflow)
+                {
+                    parameterIndex = (parameterIndex * 10) + digit;
+                }
+
+                digitEnd++;
+            }
+
+            if (digitEnd == digitStart ||
+                digitEnd < type.Length &&
+                (char.IsLetterOrDigit(type[digitEnd]) || type[digitEnd] == '_'))
+            {
+                return false;
+            }
+
+            var names = isMethodParameter ? context.MethodNames : context.TypeNames;
+            if (overflow || parameterIndex >= names.Count)
+            {
+                return false;
+            }
+
+            var parameterName = names[parameterIndex];
+            if (names.Skip(parameterIndex + 1).Contains(parameterName, StringComparer.Ordinal) ||
+                !isMethodParameter && context.MethodNames.Contains(parameterName, StringComparer.Ordinal))
+            {
+                return false;
+            }
+
+            position = digitEnd;
+        }
+
+        return true;
+    }
+
+    private static bool HasAcyclicOwnerConstraints(
+        IReadOnlyList<GenericParameterModel> parameters,
+        bool ownerUsesMethodParameters)
+    {
+        var parametersByPosition = new Dictionary<int, GenericParameterModel>();
+        foreach (var parameter in parameters)
+        {
+            if (!parametersByPosition.TryAdd(parameter.Position, parameter))
+            {
+                return false;
+            }
+        }
+
+        var states = new Dictionary<int, byte>();
+        foreach (var position in parametersByPosition.Keys)
+        {
+            if (!Visit(position, 0))
+            {
+                return false;
+            }
+        }
+
+        return true;
+
+        bool Visit(int position, int depth)
+        {
+            if (depth > MaxGenericConstraintDependencyDepth)
+            {
+                return false;
+            }
+
+            if (states.TryGetValue(position, out var state))
+            {
+                return state == 2;
+            }
+
+            states[position] = 1;
+            foreach (var constraint in parametersByPosition[position].TypeConstraints)
+            {
+                if (constraint.Kind != "type-parameter")
+                {
+                    continue;
+                }
+
+                if (!TryParseGenericParameterReference(constraint.Type, out var reference))
+                {
+                    return false;
+                }
+
+                if (reference.IsMethodParameter != ownerUsesMethodParameters ||
+                    !parametersByPosition.ContainsKey(reference.Position))
+                {
+                    continue;
+                }
+
+                if (states.TryGetValue(reference.Position, out var targetState) && targetState == 1 ||
+                    !Visit(reference.Position, depth + 1))
+                {
+                    return false;
+                }
+            }
+
+            states[position] = 2;
+            return true;
+        }
+    }
+
+    private static bool TryParseGenericParameterReference(
+        string type,
+        out GenericParameterReference reference)
+    {
+        reference = default;
+        if (type.Length < 2 || type[0] != '!')
+        {
+            return false;
+        }
+
+        var isMethodParameter = type.Length > 1 && type[1] == '!';
+        var digitStart = isMethodParameter ? 2 : 1;
+        if (digitStart == type.Length)
+        {
+            return false;
+        }
+
+        var position = 0;
+        for (var index = digitStart; index < type.Length; index++)
+        {
+            if (type[index] is not (>= '0' and <= '9'))
+            {
+                return false;
+            }
+
+            var digit = type[index] - '0';
+            if (position > (int.MaxValue - digit) / 10)
+            {
+                return false;
+            }
+
+            position = (position * 10) + digit;
+        }
+
+        reference = new GenericParameterReference(isMethodParameter, position);
+        return true;
+    }
+
+    private static bool TryResolveGenericParameter(
+        GenericParameterReference reference,
+        GenericConstraintEmissionContext context,
+        out GenericParameterModel parameter)
+    {
+        parameter = null!;
+        var names = reference.IsMethodParameter ? context.MethodNames : context.TypeNames;
+        var details = reference.IsMethodParameter ? context.MethodDetails : context.TypeDetails;
+        if (details is null ||
+            details.Count != names.Count ||
+            reference.Position < 0 ||
+            reference.Position >= details.Count)
+        {
+            return false;
+        }
+
+        parameter = details[reference.Position];
+        return parameter.Complete &&
+               parameter.Position == reference.Position &&
+               parameter.Name == names[reference.Position] &&
+               parameter.TypeConstraints.All(constraint => constraint.Complete);
+    }
+
+    private static bool TryGetGenericParameterTraits(
+        GenericParameterReference reference,
+        GenericConstraintEmissionContext context,
+        Dictionary<GenericParameterReference, GenericParameterTraits> cache,
+        HashSet<GenericParameterReference> active,
+        out GenericParameterTraits traits)
+    {
+        if (cache.TryGetValue(reference, out var cachedTraits))
+        {
+            traits = cachedTraits;
+            return true;
+        }
+
+        traits = null!;
+        if (!TryResolveGenericParameter(reference, context, out var parameter) ||
+            !HasRepresentablePrimaryConstraintShape(parameter))
+        {
+            return false;
+        }
+
+        if (active.Count >= MaxGenericConstraintDependencyDepth || !active.Add(reference))
+        {
+            return false;
+        }
+
+        try
+        {
+            var concreteBaseTypes = new HashSet<string>(StringComparer.Ordinal);
+            var requiresReferenceType = parameter.ReferenceTypeConstraint;
+            var directClassConstraints = 0;
+            var valueTypeMarkers = 0;
+            foreach (var constraint in parameter.TypeConstraints)
+            {
+                if (!constraint.Complete)
+                {
+                    return false;
+                }
+
+                if (constraint.Kind == "value-type-marker")
+                {
+                    valueTypeMarkers++;
+                    if (!IsRepresentedValueTypeMarker(parameter, constraint))
+                    {
+                        return false;
+                    }
+
+                    continue;
+                }
+
+                if (constraint.Kind is not ("class" or "type-parameter" or "interface") ||
+                    constraint.RequiredModifiers.Count > 0 ||
+                    constraint.OptionalModifiers.Count > 0 ||
+                    !TryRenderTypeConstraint(
+                        constraint,
+                        context,
+                        out _,
+                        out var identity,
+                        out var targetReference))
+                {
+                    return false;
+                }
+
+                if (constraint.Kind == "class")
+                {
+                    directClassConstraints++;
+                    if (!concreteBaseTypes.Add(identity))
+                    {
+                        return false;
+                    }
+
+                    if (identity != "System.Enum")
+                    {
+                        requiresReferenceType = true;
+                    }
+
+                    continue;
+                }
+
+                if (constraint.Kind != "type-parameter")
+                {
+                    continue;
+                }
+
+                if (targetReference is not { } target ||
+                    !TryGetGenericParameterTraits(target, context, cache, active, out var targetTraits) ||
+                    targetTraits.HasValueTypeConstraint)
+                {
+                    return false;
+                }
+
+                if (parameter.NotNullableValueTypeConstraint && targetTraits.RequiresReferenceType)
+                {
+                    return false;
+                }
+
+                requiresReferenceType |= targetTraits.RequiresReferenceType;
+                concreteBaseTypes.UnionWith(targetTraits.ConcreteBaseTypes);
+            }
+
+            if (valueTypeMarkers != (parameter.NotNullableValueTypeConstraint ? 1 : 0) ||
+                directClassConstraints > 1 ||
+                concreteBaseTypes.Count > 1 ||
+                parameter.ReferenceTypeConstraint && directClassConstraints > 0 ||
+                parameter.ReferenceTypeConstraint && concreteBaseTypes.Contains("System.Enum") ||
+                parameter.NotNullableValueTypeConstraint && requiresReferenceType ||
+                parameter.AllowsRefStruct &&
+                (parameter.ReferenceTypeConstraint ||
+                 concreteBaseTypes.Any(type => type != "System.Enum")))
+            {
+                return false;
+            }
+
+            traits = new GenericParameterTraits(
+                parameter.NotNullableValueTypeConstraint,
+                requiresReferenceType,
+                concreteBaseTypes);
+            cache[reference] = traits;
+            return true;
+        }
+        finally
+        {
+            active.Remove(reference);
+        }
+    }
+
+    private static bool HasRepresentablePrimaryConstraintShape(GenericParameterModel parameter) =>
+        parameter.Complete &&
+        !(parameter.ReferenceTypeConstraint && parameter.NotNullableValueTypeConstraint) &&
+        !(parameter.NotNullConstraint &&
+          (parameter.ReferenceTypeConstraint || parameter.NotNullableValueTypeConstraint)) &&
+        !(parameter.HasUnmanagedAttribute && !parameter.NotNullableValueTypeConstraint) &&
+        !(parameter.NotNullableValueTypeConstraint && !parameter.DefaultConstructorConstraint) &&
+        !(parameter.NotNullConstraint && parameter.Name == "notnull") &&
+        !(parameter.HasUnmanagedAttribute && parameter.Name == "unmanaged");
 
     private static bool IsRefLikeType(string typeName, IReadOnlySet<string> refLikeTypes)
     {
@@ -695,20 +1443,77 @@ public static class CSharpSkeletonGenerator
         return $"{qualifier}.this[{parameters}]";
     }
 
-    private static string Humanize(string typeText, IReadOnlyList<string> typeGenerics, IReadOnlyList<string> methodGenerics)
+    private static string Humanize(
+        string typeText,
+        IReadOnlyList<string> typeGenerics,
+        IReadOnlyList<string> methodGenerics)
     {
-        var text = typeText;
-        for (var index = methodGenerics.Count - 1; index >= 0; index--)
+        TryHumanize(typeText, typeGenerics, methodGenerics, out var humanized);
+        return humanized;
+    }
+
+    private static bool TryHumanize(
+        string typeText,
+        IReadOnlyList<string> typeGenerics,
+        IReadOnlyList<string> methodGenerics,
+        out string humanized)
+    {
+        var builder = new StringBuilder(typeText.Length);
+        var complete = true;
+        var position = 0;
+        while (position < typeText.Length)
         {
-            text = text.Replace($"!!{index}", methodGenerics[index], StringComparison.Ordinal);
+            if (typeText[position] != '!')
+            {
+                builder.Append(typeText[position++]);
+                continue;
+            }
+
+            var isMethodParameter = position + 1 < typeText.Length && typeText[position + 1] == '!';
+            var digitStart = position + (isMethodParameter ? 2 : 1);
+            var digitEnd = digitStart;
+            var parameterIndex = 0;
+            var overflow = false;
+            while (digitEnd < typeText.Length && typeText[digitEnd] is >= '0' and <= '9')
+            {
+                var digit = typeText[digitEnd] - '0';
+                if (parameterIndex > (int.MaxValue - digit) / 10)
+                {
+                    overflow = true;
+                }
+                else if (!overflow)
+                {
+                    parameterIndex = (parameterIndex * 10) + digit;
+                }
+
+                digitEnd++;
+            }
+
+            var isCompleteToken = digitEnd > digitStart &&
+                                  (digitEnd == typeText.Length ||
+                                   !(char.IsLetterOrDigit(typeText[digitEnd]) || typeText[digitEnd] == '_'));
+            if (!isCompleteToken)
+            {
+                builder.Append(typeText[position++]);
+                continue;
+            }
+
+            var parameters = isMethodParameter ? methodGenerics : typeGenerics;
+            if (!overflow && parameterIndex < parameters.Count)
+            {
+                builder.Append(FormatGenericParameterIdentifier(parameters[parameterIndex]));
+            }
+            else
+            {
+                builder.Append(typeText, position, digitEnd - position);
+                complete = false;
+            }
+
+            position = digitEnd;
         }
 
-        for (var index = typeGenerics.Count - 1; index >= 0; index--)
-        {
-            text = text.Replace($"!{index}", typeGenerics[index], StringComparison.Ordinal);
-        }
-
-        return text;
+        humanized = builder.ToString();
+        return complete;
     }
 
     // Method body 來自 metadata 型別文字，可能仍含 !0／!!0。只轉換程式碼 token，
@@ -760,7 +1565,7 @@ public static class CSharpSkeletonGenerator
             var parameters = isMethodParameter ? methodGenerics : typeGenerics;
             if (!overflow && isCompleteToken && parameterIndex < parameters.Count)
             {
-                builder.Append(parameters[parameterIndex]);
+                builder.Append(FormatGenericParameterIdentifier(parameters[parameterIndex]));
                 position = digitEnd;
                 continue;
             }
@@ -804,6 +1609,9 @@ public static class CSharpSkeletonGenerator
     }
 
     private static string SafeName(string name) => IsCompilerGenerated(name) ? $"@{name.Replace('<', '_').Replace('>', '_')}" : name;
+
+    private static string FormatGenericParameterIdentifier(string name) =>
+        CSharpReservedKeywords.Contains(name) ? $"@{name}" : name;
 
     private static bool IsCompilerGenerated(string name) =>
         name.Contains('<', StringComparison.Ordinal) || name.Contains('>', StringComparison.Ordinal);
@@ -1033,12 +1841,12 @@ public static class CSharpSkeletonGenerator
         `Reconstructed.slnx` 會收錄所有產生的專案；輸入套件內可對上的 assembly reference
         會轉成專案間的 `ProjectReference`。
 
-        目前會還原型別、欄位、屬性、事件、方法簽章與繼承關係；可安全結構化的方法也會帶回方法體，
+        目前會還原型別、泛型 variance 與可安全表示的 where constraints、欄位、屬性、事件、方法簽章與繼承關係；可安全結構化的方法也會帶回方法體，
         其餘方法會保留 IL 並使用 `NotImplementedException`，
         需要對照原程式的 IL 或反組譯結果補回實作。
 
         用途是拿來對照結構、接手改寫或轉成其他語言的起點，不保證能直接編譯：
-        泛型限制、套件外依賴、運算子多載與 P/Invoke 等尚未完整處理。
+        套件外依賴、運算子多載與 P/Invoke 等尚未完整處理。
 
         """;
 
@@ -1046,4 +1854,19 @@ public static class CSharpSkeletonGenerator
         FileArtifact Artifact,
         string AssemblyName,
         string ProjectDirectory);
+
+    private readonly record struct GenericConstraintEmissionContext(
+        IReadOnlyList<string> TypeNames,
+        IReadOnlyList<GenericParameterModel>? TypeDetails,
+        IReadOnlyList<string> MethodNames,
+        IReadOnlyList<GenericParameterModel>? MethodDetails);
+
+    private readonly record struct GenericParameterReference(
+        bool IsMethodParameter,
+        int Position);
+
+    private sealed record GenericParameterTraits(
+        bool HasValueTypeConstraint,
+        bool RequiresReferenceType,
+        IReadOnlySet<string> ConcreteBaseTypes);
 }

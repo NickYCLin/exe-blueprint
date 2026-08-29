@@ -298,6 +298,105 @@ public sealed class ConstraintSignatureTypeProviderTests
         Assert.Contains("TypeRef scope 鏈循環", result.Error, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void RejectsLocalSealedAndValueTypeBaseConstraints()
+    {
+        var metadata = new MetadataBuilder();
+        var module = metadata.AddModule(
+            generation: 0,
+            moduleName: metadata.GetOrAddString("ConstraintKindTests"),
+            mvid: metadata.GetOrAddGuid(new Guid("7601fc3c-c48d-4022-9e3c-8e70ad05cf09")),
+            encId: default,
+            encBaseId: default);
+        metadata.AddTypeDefinition(
+            TypeAttributes.NotPublic,
+            @namespace: default,
+            metadata.GetOrAddString("<Module>"),
+            baseType: default,
+            MetadataTokens.FieldDefinitionHandle(1),
+            MetadataTokens.MethodDefinitionHandle(1));
+        var objectType = metadata.AddTypeReference(
+            module,
+            metadata.GetOrAddString("System"),
+            metadata.GetOrAddString("Object"));
+        var valueType = metadata.AddTypeReference(
+            module,
+            metadata.GetOrAddString("System"),
+            metadata.GetOrAddString("ValueType"));
+        var enumType = metadata.AddTypeReference(
+            module,
+            metadata.GetOrAddString("System"),
+            metadata.GetOrAddString("Enum"));
+        var openClass = metadata.AddTypeDefinition(
+            TypeAttributes.NotPublic,
+            metadata.GetOrAddString("Tests"),
+            metadata.GetOrAddString("OpenClass"),
+            objectType,
+            MetadataTokens.FieldDefinitionHandle(1),
+            MetadataTokens.MethodDefinitionHandle(1));
+        var sealedClass = metadata.AddTypeDefinition(
+            TypeAttributes.NotPublic | TypeAttributes.Sealed,
+            metadata.GetOrAddString("Tests"),
+            metadata.GetOrAddString("SealedClass"),
+            objectType,
+            MetadataTokens.FieldDefinitionHandle(1),
+            MetadataTokens.MethodDefinitionHandle(1));
+        var spoofedSystemEnum = metadata.AddTypeDefinition(
+            TypeAttributes.NotPublic | TypeAttributes.Sealed,
+            metadata.GetOrAddString("System"),
+            metadata.GetOrAddString("Enum"),
+            objectType,
+            MetadataTokens.FieldDefinitionHandle(1),
+            MetadataTokens.MethodDefinitionHandle(1));
+        var structType = metadata.AddTypeDefinition(
+            TypeAttributes.NotPublic | TypeAttributes.Sealed | TypeAttributes.SequentialLayout,
+            metadata.GetOrAddString("Tests"),
+            metadata.GetOrAddString("Value"),
+            valueType,
+            MetadataTokens.FieldDefinitionHandle(1),
+            MetadataTokens.MethodDefinitionHandle(1));
+        var localEnum = metadata.AddTypeDefinition(
+            TypeAttributes.NotPublic | TypeAttributes.Sealed,
+            metadata.GetOrAddString("Tests"),
+            metadata.GetOrAddString("State"),
+            enumType,
+            MetadataTokens.FieldDefinitionHandle(1),
+            MetadataTokens.MethodDefinitionHandle(1));
+        var interfaceType = metadata.AddTypeDefinition(
+            TypeAttributes.NotPublic | TypeAttributes.Interface | TypeAttributes.Abstract,
+            metadata.GetOrAddString("Tests"),
+            metadata.GetOrAddString("IMarker"),
+            baseType: default,
+            MetadataTokens.FieldDefinitionHandle(1),
+            MetadataTokens.MethodDefinitionHandle(1));
+
+        var metadataImage = new BlobBuilder();
+        new MetadataRootBuilder(metadata).Serialize(metadataImage, methodBodyStreamRva: 0, mappedFieldDataStreamRva: 0);
+        using var provider = MetadataReaderProvider.FromMetadataImage(metadataImage.ToImmutableArray());
+        var reader = provider.GetMetadataReader();
+        var context = new ConstraintGenericContext(0, 0, AllowsMethodParameters: false);
+        Assert.True(reader.GetTypeDefinition(spoofedSystemEnum).Attributes.HasFlag(TypeAttributes.Sealed));
+
+        var openResult = ConstraintSignatureTypeProvider.Decode(reader, openClass, context, maxModifiers: 8);
+        Assert.True(openResult.Complete);
+        Assert.Equal("class", openResult.Kind);
+        var interfaceResult = ConstraintSignatureTypeProvider.Decode(reader, interfaceType, context, maxModifiers: 8);
+        Assert.True(interfaceResult.Complete);
+        Assert.Equal("interface", interfaceResult.Kind);
+        foreach (var (handle, name) in new[]
+                 {
+                     (sealedClass, "sealed class"),
+                     (spoofedSystemEnum, "spoofed System.Enum"),
+                     (structType, "struct"),
+                     (localEnum, "enum")
+                 })
+        {
+            var result = ConstraintSignatureTypeProvider.Decode(reader, handle, context, maxModifiers: 8);
+            Assert.True(result.Complete);
+            Assert.True(result.Kind == "unsupported", $"{name}: {result.Type} ({result.Kind})");
+        }
+    }
+
     private static ConstraintSignatureType Decode(
         TypeSpecificationFixture fixture,
         ConstraintGenericContext context) =>

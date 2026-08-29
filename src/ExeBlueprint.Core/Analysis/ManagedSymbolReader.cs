@@ -7012,24 +7012,77 @@ internal sealed class ConstraintSignatureTypeProvider : ISignatureTypeProvider<C
         TypeDefinitionHandle handle,
         byte rawTypeKind)
     {
+        var definition = reader.GetTypeDefinition(handle);
+        var isSealed = definition.Attributes.HasFlag(TypeAttributes.Sealed);
         if (!TryGetTypeDefinitionName(reader, handle, out var type, out var error))
         {
             return Track(Invalid("<unsupported>", "unsupported", error));
         }
 
-        var definition = reader.GetTypeDefinition(handle);
         if (type is "System.Object" or "System.Array")
         {
             // 頂層時由 caller 以 unsupported fail closed；嵌套於 constructed type 內仍是合法 type argument。
             return Simple(type, "unsupported");
         }
 
-        var kind = type == "System.ValueType"
-            ? "value-type-marker"
-            : definition.Attributes.HasFlag(TypeAttributes.Interface)
-                ? "interface"
-                : "class";
-        return Simple(type, kind);
+        if (type == "System.ValueType")
+        {
+            return Simple(type, "value-type-marker");
+        }
+
+        if (definition.Attributes.HasFlag(TypeAttributes.Interface))
+        {
+            return Simple(type, "interface");
+        }
+
+        if (isSealed)
+        {
+            // TypeSpec 內的 constructed type／custom attribute 仍可能合法使用 sealed type；
+            // 保留完整名稱，但以 unsupported 阻止 caller 把它當頂層 base constraint。
+            return Simple(type, "unsupported");
+        }
+
+        if (!TryGetDirectBaseTypeName(reader, definition.BaseType, out var baseType) ||
+            baseType is "System.ValueType" or "System.Enum")
+        {
+            return Simple(type, "unsupported");
+        }
+
+        return Simple(type, "class");
+    }
+
+    private bool TryGetDirectBaseTypeName(
+        MetadataReader reader,
+        EntityHandle handle,
+        out string type)
+    {
+        type = string.Empty;
+        if (handle.IsNil)
+        {
+            return false;
+        }
+
+        if (handle.Kind == HandleKind.TypeSpecification)
+        {
+            // 合法 class 可繼承 constructed generic base；value type／enum 的直接 base 則不是 TypeSpec。
+            type = "<type-spec>";
+            return true;
+        }
+
+        return handle.Kind switch
+        {
+            HandleKind.TypeDefinition => TryGetTypeDefinitionName(
+                reader,
+                (TypeDefinitionHandle)handle,
+                out type,
+                out _),
+            HandleKind.TypeReference => TryGetTypeReferenceName(
+                reader,
+                (TypeReferenceHandle)handle,
+                out type,
+                out _),
+            _ => false
+        };
     }
 
     public ConstraintSignatureType GetTypeFromReference(

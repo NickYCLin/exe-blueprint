@@ -64,7 +64,7 @@ reconstructed-rust/
 reconstructed-go/
 ```
 
-Generated projects are reference material and are not guaranteed to compile without manual work.
+The C# generator restores interface/delegate variance and safely representable generic `where` clauses. Generated projects remain reference material and may still require manual work for external dependencies and other unsupported metadata.
 
 ## Run from source
 

@@ -613,7 +613,9 @@ public sealed class ManagedSymbolReaderTests
         var genericAttributeTarget = Assert.Single(
             types,
             type => type.FullName == "ExeBlueprint.Core.Tests.GenericAttributeTarget");
-        Assert.True(genericAttributeTarget.GenericParametersComplete);
+        Assert.True(
+            genericAttributeTarget.GenericParametersComplete,
+            genericAttributeTarget.GenericParametersError);
         var attributedParameter = Assert.Single(genericAttributeTarget.GenericParameterDetails);
         Assert.Equal("T", attributedParameter.Name);
         Assert.True(attributedParameter.Complete);

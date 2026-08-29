@@ -97,7 +97,7 @@ auto-property 的隱藏欄位會還原成屬性名稱，運算子方法還原成
 一般 property accessor 會輸出成成員存取，帶索引參數的 instance accessor 則會還原成 `target[index]` getter 或 setter，避免顯式呼叫 C# 禁止的 `get_*`／`set_*` 方法。
 具現化 class 與原本就有 instance constructor 的 struct，其非 constant field 與 auto-property 會加上 `default!` skeleton initializer，明確表達尚未還原 constructor 初始化流程的佔位值；interface、abstract property、沒有 instance constructor 的 struct 與 ref-like computed property 不會套用。
 方法簽章會讀取 parameter 與 return parameter 的 `NullableAttribute`，並依 method／declaring type 的 `NullableContextAttribute` 還原最外層 `?`；若 compiler-generated `Equals(object)` 使用 oblivious metadata，則依 `System.Object.Equals(object?)` override contract 補回 nullable 標記。
-type 與 method generic parameter 會另外保存 position、raw flags、variance、special constraints、`allows ref struct`、完整 nullable flag vector、constraint rows 與 `modreq`／`modopt`。`notnull` 只採用 generic parameter 本身的 `NullableAttribute(1)` 作為 Roslyn convention 證據，不會把 owner context fallback 猜成 constraint；`unmanaged` 只有在 `IsUnmanagedAttribute`、`ValueType modreq(UnmanagedType)` 與 special flags 一致時才視為完整。外部 TypeRef 無法在不載入 dependency 的前提下證明 class/interface、metadata 衝突或資料超限時，會保留原始型別並標示 `complete=false` 與原因。舊的 `genericParameters` 名稱陣列仍保留相容性；C# `where` clause 由後續 generator 階段依合法順序輸出。
+type 與 method generic parameter 會另外保存 position、raw flags、variance、special constraints、`allows ref struct`、完整 nullable flag vector、constraint rows 與 `modreq`／`modopt`。`notnull` 只採用 generic parameter 本身的 `NullableAttribute(1)` 作為 Roslyn convention 證據，不會把 owner context fallback 猜成 constraint；`unmanaged` 只有在 `IsUnmanagedAttribute`、`ValueType modreq(UnmanagedType)` 與 special flags 一致時才視為完整。外部 TypeRef 無法在不載入 dependency 的前提下證明 class/interface、metadata 衝突或資料超限時，會保留原始型別並標示 `complete=false` 與原因。舊的 `genericParameters` 名稱陣列仍保留相容性；C# generator 只在 owner、parameter 與所有 constraints 都完整且 modifier／nullable shape 可表示時，依 primary、base／type parameter／interface、`new()`、`allows ref struct` 的合法順序輸出 `where`，否則整個 owner 保守略過 constraints；constructed class/interface constraint 在 schema 尚未保存 generic definition contract 前也採 fail-closed，避免產生不符合其型別參數限制的程式碼。override 與 explicit interface implementation 則沿用原宣告的 constraints，不重複輸出。
 泛型讀取另有 assembly 與 owner 共用的 parameter row、constraint row、保留字元預算；單一 TypeSpec 的 bytes／節點／深度／arity、qualified-name bytes、modifier 數量與 modifier 輸出也各自受限。達到任一上限時會停止保留後續資料，透過 owner 的 `genericParametersComplete=false`／`genericParametersError` 與 `code.truncated` 明示不完整；因此極端情況下該 owner 的明細陣列可以是空的，不會把缺資料誤報為完整，並避免少量惡意 metadata 放大成巨量記憶體或 JSON。
 控制流程合併前必須預先宣告的 reference local 會使用 `default!` skeleton 佔位值；compiler-generated record 對 nullable value 呼叫 `EqualityComparer<T>.GetHashCode` 時也會保留 null-forgiving 語意，避免產生與原始程式無關的 nullable warning。
 呼叫時會依正式參數型別，把 IL 整數常值還原成 bool、char 或具明確轉型的 enum 引數；區域變數會依方法的 local signature 用實際型別宣告。
@@ -112,7 +112,7 @@ IL `switch` 跳表可還原直接 return／throw 的分支，也能處理各 cas
 含回跳、會產生陳述式或不規則控制分支的 filter，以及非標準例外區域目前仍會退回反組譯 IL 註解加 `NotImplementedException`。
 重建採全有或全無：遇到無法結構化的跳轉、參照編譯器產生的名稱或任何不支援的指令，就整個方法放棄，
 寧可不還原也不產出語意錯誤的程式碼。enum 會保留底層整數型別與各成員原始數值；
-型別引用已保留完整命名空間，但套件外依賴與泛型限制仍可能需要手動補齊，因此不保證可直接編譯。資源解析不會具現化或反序列化自訂型別，以免分析不可信檔案時執行非預期程式碼。
+型別引用已保留完整命名空間，但套件外依賴與無法安全表示的 metadata 仍可能需要手動補齊，因此不保證可直接編譯。資源解析不會具現化或反序列化自訂型別，以免分析不可信檔案時執行非預期程式碼。
 
 另外也有 `CppSkeletonGenerator`、`RustSkeletonGenerator`、`GoSkeletonGenerator`，
 共用 `SkeletonSupport` 挑型別與 `LanguageTypeMap` 做基本型別對應，各自輸出該語言的型別與方法簽章骨架
