@@ -215,16 +215,13 @@ public sealed class ConstructorInitializerSafetyTests
         AssertInitializerOnly(fixture, fixture.UnrelatedInstanceFieldToken);
         AssertInitializerOnly(fixture, fixture.FieldMemberReferenceToken);
 
-        var invalidUserString = Reconstruct(fixture, BuildConstructorIl(
+        Assert.Null(Reconstruct(fixture, BuildConstructorIl(
             [0x02, 0x17, 0x17],
             0x28,
             fixture.BaseConstructorToken,
             BuildInvalidUserStringFieldStoreTail(
                 fixture.CurrentInstanceFieldToken,
-                unchecked((int)0x70FF_FFFF))));
-        Assert.NotNull(invalidUserString);
-        Assert.Equal("base", invalidUserString.Initializer.Kind);
-        Assert.Null(invalidUserString.Body);
+                unchecked((int)0x70FF_FFFF)))));
 
         void AssertInitializerOnly(ConstructorFixtureMetadata metadata, int fieldToken)
         {
@@ -246,7 +243,8 @@ public sealed class ConstructorInitializerSafetyTests
         ManagedSymbolReader.ReconstructConstructorForTest(
             fixture.Metadata,
             il,
-            fixture.CurrentConstructor);
+            fixture.CurrentConstructor,
+            peReader: fixture.Reader);
 
     private static byte[] BuildConstructorIl(
         byte[] prefix,
@@ -383,6 +381,8 @@ public sealed class ConstructorInitializerSafetyTests
     {
         public MetadataReader Metadata { get; } = metadata;
 
+        public PEReader Reader { get; } = peReader;
+
         public MethodDefinitionHandle CurrentConstructor { get; } = currentConstructor;
 
         public int CurrentConstructorToken { get; } = currentConstructorToken;
@@ -401,7 +401,7 @@ public sealed class ConstructorInitializerSafetyTests
 
         public void Dispose()
         {
-            peReader.Dispose();
+            Reader.Dispose();
             stream.Dispose();
         }
     }

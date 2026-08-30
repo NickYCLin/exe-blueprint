@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Collections;
 using System.Collections.Immutable;
 using System.Globalization;
 using System.Reflection;
@@ -21,6 +22,10 @@ internal static class ManagedSymbolReader
     private const int MaxCallEdges = 50_000;
     private const int MaxIlInstructions = 400;
     private const int MaxIlSwitchTargets = 4_096;
+    private const int MaxUserStringHeapBytes = 0x0100_0000;
+    private const int MaxResolvedUserStrings = 65_536;
+    private const int MaxUserStringCharacters = 4_096;
+    private const int MaxResolvedUserStringCharacters = 4 * 1_024 * 1_024;
     private const int MaxEnumFieldsToInspect = 1_024;
     private const int MaxEnumFieldsToInspectAcrossAssembly = 100_000;
     private const int MaxConstructorInitializerArguments = 32;
@@ -80,8 +85,9 @@ internal static class ManagedSymbolReader
         var genericMetadataBudget = new GenericMetadataBudget();
         var typeGenericParameterResolver = new TypeGenericParameterResolver(metadata, genericMetadataBudget);
         var enumTypes = ReadEnumTypeCatalog(metadata, cancellationToken);
+        var userStrings = UserStringCatalog.Create(peReader, metadata);
         var methodCount = 0;
-        var truncated = false;
+        var truncated = userStrings.Truncated;
 
         foreach (var typeHandle in metadata.TypeDefinitions)
         {
@@ -158,10 +164,20 @@ internal static class ManagedSymbolReader
                 else if (il is not null)
                 {
                     var decoded = DecodeInstructions(il);
-                    var (instructions, ilTruncated) = Disassemble(metadata, il, decoded);
+                    var methodIlComplete = decoded.Status == IlDecodeStatus.Complete &&
+                                           HasOnlyValidUserStringOperands(
+                                               il,
+                                               decoded,
+                                               userStrings);
+                    var (instructions, ilTruncated) = Disassemble(
+                        metadata,
+                        il,
+                        decoded,
+                        userStrings,
+                        methodIlComplete);
                     model = model with { Il = instructions, IlTruncated = ilTruncated };
 
-                    if (decoded.Status == IlDecodeStatus.Complete &&
+                    if (methodIlComplete &&
                         methodName is not (".ctor" or ".cctor") &&
                         reconstructionSignature is not null &&
                         exceptionRegionResult is not null)
@@ -178,6 +194,7 @@ internal static class ManagedSymbolReader
                             localTypes,
                             exceptionRegions,
                             enumTypes,
+                            userStrings,
                             isInstance
                                 ? CreateNominalCliType(metadata, enumTypes, method.GetDeclaringType())
                                 : null,
@@ -192,7 +209,7 @@ internal static class ManagedSymbolReader
                             };
                         }
                     }
-                    else if (decoded.Status == IlDecodeStatus.Complete &&
+                    else if (methodIlComplete &&
                              methodName == ".ctor" &&
                              kind == "class" &&
                              reconstructionSignature is not null &&
@@ -211,7 +228,8 @@ internal static class ManagedSymbolReader
                             localTypes,
                             localSignature,
                             exceptionRegions,
-                            enumTypes);
+                            enumTypes,
+                            userStrings);
                         if (constructor is not null)
                         {
                             model = model with
@@ -226,7 +244,7 @@ internal static class ManagedSymbolReader
                         }
                     }
 
-                    if (decoded.Status != IlDecodeStatus.Complete ||
+                    if (!methodIlComplete ||
                         !CollectCalls(
                             metadata,
                             il,
@@ -291,7 +309,7 @@ internal static class ManagedSymbolReader
             TypeCount = types.Count,
             MethodCount = methodCount,
             CallEdgeCount = edges.Count,
-            Truncated = truncated || genericMetadataBudget.Truncated,
+            Truncated = truncated || genericMetadataBudget.Truncated || userStrings.Truncated,
             Types = types,
             CallGraph = edges,
             Resources = ReadManifestResources(peReader, metadata)
@@ -831,7 +849,8 @@ internal static class ManagedSymbolReader
         IReadOnlyList<CliType> localTypes,
         StandaloneSignatureHandle localSignature,
         IReadOnlyList<ExceptionRegionInfo> exceptionRegions,
-        EnumTypeCatalog enumTypes)
+        EnumTypeCatalog enumTypes,
+        UserStringCatalog userStrings)
     {
         if (!TryCreateConstructorOwnerContext(
                 metadata,
@@ -1002,6 +1021,7 @@ internal static class ManagedSymbolReader
             if (arguments.Count >= MaxConstructorInitializerArguments ||
                 !TryReadConstructorArgument(
                     metadata,
+                    userStrings,
                     il,
                     rawInstructions[index],
                     name,
@@ -1098,6 +1118,7 @@ internal static class ManagedSymbolReader
         var requiresUnsafeContext = false;
         if (IsCanonicalConstructorTail(
                 metadata,
+                userStrings,
                 il,
                 rawInstructions,
                 index + 1,
@@ -1114,6 +1135,7 @@ internal static class ManagedSymbolReader
                 localTypes,
                 exceptionRegions,
                 enumTypes,
+                userStrings,
                 instanceType,
                 out requiresUnsafeContext,
                 callEndOffset);
@@ -1132,6 +1154,7 @@ internal static class ManagedSymbolReader
 
     private static bool IsCanonicalConstructorTail(
         MetadataReader metadata,
+        UserStringCatalog userStrings,
         byte[] il,
         IReadOnlyList<IlInstruction> instructions,
         int startIndex,
@@ -1161,7 +1184,12 @@ internal static class ManagedSymbolReader
             SkipConstructorNops(instructions, ref index);
             if (index >= instructions.Count ||
                 !TryGetInstructionName(instructions[index], out name) ||
-                !IsConstructorValueLoad(metadata, il, instructions[index], name))
+                !IsConstructorValueLoad(
+                    metadata,
+                    userStrings,
+                    il,
+                    instructions[index],
+                    name))
             {
                 return false;
             }
@@ -1252,6 +1280,7 @@ internal static class ManagedSymbolReader
 
     private static bool IsConstructorValueLoad(
         MetadataReader metadata,
+        UserStringCatalog userStrings,
         byte[] il,
         IlInstruction instruction,
         string name)
@@ -1282,23 +1311,14 @@ internal static class ManagedSymbolReader
 
         if (name == "ldstr")
         {
-            try
-            {
-                if (instruction.OperandSize != 4)
-                {
-                    return false;
-                }
-
-                var token = BinaryPrimitives.ReadInt32LittleEndian(
-                    il.AsSpan(instruction.OperandOffset, 4));
-                _ = metadata.GetUserString(MetadataTokens.UserStringHandle(token));
-                return true;
-            }
-            catch (Exception exception) when (
-                exception is BadImageFormatException or ArgumentException)
+            if (instruction.OperandSize != 4)
             {
                 return false;
             }
+
+            var token = BinaryPrimitives.ReadInt32LittleEndian(
+                il.AsSpan(instruction.OperandOffset, 4));
+            return userStrings.TryGet(token, out _);
         }
 
         return name switch
@@ -1681,6 +1701,7 @@ internal static class ManagedSymbolReader
 
     private static bool TryReadConstructorArgument(
         MetadataReader metadata,
+        UserStringCatalog userStrings,
         byte[] il,
         IlInstruction instruction,
         string name,
@@ -1719,20 +1740,19 @@ internal static class ManagedSymbolReader
                     Signature: null);
                 return true;
             case "ldstr":
-                try
-                {
-                    var token = BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(instruction.OperandOffset, 4));
-                    argument = new ConstructorArgument(
-                        EscapeCSharpString(metadata.GetUserString(MetadataTokens.UserStringHandle(token))),
-                        new CliType("string", PrimitiveType: PrimitiveTypeCode.String),
-                        Signature: null);
-                    return true;
-                }
-                catch (Exception exception) when (exception is BadImageFormatException or ArgumentException)
+                var token = BinaryPrimitives.ReadInt32LittleEndian(
+                    il.AsSpan(instruction.OperandOffset, 4));
+                if (!userStrings.TryGet(token, out var userString))
                 {
                     argument = default;
                     return false;
                 }
+
+                argument = new ConstructorArgument(
+                    EscapeCSharpString(userString),
+                    new CliType("string", PrimitiveType: PrimitiveTypeCode.String),
+                    Signature: null);
+                return true;
             case "ldc.i4.m1":
                 argument = new ConstructorArgument(
                     "-1",
@@ -3594,7 +3614,9 @@ internal static class ManagedSymbolReader
     private static (IReadOnlyList<string> Instructions, bool Truncated) Disassemble(
         MetadataReader metadata,
         byte[] il,
-        IlDecodeResult decoded)
+        IlDecodeResult decoded,
+        UserStringCatalog userStrings,
+        bool methodIlComplete)
     {
         var instructions = new List<string>(decoded.Instructions.Count);
         foreach (var instruction in decoded.Instructions)
@@ -3604,11 +3626,47 @@ internal static class ManagedSymbolReader
                 continue;
             }
 
-            var operand = FormatOperand(metadata, il, instruction, opCode.OperandType);
+            var operand = FormatOperand(
+                metadata,
+                il,
+                instruction,
+                opCode.OperandType,
+                userStrings);
             instructions.Add($"IL_{instruction.Offset:X4}: {opCode.Name}{operand}");
         }
 
-        return (instructions, decoded.Status != IlDecodeStatus.Complete);
+        return (instructions, !methodIlComplete);
+    }
+
+    private static bool HasOnlyValidUserStringOperands(
+        byte[] il,
+        IlDecodeResult decoded,
+        UserStringCatalog userStrings)
+    {
+        if (decoded.Status != IlDecodeStatus.Complete)
+        {
+            return false;
+        }
+
+        foreach (var instruction in decoded.Instructions)
+        {
+            if (!OpCodesByValue.TryGetValue(instruction.OpValue, out var opCode) ||
+                opCode.OperandType != OperandType.InlineString)
+            {
+                continue;
+            }
+
+            if (instruction.OperandSize != 4 ||
+                !userStrings.TryGet(
+                    BinaryPrimitives.ReadInt32LittleEndian(
+                        il.AsSpan(instruction.OperandOffset, 4)),
+                    out _))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private readonly record struct IlInstruction(int Offset, short OpValue, int OperandOffset, int OperandSize);
@@ -3624,6 +3682,253 @@ internal static class ManagedSymbolReader
         IlDecodeStatus Status,
         IReadOnlyList<IlInstruction> Instructions,
         int ConsumedOffset);
+
+    private sealed class UserStringCatalog
+    {
+        private readonly ImmutableArray<byte> _heap;
+        private readonly BitArray _entryStarts;
+        private readonly Dictionary<int, string> _cache = new();
+        private int _resolvedCharacters;
+
+        private UserStringCatalog(
+            ImmutableArray<byte> heap,
+            BitArray entryStarts,
+            bool complete)
+        {
+            _heap = heap;
+            _entryStarts = entryStarts;
+            Truncated = !complete;
+        }
+
+        public bool Truncated { get; private set; }
+
+        public static UserStringCatalog RejectAll(bool complete = true) =>
+            new([], new BitArray(0), complete);
+
+        public static UserStringCatalog Create(
+            PEReader peReader,
+            MetadataReader metadata)
+        {
+            try
+            {
+                var heapSize = metadata.GetHeapSize(HeapIndex.UserString);
+                if (heapSize == 0)
+                {
+                    return RejectAll();
+                }
+
+                if (heapSize < 0 || heapSize > MaxUserStringHeapBytes)
+                {
+                    return RejectAll(complete: false);
+                }
+
+                var heapOffset = metadata.GetHeapMetadataOffset(HeapIndex.UserString);
+                var metadataBlock = peReader.GetMetadata();
+                if (heapOffset < 0 ||
+                    heapOffset > metadataBlock.Length - heapSize)
+                {
+                    return RejectAll(complete: false);
+                }
+
+                return Create(metadataBlock.GetContent(heapOffset, heapSize));
+            }
+            catch (Exception exception) when (
+                exception is BadImageFormatException or
+                    ArgumentException or
+                    ArgumentOutOfRangeException or
+                    InvalidOperationException or
+                    IOException)
+            {
+                return RejectAll(complete: false);
+            }
+        }
+
+        public static UserStringCatalog Create(ImmutableArray<byte> heap)
+        {
+            if (heap.IsDefault || heap.Length == 0)
+            {
+                return RejectAll();
+            }
+
+            if (heap.Length > MaxUserStringHeapBytes || heap[0] != 0)
+            {
+                return RejectAll(complete: false);
+            }
+
+            var starts = new BitArray(heap.Length);
+            var position = 1;
+            var complete = true;
+            while (position < heap.Length)
+            {
+                var remaining = heap.Length - position;
+                if (remaining <= 3 && IsZeroPadding(heap, position))
+                {
+                    position = heap.Length;
+                    break;
+                }
+
+                if (!TryReadCompressedUnsigned(
+                        heap,
+                        position,
+                        out var payloadLength,
+                        out var prefixLength) ||
+                    payloadLength < 1 ||
+                    (payloadLength & 1) == 0 ||
+                    prefixLength > remaining ||
+                    payloadLength > remaining - prefixLength)
+                {
+                    complete = false;
+                    break;
+                }
+
+                var payloadOffset = position + prefixLength;
+                var characterBytes = payloadLength - 1;
+                var terminal = heap[payloadOffset + characterBytes];
+                if (terminal > 1)
+                {
+                    complete = false;
+                    break;
+                }
+
+                starts[position] = true;
+                position = payloadOffset + payloadLength;
+            }
+
+            return new UserStringCatalog(heap, starts, complete && position == heap.Length);
+        }
+
+        public bool TryGet(int token, out string value)
+        {
+            value = string.Empty;
+            const uint tokenTypeMask = 0xFF00_0000;
+            const uint userStringTokenType = 0x7000_0000;
+            const int heapOffsetMask = 0x00FF_FFFF;
+            if (((uint)token & tokenTypeMask) != userStringTokenType)
+            {
+                return false;
+            }
+
+            var heapOffset = token & heapOffsetMask;
+            if (heapOffset == 0 ||
+                heapOffset >= _entryStarts.Length ||
+                !_entryStarts[heapOffset])
+            {
+                return false;
+            }
+
+            if (_cache.TryGetValue(heapOffset, out var cached))
+            {
+                value = cached;
+                return true;
+            }
+
+            if (!TryReadCompressedUnsigned(
+                    _heap,
+                    heapOffset,
+                    out var payloadLength,
+                    out var prefixLength))
+            {
+                return false;
+            }
+
+            var characterCount = (payloadLength - 1) / 2;
+            if (characterCount > MaxUserStringCharacters ||
+                _cache.Count >= MaxResolvedUserStrings ||
+                characterCount > MaxResolvedUserStringCharacters - _resolvedCharacters)
+            {
+                Truncated = true;
+                return false;
+            }
+
+            var characterOffset = heapOffset + prefixLength;
+            value = string.Create(
+                characterCount,
+                (Heap: _heap, CharacterOffset: characterOffset),
+                static (characters, state) =>
+                {
+                    var bytes = state.Heap.AsSpan();
+                    for (var index = 0; index < characters.Length; index++)
+                    {
+                        characters[index] = (char)BinaryPrimitives.ReadUInt16LittleEndian(
+                            bytes.Slice(state.CharacterOffset + (index * 2), 2));
+                    }
+                });
+            _cache.Add(heapOffset, value);
+            _resolvedCharacters += characterCount;
+            return true;
+        }
+
+        private static bool TryReadCompressedUnsigned(
+            ImmutableArray<byte> heap,
+            int offset,
+            out int value,
+            out int bytesRead)
+        {
+            value = 0;
+            bytesRead = 0;
+            if ((uint)offset >= (uint)heap.Length)
+            {
+                return false;
+            }
+
+            var first = heap[offset];
+            var remaining = heap.Length - offset;
+            if ((first & 0x80) == 0)
+            {
+                value = first;
+                bytesRead = 1;
+                return true;
+            }
+
+            if ((first & 0xC0) == 0x80)
+            {
+                if (remaining < 2)
+                {
+                    return false;
+                }
+
+                value = ((first & 0x3F) << 8) | heap[offset + 1];
+                if (value < 0x80)
+                {
+                    return false;
+                }
+
+                bytesRead = 2;
+                return true;
+            }
+
+            if ((first & 0xE0) != 0xC0 || remaining < 4)
+            {
+                return false;
+            }
+
+            value = ((first & 0x1F) << 24) |
+                    (heap[offset + 1] << 16) |
+                    (heap[offset + 2] << 8) |
+                    heap[offset + 3];
+            if (value < 0x4000)
+            {
+                value = 0;
+                return false;
+            }
+
+            bytesRead = 4;
+            return true;
+        }
+
+        private static bool IsZeroPadding(ImmutableArray<byte> heap, int offset)
+        {
+            for (var index = offset; index < heap.Length; index++)
+            {
+                if (heap[index] != 0)
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+    }
 
     private static IlDecodeResult DecodeInstructions(byte[] il)
     {
@@ -3765,7 +4070,12 @@ internal static class ManagedSymbolReader
             new(status, [.. instructions], consumedOffset);
     }
 
-    private static string FormatOperand(MetadataReader metadata, byte[] il, IlInstruction instruction, OperandType operandType)
+    private static string FormatOperand(
+        MetadataReader metadata,
+        byte[] il,
+        IlInstruction instruction,
+        OperandType operandType,
+        UserStringCatalog userStrings)
     {
         var offset = instruction.OperandOffset;
         if (operandType == OperandType.InlineNone || offset + instruction.OperandSize > il.Length)
@@ -3781,7 +4091,9 @@ internal static class ManagedSymbolReader
             case OperandType.InlineTok:
                 return $" {ResolveTokenName(metadata, BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)))}";
             case OperandType.InlineString:
-                return $" {FormatUserString(metadata, BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)))}";
+                return $" {FormatUserString(
+                    userStrings,
+                    BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)))}";
             case OperandType.InlineSig:
                 return $" sig(0x{BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)):X8})";
             case OperandType.InlineI:
@@ -3837,26 +4149,26 @@ internal static class ManagedSymbolReader
         return targets;
     }
 
-    private static string FormatUserString(MetadataReader metadata, int token)
+    private static string FormatUserString(
+        UserStringCatalog userStrings,
+        int token)
     {
-        try
-        {
-            var value = metadata.GetUserString(MetadataTokens.UserStringHandle(token));
-            var escaped = value
-                .Replace("\\", "\\\\", StringComparison.Ordinal)
-                .Replace("\"", "\\\"", StringComparison.Ordinal)
-                .ReplaceLineEndings(" ");
-            if (escaped.Length > 120)
-            {
-                escaped = escaped[..120] + "…";
-            }
-
-            return $"\"{escaped}\"";
-        }
-        catch (Exception exception) when (exception is BadImageFormatException or ArgumentException)
+        if (!userStrings.TryGet(token, out var value))
         {
             return $"str(0x{token:X8})";
         }
+
+        const int maxPreviewCharacters = 120;
+        var previewTruncated = value.Length > maxPreviewCharacters;
+        if (previewTruncated)
+        {
+            value = value[..maxPreviewCharacters];
+        }
+
+        var escaped = EscapeCSharpString(value);
+        return previewTruncated
+            ? escaped[..^1] + "…\""
+            : escaped;
     }
 
     private static string ResolveTokenName(MetadataReader metadata, int token)
@@ -4005,6 +4317,7 @@ internal static class ManagedSymbolReader
         HashSet<string> AmbiguousExpressionTypes,
         HashSet<string> UnsignedIntegralExpressions,
         EnumTypeCatalog EnumTypes,
+        UserStringCatalog UserStrings,
         ReconstructionState State,
         ExceptionLeaveRedirect? LeaveRedirect,
         int CatchDepth);
@@ -4013,6 +4326,11 @@ internal static class ManagedSymbolReader
         string Status,
         int InstructionCount,
         int ConsumedOffset);
+
+    internal readonly record struct UserStringReadTestResult(
+        bool Success,
+        string Value,
+        bool Truncated);
 
     internal static IlDecodeTestResult DecodeIlForTest(byte[] il)
     {
@@ -4023,6 +4341,15 @@ internal static class ManagedSymbolReader
             decoded.ConsumedOffset);
     }
 
+    internal static UserStringReadTestResult ReadUserStringForTest(
+        byte[] heap,
+        int token)
+    {
+        var catalog = UserStringCatalog.Create(ImmutableArray.CreateRange(heap));
+        var success = catalog.TryGet(token, out var value);
+        return new UserStringReadTestResult(success, value, catalog.Truncated);
+    }
+
     // 測試用進入點：以現成的 MetadataReader 直接餵 IL bytes 驗證還原結果。
     internal static IReadOnlyList<string>? ReconstructBodyForTest(
         MetadataReader metadata,
@@ -4031,13 +4358,23 @@ internal static class ManagedSymbolReader
         string returnType,
         IReadOnlyList<string>? localTypes = null,
         IReadOnlyList<ExceptionRegionInfo>? exceptionRegions = null,
-        IReadOnlyList<string>? parameterTypes = null)
+        IReadOnlyList<string>? parameterTypes = null,
+        PEReader? peReader = null)
     {
         var enumTypes = ReadEnumTypeCatalog(metadata);
+        var userStrings = peReader is null
+            ? UserStringCatalog.RejectAll()
+            : UserStringCatalog.Create(peReader, metadata);
+        var decoded = DecodeInstructions(il);
+        if (!HasOnlyValidUserStringOperands(il, decoded, userStrings))
+        {
+            return null;
+        }
+
         return TryReconstructLinearBody(
             metadata,
             il,
-            DecodeInstructions(il),
+            decoded,
             isInstance,
             new Dictionary<int, string>(),
             (parameterTypes ?? []).Select(type => CreateTestCliType(type, enumTypes)).ToArray(),
@@ -4045,6 +4382,7 @@ internal static class ManagedSymbolReader
             (localTypes ?? []).Select(type => CreateTestCliType(type, enumTypes)).ToArray(),
             exceptionRegions ?? [],
             enumTypes,
+            userStrings,
             isInstance ? new CliType("<test-instance>") : null,
             out _);
     }
@@ -4052,11 +4390,21 @@ internal static class ManagedSymbolReader
     internal static IReadOnlyList<string>? ReconstructMethodForTest(
         MetadataReader metadata,
         byte[] il,
-        MethodDefinitionHandle methodHandle)
+        MethodDefinitionHandle methodHandle,
+        PEReader? peReader = null)
     {
         try
         {
             var enumTypes = ReadEnumTypeCatalog(metadata);
+            var userStrings = peReader is null
+                ? UserStringCatalog.RejectAll()
+                : UserStringCatalog.Create(peReader, metadata);
+            var decoded = DecodeInstructions(il);
+            if (!HasOnlyValidUserStringOperands(il, decoded, userStrings))
+            {
+                return null;
+            }
+
             var method = metadata.GetMethodDefinition(methodHandle);
             var signature = method.DecodeSignature(SignatureTypeNameProvider.Instance, null);
             var isInstance = signature.Header.IsInstance &&
@@ -4065,7 +4413,7 @@ internal static class ManagedSymbolReader
             return TryReconstructLinearBody(
                 metadata,
                 il,
-                DecodeInstructions(il),
+                decoded,
                 isInstance,
                 ReadParameterNames(metadata, method),
                 signature.ParameterTypes.Select(type => CreateCliType(type, enumTypes)).ToArray(),
@@ -4073,6 +4421,7 @@ internal static class ManagedSymbolReader
                 localTypes: [],
                 exceptionRegions: [],
                 enumTypes,
+                userStrings,
                 isInstance ? CreateNominalCliType(metadata, enumTypes, declaringType) : null,
                 out _);
         }
@@ -4140,11 +4489,21 @@ internal static class ManagedSymbolReader
         MethodDefinitionHandle methodHandle,
         IReadOnlyList<ExceptionRegionInfo>? exceptionRegions = null,
         StandaloneSignatureHandle localSignature = default,
-        bool requireBaseInitializer = true)
+        bool requireBaseInitializer = true,
+        PEReader? peReader = null)
     {
         try
         {
             var enumTypes = ReadEnumTypeCatalog(metadata);
+            var userStrings = peReader is null
+                ? UserStringCatalog.RejectAll()
+                : UserStringCatalog.Create(peReader, metadata);
+            var decoded = DecodeInstructions(il);
+            if (!HasOnlyValidUserStringOperands(il, decoded, userStrings))
+            {
+                return null;
+            }
+
             var method = metadata.GetMethodDefinition(methodHandle);
             var declaringType = method.GetDeclaringType();
             var definition = metadata.GetTypeDefinition(declaringType);
@@ -4156,7 +4515,7 @@ internal static class ManagedSymbolReader
             var reconstruction = TryReconstructConstructor(
                 metadata,
                 il,
-                DecodeInstructions(il),
+                decoded,
                 methodHandle,
                 declaringType,
                 definition.BaseType,
@@ -4168,7 +4527,8 @@ internal static class ManagedSymbolReader
                 [],
                 localSignature,
                 exceptionRegions ?? [],
-                enumTypes);
+                enumTypes,
+                userStrings);
             return reconstruction is null ||
                    (requireBaseInitializer && reconstruction.Initializer.Kind != "base")
                 ? null
@@ -4244,6 +4604,7 @@ internal static class ManagedSymbolReader
         IReadOnlyList<CliType> localTypes,
         IReadOnlyList<ExceptionRegionInfo> exceptionRegions,
         EnumTypeCatalog enumTypes,
+        UserStringCatalog userStrings,
         CliType? instanceType,
         out bool requiresUnsafeContext,
         int startOffset = 0)
@@ -4334,6 +4695,7 @@ internal static class ManagedSymbolReader
             new HashSet<string>(StringComparer.Ordinal),
             new HashSet<string>(StringComparer.Ordinal),
             enumTypes,
+            userStrings,
             state,
             LeaveRedirect: null,
             CatchDepth: 0);
@@ -6498,10 +6860,17 @@ internal static class ManagedSymbolReader
                     new CliType("object", PrimitiveType: PrimitiveTypeCode.Object));
                 return true;
             case "ldstr":
+                var userStringToken = BinaryPrimitives.ReadInt32LittleEndian(
+                    il.AsSpan(offset, 4));
+                if (!context.UserStrings.TryGet(userStringToken, out var userString))
+                {
+                    return false;
+                }
+
                 PushExpression(
                     context,
                     stack,
-                    EscapeCSharpString(ReadUserString(metadata, BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)))),
+                    EscapeCSharpString(userString),
                     new CliType("string", PrimitiveType: PrimitiveTypeCode.String));
                 return true;
             case "ldc.i4.m1":
@@ -8740,27 +9109,64 @@ internal static class ManagedSymbolReader
         return name;
     }
 
-    private static string ReadUserString(MetadataReader metadata, int token)
-    {
-        try
-        {
-            return metadata.GetUserString(MetadataTokens.UserStringHandle(token));
-        }
-        catch (Exception exception) when (exception is BadImageFormatException or ArgumentException)
-        {
-            return string.Empty;
-        }
-    }
-
     private static string EscapeCSharpString(string value)
     {
-        var escaped = value
-            .Replace("\\", "\\\\", StringComparison.Ordinal)
-            .Replace("\"", "\\\"", StringComparison.Ordinal)
-            .Replace("\r", "\\r", StringComparison.Ordinal)
-            .Replace("\n", "\\n", StringComparison.Ordinal)
-            .Replace("\t", "\\t", StringComparison.Ordinal);
-        return $"\"{escaped}\"";
+        var escaped = new StringBuilder(value.Length + 2);
+        escaped.Append('"');
+        foreach (var character in value)
+        {
+            switch (character)
+            {
+                case '\\':
+                    escaped.Append("\\\\");
+                    break;
+                case '"':
+                    escaped.Append("\\\"");
+                    break;
+                case '\0':
+                    escaped.Append("\\0");
+                    break;
+                case '\a':
+                    escaped.Append("\\a");
+                    break;
+                case '\b':
+                    escaped.Append("\\b");
+                    break;
+                case '\f':
+                    escaped.Append("\\f");
+                    break;
+                case '\n':
+                    escaped.Append("\\n");
+                    break;
+                case '\r':
+                    escaped.Append("\\r");
+                    break;
+                case '\t':
+                    escaped.Append("\\t");
+                    break;
+                case '\v':
+                    escaped.Append("\\v");
+                    break;
+                default:
+                    if (char.IsControl(character) ||
+                        char.IsSurrogate(character) ||
+                        char.GetUnicodeCategory(character) == UnicodeCategory.Format ||
+                        character is '\u0085' or '\u2028' or '\u2029')
+                    {
+                        escaped.Append("\\u");
+                        escaped.Append(((int)character).ToString("X4", CultureInfo.InvariantCulture));
+                    }
+                    else
+                    {
+                        escaped.Append(character);
+                    }
+
+                    break;
+            }
+        }
+
+        escaped.Append('"');
+        return escaped.ToString();
     }
 
     private static string BinaryOperator(string name) => name switch
