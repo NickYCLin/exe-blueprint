@@ -90,6 +90,7 @@ Ghidra 安裝目錄來自 `--ghidra` 或環境變數 `GHIDRA_INSTALL_DIR`。找�
 目前已有第一個產生器 `CSharpSkeletonGenerator`，吃 `CodeModel` 輸出 C# 骨架：
 還原命名空間、型別、泛型巢狀宣告、ref struct、欄位、屬性、事件、方法簽章與繼承，並保留完整型別名稱及成員的可見性、static／abstract／virtual／override／sealed override 與 readonly 修飾詞；當 generic 與 non-generic owner 因移除 metadata arity 而擁有相同完整名稱時，nested type 只會掛到 inherited generic 數量與名稱序列精確一致的 owner。欄位、屬性、事件、enum 成員、方法與參數宣告如果精確等於 C# reserved keyword，會以 `@` 識別字輸出；泛型參數則額外處理在 constraint 文法中會造成歧義的 contextual keyword。metadata 中標為 final new-slot 的隱含介面實作會輸出成一般非 virtual 成員，避免 sealed 類別產生無效 C#。ref-like 屬性不會輸出成需要 backing field 的 auto-property，而是使用無儲存欄位的 accessor stub；具體型別的唯寫屬性也會保留 property 形狀並使用區塊 setter，避免 C# 禁止的 setter-only auto-property 與虛構 getter。沒有任何 accessor，或同時帶 setter 與 by-ref return 的 PropertyDef 無法安全表示成 C# property，會保守略過。
 多個輸入 assembly 會輸出 `Reconstructed.slnx`，套件內可對上的 assembly reference 會轉成 `ProjectReference`。方法體由 `ManagedSymbolReader` 的 IL 還原器重建：
+每個 method body 只會經過一次有界解碼，反組譯、body／constructor 還原與呼叫圖共用同一份結果；單一方法最多保留 400 個指令、所有 `switch` 合計最多接受 4,096 個 target。未知或保留 opcode、截斷 operand、空 method body，以及跳到方法範圍外或 operand 中間的 branch／switch target 都會把方法標為 `ilTruncated` 並傳播到 `code.truncated`。這種情況只保留已完整解碼的有界 IL 前綴，不提交部分呼叫邊，也不嘗試還原 body 或 constructor；完整解碼但缺少支援的終止路徑則只放棄 body 還原，不誤報為資料截斷。
 先把 IL 解碼成指令陣列，用區間遞迴結構化把條件分支還原成 if／if-else，比對 Roslyn 的
 while／for 形狀（先跳條件、主體、條件、往回跳）還原成 while，並把底測式（往回跳收尾）還原成 do-while（皆可巢狀）；
 區塊內以堆疊模擬還原載入、算式、欄位、屬性、方法呼叫、`new`、運算子、`return`、`throw`；

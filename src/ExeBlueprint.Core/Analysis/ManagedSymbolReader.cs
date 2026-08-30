@@ -20,6 +20,7 @@ internal static class ManagedSymbolReader
     private const int MaxTypes = 5_000;
     private const int MaxCallEdges = 50_000;
     private const int MaxIlInstructions = 400;
+    private const int MaxIlSwitchTargets = 4_096;
     private const int MaxEnumFieldsToInspect = 1_024;
     private const int MaxEnumFieldsToInspectAcrossAssembly = 100_000;
     private const int MaxConstructorInitializerArguments = 32;
@@ -149,12 +150,19 @@ internal static class ManagedSymbolReader
                     method,
                     model,
                     enumTypes);
-                if (il is { Length: > 0 })
+                if (hasBody && il is null)
                 {
-                    var (instructions, ilTruncated) = Disassemble(metadata, il);
+                    model = model with { IlTruncated = true };
+                    truncated = true;
+                }
+                else if (il is not null)
+                {
+                    var decoded = DecodeInstructions(il);
+                    var (instructions, ilTruncated) = Disassemble(metadata, il, decoded);
                     model = model with { Il = instructions, IlTruncated = ilTruncated };
 
-                    if (methodName is not (".ctor" or ".cctor") &&
+                    if (decoded.Status == IlDecodeStatus.Complete &&
+                        methodName is not (".ctor" or ".cctor") &&
                         reconstructionSignature is not null &&
                         exceptionRegionResult is not null)
                     {
@@ -162,6 +170,7 @@ internal static class ManagedSymbolReader
                         var body = TryReconstructLinearBody(
                             metadata,
                             il,
+                            decoded,
                             isInstance,
                             ReadParameterNames(metadata, method),
                             reconstructionSignature.ParameterTypes,
@@ -183,7 +192,8 @@ internal static class ManagedSymbolReader
                             };
                         }
                     }
-                    else if (methodName == ".ctor" &&
+                    else if (decoded.Status == IlDecodeStatus.Complete &&
+                             methodName == ".ctor" &&
                              kind == "class" &&
                              reconstructionSignature is not null &&
                              exceptionRegionResult is not null)
@@ -191,6 +201,7 @@ internal static class ManagedSymbolReader
                         var constructor = TryReconstructConstructor(
                             metadata,
                             il,
+                            decoded,
                             methodHandle,
                             typeHandle,
                             definition.BaseType,
@@ -214,22 +225,22 @@ internal static class ManagedSymbolReader
                             constructorCandidates.Add(methodHandle, constructor with { MethodIndex = methods.Count });
                         }
                     }
-                }
 
-                methods.Add(model);
-                methodCount++;
-
-                if (il is { Length: > 0 })
-                {
-                    if (edges.Count < MaxCallEdges)
-                    {
-                        CollectCalls(metadata, il, $"{declaringName}.{methodName}", edges, seenEdges);
-                    }
-                    else
+                    if (decoded.Status != IlDecodeStatus.Complete ||
+                        !CollectCalls(
+                            metadata,
+                            il,
+                            decoded,
+                            $"{declaringName}.{methodName}",
+                            edges,
+                            seenEdges))
                     {
                         truncated = true;
                     }
                 }
+
+                methods.Add(model);
+                methodCount++;
             }
 
             ValidateConstructorChains(methods, constructorCandidates);
@@ -810,6 +821,7 @@ internal static class ManagedSymbolReader
     private static ConstructorReconstruction? TryReconstructConstructor(
         MetadataReader metadata,
         byte[] il,
+        IlDecodeResult decoded,
         MethodDefinitionHandle methodHandle,
         TypeDefinitionHandle declaringType,
         EntityHandle baseType,
@@ -850,12 +862,9 @@ internal static class ManagedSymbolReader
             return null;
         }
 
-        var rawInstructions = EnumerateInstructions(il)
-            .Take(MaxIlInstructions + 1)
-            .ToArray();
-        if (rawInstructions.Length == 0 ||
-            rawInstructions.Length > MaxIlInstructions ||
-            rawInstructions[^1].OperandOffset + rawInstructions[^1].OperandSize != il.Length ||
+        var rawInstructions = decoded.Instructions;
+        if (decoded.Status != IlDecodeStatus.Complete ||
+            rawInstructions.Count == 0 ||
             !TryGetInstructionName(rawInstructions[^1], out var finalName) ||
             finalName != "ret")
         {
@@ -864,7 +873,7 @@ internal static class ManagedSymbolReader
 
         var index = 0;
         SkipConstructorNops(rawInstructions, ref index);
-        if (index >= rawInstructions.Length ||
+        if (index >= rawInstructions.Count ||
             !TryGetInstructionName(rawInstructions[index], out var receiverName) ||
             receiverName != "ldarg.0")
         {
@@ -879,10 +888,10 @@ internal static class ManagedSymbolReader
             .Select(parameter => parameter.Signature)
             .ToArray();
         IlInstruction callInstruction = default;
-        while (index < rawInstructions.Length)
+        while (index < rawInstructions.Count)
         {
             SkipConstructorNops(rawInstructions, ref index);
-            if (index >= rawInstructions.Length ||
+            if (index >= rawInstructions.Count ||
                 !TryGetInstructionName(rawInstructions[index], out var name))
             {
                 return null;
@@ -1008,7 +1017,7 @@ internal static class ManagedSymbolReader
             index++;
         }
 
-        if (callInstruction.OperandSize != 4 || index + 1 >= rawInstructions.Length)
+        if (callInstruction.OperandSize != 4 || index + 1 >= rawInstructions.Count)
         {
             return null;
         }
@@ -1097,6 +1106,7 @@ internal static class ManagedSymbolReader
             body = TryReconstructLinearBody(
                 metadata,
                 il,
+                decoded,
                 isInstance: true,
                 parameterNames,
                 signature.ParameterTypes,
@@ -3523,22 +3533,25 @@ internal static class ManagedSymbolReader
         }
     }
 
-    private static void CollectCalls(
+    private static bool CollectCalls(
         MetadataReader metadata,
         byte[] il,
+        IlDecodeResult decoded,
         string caller,
         List<CallEdge> edges,
         HashSet<(string, string, string)> seenEdges)
     {
-        foreach (var instruction in EnumerateInstructions(il))
+        if (decoded.Status != IlDecodeStatus.Complete)
         {
-            if (edges.Count >= MaxCallEdges)
-            {
-                return;
-            }
+            return false;
+        }
 
+        var methodEdges = new List<(string Caller, string Callee, string Kind)>();
+        var methodSeen = new HashSet<(string, string, string)>();
+        foreach (var instruction in decoded.Instructions)
+        {
             var kind = CallKind(instruction.OpValue);
-            if (kind is null || instruction.OperandOffset + 4 > il.Length)
+            if (kind is null || instruction.OperandSize != 4)
             {
                 continue;
             }
@@ -3551,25 +3564,41 @@ internal static class ManagedSymbolReader
             }
 
             var edge = (caller, callee, kind);
-            if (seenEdges.Add(edge))
+            if (seenEdges.Contains(edge) || !methodSeen.Add(edge))
             {
-                edges.Add(new CallEdge { Caller = caller, Callee = callee, Kind = kind });
+                continue;
             }
+
+            if (methodEdges.Count >= MaxCallEdges - edges.Count)
+            {
+                return false;
+            }
+
+            methodEdges.Add(edge);
         }
+
+        foreach (var edge in methodEdges)
+        {
+            seenEdges.Add(edge);
+            edges.Add(new CallEdge
+            {
+                Caller = edge.Caller,
+                Callee = edge.Callee,
+                Kind = edge.Kind
+            });
+        }
+
+        return true;
     }
 
-    private static (IReadOnlyList<string> Instructions, bool Truncated) Disassemble(MetadataReader metadata, byte[] il)
+    private static (IReadOnlyList<string> Instructions, bool Truncated) Disassemble(
+        MetadataReader metadata,
+        byte[] il,
+        IlDecodeResult decoded)
     {
-        var instructions = new List<string>();
-        var truncated = false;
-        foreach (var instruction in EnumerateInstructions(il))
+        var instructions = new List<string>(decoded.Instructions.Count);
+        foreach (var instruction in decoded.Instructions)
         {
-            if (instructions.Count >= MaxIlInstructions)
-            {
-                truncated = true;
-                break;
-            }
-
             if (!OpCodesByValue.TryGetValue(instruction.OpValue, out var opCode))
             {
                 continue;
@@ -3579,16 +3608,35 @@ internal static class ManagedSymbolReader
             instructions.Add($"IL_{instruction.Offset:X4}: {opCode.Name}{operand}");
         }
 
-        return (instructions, truncated);
+        return (instructions, decoded.Status != IlDecodeStatus.Complete);
     }
 
     private readonly record struct IlInstruction(int Offset, short OpValue, int OperandOffset, int OperandSize);
 
-    private static IEnumerable<IlInstruction> EnumerateInstructions(byte[] il)
+    private enum IlDecodeStatus
     {
+        Complete,
+        Malformed,
+        BudgetExceeded
+    }
+
+    private sealed record IlDecodeResult(
+        IlDecodeStatus Status,
+        IReadOnlyList<IlInstruction> Instructions,
+        int ConsumedOffset);
+
+    private static IlDecodeResult DecodeInstructions(byte[] il)
+    {
+        var instructions = new List<IlInstruction>(Math.Min(il.Length, MaxIlInstructions));
         var position = 0;
+        var switchTargetCount = 0;
         while (position < il.Length)
         {
+            if (instructions.Count >= MaxIlInstructions)
+            {
+                return Finish(IlDecodeStatus.BudgetExceeded, position);
+            }
+
             var offset = position;
             short opValue;
             var first = il[position++];
@@ -3596,7 +3644,7 @@ internal static class ManagedSymbolReader
             {
                 if (position >= il.Length)
                 {
-                    yield break;
+                    return Finish(IlDecodeStatus.Malformed, offset);
                 }
 
                 opValue = (short)(0xFE00 | il[position++]);
@@ -3606,38 +3654,115 @@ internal static class ManagedSymbolReader
                 opValue = first;
             }
 
-            if (!OperandSizes.TryGetValue(opValue, out var operandSize))
+            if (!OpCodesByValue.TryGetValue(opValue, out var opCode) ||
+                opCode.Name is null ||
+                opCode.OpCodeType == OpCodeType.Nternal ||
+                !OperandSizes.TryGetValue(opValue, out var operandSize))
             {
-                yield break;
+                return Finish(IlDecodeStatus.Malformed, offset);
             }
 
             if (operandSize == OperandSwitch)
             {
-                if (position + 4 > il.Length)
+                if (il.Length - position < 4)
                 {
-                    yield break;
+                    return Finish(IlDecodeStatus.Malformed, offset);
                 }
 
                 var count = BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(position, 4));
-                if (count < 0 || count > (il.Length - position - 4) / 4)
+                if (count < 0)
                 {
-                    yield break;
+                    return Finish(IlDecodeStatus.Malformed, offset);
                 }
 
-                var total = 4 + (count * 4);
-                yield return new IlInstruction(offset, opValue, position, total);
-                position += total;
+                if (count > MaxIlSwitchTargets - switchTargetCount)
+                {
+                    return Finish(IlDecodeStatus.BudgetExceeded, offset);
+                }
+
+                var total = 4L + ((long)count * 4);
+                if (total > il.Length - position)
+                {
+                    return Finish(IlDecodeStatus.Malformed, offset);
+                }
+
+                var totalSize = (int)total;
+                instructions.Add(new IlInstruction(offset, opValue, position, totalSize));
+                position += totalSize;
+                switchTargetCount += count;
                 continue;
             }
 
-            if (operandSize < 0 || position + operandSize > il.Length)
+            if (operandSize < 0 || operandSize > il.Length - position)
             {
-                yield break;
+                return Finish(IlDecodeStatus.Malformed, offset);
             }
 
-            yield return new IlInstruction(offset, opValue, position, operandSize);
+            instructions.Add(new IlInstruction(offset, opValue, position, operandSize));
             position += operandSize;
         }
+
+        if (instructions.Count == 0)
+        {
+            return Finish(IlDecodeStatus.Malformed, 0);
+        }
+
+        var boundaries = instructions
+            .Select(instruction => instruction.Offset)
+            .ToHashSet();
+        foreach (var instruction in instructions)
+        {
+            var opCode = OpCodesByValue[instruction.OpValue];
+            switch (opCode.OperandType)
+            {
+                case OperandType.ShortInlineBrTarget:
+                    if (!IsValidTarget(
+                            (long)instruction.OperandOffset + 1 +
+                            (sbyte)il[instruction.OperandOffset]))
+                    {
+                        return Finish(IlDecodeStatus.Malformed, il.Length);
+                    }
+
+                    break;
+                case OperandType.InlineBrTarget:
+                    if (!IsValidTarget(
+                            (long)instruction.OperandOffset + 4 +
+                            BinaryPrimitives.ReadInt32LittleEndian(
+                                il.AsSpan(instruction.OperandOffset, 4))))
+                    {
+                        return Finish(IlDecodeStatus.Malformed, il.Length);
+                    }
+
+                    break;
+                case OperandType.InlineSwitch:
+                    var count = BinaryPrimitives.ReadInt32LittleEndian(
+                        il.AsSpan(instruction.OperandOffset, 4));
+                    var baseOffset = (long)instruction.OperandOffset + instruction.OperandSize;
+                    for (var targetIndex = 0; targetIndex < count; targetIndex++)
+                    {
+                        var deltaOffset = instruction.OperandOffset + 4 + (targetIndex * 4);
+                        if (!IsValidTarget(
+                                baseOffset + BinaryPrimitives.ReadInt32LittleEndian(
+                                    il.AsSpan(deltaOffset, 4))))
+                        {
+                            return Finish(IlDecodeStatus.Malformed, il.Length);
+                        }
+                    }
+
+                    break;
+            }
+        }
+
+        return Finish(IlDecodeStatus.Complete, il.Length);
+
+        bool IsValidTarget(long target) =>
+            target >= 0 &&
+            target < il.Length &&
+            target <= int.MaxValue &&
+            boundaries.Contains((int)target);
+
+        IlDecodeResult Finish(IlDecodeStatus status, int consumedOffset) =>
+            new(status, [.. instructions], consumedOffset);
     }
 
     private static string FormatOperand(MetadataReader metadata, byte[] il, IlInstruction instruction, OperandType operandType)
@@ -3884,6 +4009,20 @@ internal static class ManagedSymbolReader
         ExceptionLeaveRedirect? LeaveRedirect,
         int CatchDepth);
 
+    internal readonly record struct IlDecodeTestResult(
+        string Status,
+        int InstructionCount,
+        int ConsumedOffset);
+
+    internal static IlDecodeTestResult DecodeIlForTest(byte[] il)
+    {
+        var decoded = DecodeInstructions(il);
+        return new IlDecodeTestResult(
+            decoded.Status.ToString(),
+            decoded.Instructions.Count,
+            decoded.ConsumedOffset);
+    }
+
     // 測試用進入點：以現成的 MetadataReader 直接餵 IL bytes 驗證還原結果。
     internal static IReadOnlyList<string>? ReconstructBodyForTest(
         MetadataReader metadata,
@@ -3898,6 +4037,7 @@ internal static class ManagedSymbolReader
         return TryReconstructLinearBody(
             metadata,
             il,
+            DecodeInstructions(il),
             isInstance,
             new Dictionary<int, string>(),
             (parameterTypes ?? []).Select(type => CreateTestCliType(type, enumTypes)).ToArray(),
@@ -3925,6 +4065,7 @@ internal static class ManagedSymbolReader
             return TryReconstructLinearBody(
                 metadata,
                 il,
+                DecodeInstructions(il),
                 isInstance,
                 ReadParameterNames(metadata, method),
                 signature.ParameterTypes.Select(type => CreateCliType(type, enumTypes)).ToArray(),
@@ -4015,6 +4156,7 @@ internal static class ManagedSymbolReader
             var reconstruction = TryReconstructConstructor(
                 metadata,
                 il,
+                DecodeInstructions(il),
                 methodHandle,
                 declaringType,
                 definition.BaseType,
@@ -4041,12 +4183,60 @@ internal static class ManagedSymbolReader
         }
     }
 
+    private static bool HasSupportedMethodTermination(
+        IReadOnlyList<IlInstruction> instructions,
+        IReadOnlyList<ExceptionRegionInfo> exceptionRegions,
+        int ilLength)
+    {
+        if (TryGetInstructionName(instructions[^1], out var terminalName) &&
+            terminalName is "ret" or "throw" or "rethrow")
+        {
+            return true;
+        }
+
+        if (terminalName != "endfinally")
+        {
+            return false;
+        }
+
+        foreach (var region in exceptionRegions)
+        {
+            if (region.Kind is not (ExceptionRegionKind.Finally or ExceptionRegionKind.Fault) ||
+                region.HandlerOffset < 0 ||
+                region.HandlerLength <= 0 ||
+                (long)region.HandlerOffset + region.HandlerLength != ilLength ||
+                region.TryOffset < 0 ||
+                region.TryLength <= 0)
+            {
+                continue;
+            }
+
+            var tryEnd = (long)region.TryOffset + region.TryLength;
+            if (tryEnd > region.HandlerOffset || tryEnd > int.MaxValue)
+            {
+                continue;
+            }
+
+            var protectedTerminal = instructions.LastOrDefault(instruction =>
+                instruction.Offset >= region.TryOffset &&
+                (long)instruction.OperandOffset + instruction.OperandSize == tryEnd);
+            if (TryGetInstructionName(protectedTerminal, out var protectedTerminalName) &&
+                protectedTerminalName is "throw" or "rethrow")
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     // 把方法的 IL 還原成 C#。先解碼成指令陣列，再用區間遞迴結構化還原 if／if-else（可巢狀）。
     // 採全有或全無：遇到無法安全切開的迴圈、非終止型 switch、不支援的例外區域或任何無法結構化的跳轉就整個方法放棄，
     // 退回 IL 註解，寧可不還原也不要產出語意錯誤的程式碼。輸出的 C# 不保證能編譯，但語意貼近原程式。
     private static IReadOnlyList<string>? TryReconstructLinearBody(
         MetadataReader metadata,
         byte[] il,
+        IlDecodeResult decoded,
         bool isInstance,
         Dictionary<int, string> parameterNames,
         IReadOnlyList<CliType> parameterTypes,
@@ -4059,9 +4249,19 @@ internal static class ManagedSymbolReader
         int startOffset = 0)
     {
         requiresUnsafeContext = false;
+        if (decoded.Status != IlDecodeStatus.Complete ||
+            decoded.Instructions.Count == 0 ||
+            !HasSupportedMethodTermination(
+                decoded.Instructions,
+                exceptionRegions,
+                il.Length))
+        {
+            return null;
+        }
+
         var instructions = new List<Instr>();
         var offsetToIndex = new Dictionary<int, int>();
-        foreach (var instruction in EnumerateInstructions(il))
+        foreach (var instruction in decoded.Instructions)
         {
             if (!OpCodesByValue.TryGetValue(instruction.OpValue, out var opCode))
             {

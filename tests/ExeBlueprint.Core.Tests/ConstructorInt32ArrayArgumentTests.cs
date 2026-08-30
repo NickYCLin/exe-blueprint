@@ -51,6 +51,7 @@ public sealed class ConstructorInt32ArrayArgumentTests
     [InlineData(Mutation.TargetByRefArray)]
     [InlineData(Mutation.TargetMultidimensionalArray)]
     [InlineData(Mutation.ThisConstructor)]
+    [InlineData(Mutation.MalformedSuffix)]
     public void RejectsUnprovenInt32ArrayArgument(Mutation mutation)
     {
         using var fixture = CreateFixture(mutation);
@@ -323,6 +324,11 @@ public sealed class ConstructorInt32ArrayArgumentTests
         il.Add(0x28); // call
         AppendInt32(il, constructorToken);
         il.Add(0x2A); // ret
+        if (mutation == Mutation.MalformedSuffix)
+        {
+            il.Add(0xA6); // unknown opcode after otherwise valid constructor
+        }
+
         return [.. il];
     }
 
@@ -384,7 +390,8 @@ public sealed class ConstructorInt32ArrayArgumentTests
         TargetModifiedElement,
         TargetByRefArray,
         TargetMultidimensionalArray,
-        ThisConstructor
+        ThisConstructor,
+        MalformedSuffix
     }
 
     private sealed class MetadataFixture(
