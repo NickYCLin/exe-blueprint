@@ -1958,6 +1958,12 @@ internal static class ManagedSymbolReader
 
     private readonly record struct StructuredException(IReadOnlyList<string> Statements, int NextIndex);
 
+    private sealed record BranchStoreFlow(
+        bool HasNormalExit,
+        HashSet<int> DefinitelyStored,
+        HashSet<int> StoredAnywhere,
+        HashSet<int> ReadBeforeStore);
+
     private readonly record struct ExceptionLeaveRedirect(int JoinOffset, int TargetOffset);
 
     private sealed record CatchHandlerShape(
@@ -2384,7 +2390,44 @@ internal static class ManagedSymbolReader
                 var doWhileEnd = TryMatchDoWhileLoop(instructions, index, end);
                 if (doWhileEnd is int branchIndex)
                 {
-                    var processed = TryProcessStraightLine(context, instructions, index, branchIndex, declaredLocals);
+                    var doWhileInstructions = instructions[index..branchIndex];
+                    var doWhileLocals = doWhileInstructions
+                        .Select(instruction => TryGetStoredLocalIndex(context, instruction))
+                        .Where(localIndex => localIndex is not null && !declaredLocals.Contains(localIndex.Value))
+                        .Select(localIndex => localIndex!.Value)
+                        .Distinct()
+                        .Order()
+                        .ToArray();
+                    foreach (var localIndex in doWhileLocals)
+                    {
+                        if (localIndex < 0 || localIndex >= context.LocalTypes.Count)
+                        {
+                            return null;
+                        }
+
+                        var firstAccess = doWhileInstructions.First(instruction =>
+                            TryGetAccessedLocalIndex(context, instruction) == localIndex);
+                        if (TryGetStoredLocalIndex(context, firstAccess) != localIndex)
+                        {
+                            return null;
+                        }
+
+                        var type = LocalDeclarationType(context, localIndex);
+                        if (type == "var" || IsGeneratedName(type))
+                        {
+                            return null;
+                        }
+
+                        declaredLocals.Add(localIndex);
+                        statements.Add($"{type} {LocalName(context, localIndex)};");
+                    }
+
+                    var processed = TryProcessStraightLine(
+                        context,
+                        instructions,
+                        index,
+                        branchIndex,
+                        new HashSet<int>(declaredLocals));
                     if (processed is null ||
                         !TryBuildTakenCondition(context, instructions[branchIndex].Name, processed.Value.Stack, out var doCondition) ||
                         processed.Value.Stack.Count != 0)
@@ -2467,7 +2510,30 @@ internal static class ManagedSymbolReader
                     return null;
                 }
 
-                var loopBody = TryStructure(context, instructions, offsetToIndex, loop.Value.BodyStart, loop.Value.BodyEnd, declaredLocals, depth + 1);
+                var loopScopedLocals = instructions[loop.Value.BodyStart..loop.Value.BodyEnd]
+                    .Select(instruction => TryGetStoredLocalIndex(context, instruction))
+                    .Where(localIndex => localIndex is not null && !declaredLocals.Contains(localIndex.Value))
+                    .Select(localIndex => localIndex!.Value)
+                    .ToHashSet();
+                var loopContinuationLocals = instructions[loop.Value.JoinIndex..end]
+                    .Select(instruction => TryGetAccessedLocalIndex(context, instruction))
+                    .Where(localIndex => localIndex is not null && !declaredLocals.Contains(localIndex.Value))
+                    .Select(localIndex => localIndex!.Value)
+                    .ToHashSet();
+                loopScopedLocals.IntersectWith(loopContinuationLocals);
+                if (loopScopedLocals.Count > 0)
+                {
+                    return null;
+                }
+
+                var loopBody = TryStructure(
+                    context,
+                    instructions,
+                    offsetToIndex,
+                    loop.Value.BodyStart,
+                    loop.Value.BodyEnd,
+                    new HashSet<int>(declaredLocals),
+                    depth + 1);
                 if (loopBody is null)
                 {
                     return null;
@@ -2517,7 +2583,100 @@ internal static class ManagedSymbolReader
                 return null;
             }
 
-            var thenStatements = TryStructure(context, instructions, offsetToIndex, index + 1, thenEnd, declaredLocals, depth + 1);
+            var continuationLocals = instructions[joinIndex..end]
+                .Select(instruction => TryGetAccessedLocalIndex(context, instruction))
+                .Where(localIndex => localIndex is not null && !declaredLocals.Contains(localIndex.Value))
+                .Select(localIndex => localIndex!.Value)
+                .ToHashSet();
+            if (continuationLocals.Any(localIndex => localIndex < 0 || localIndex >= context.LocalTypes.Count))
+            {
+                return null;
+            }
+
+            HashSet<int> hoistedLocals = [];
+            var potentialCrossScopeLocals = instructions[(index + 1)..thenEnd]
+                .Select(instruction => TryGetStoredLocalIndex(context, instruction))
+                .Where(localIndex => localIndex is not null)
+                .Select(localIndex => localIndex!.Value)
+                .ToHashSet();
+            if (elseStart >= 0)
+            {
+                potentialCrossScopeLocals.UnionWith(
+                    instructions[elseStart..elseEnd]
+                        .Select(instruction => TryGetStoredLocalIndex(context, instruction))
+                        .Where(localIndex => localIndex is not null)
+                        .Select(localIndex => localIndex!.Value));
+            }
+
+            potentialCrossScopeLocals.IntersectWith(continuationLocals);
+            if (potentialCrossScopeLocals.Count > 0)
+            {
+                var thenFlow = TryAnalyzeBranchStores(
+                    context,
+                    instructions,
+                    offsetToIndex,
+                    index + 1,
+                    thenEnd);
+                var elseFlow = elseStart >= 0
+                    ? TryAnalyzeBranchStores(context, instructions, offsetToIndex, elseStart, elseEnd)
+                    : new BranchStoreFlow(true, [], [], []);
+                if (thenFlow is null || elseFlow is null)
+                {
+                    return null;
+                }
+
+                var normalFlows = new[] { thenFlow, elseFlow }
+                    .Where(flow => flow.HasNormalExit)
+                    .ToArray();
+                var definitelyStored = new HashSet<int>();
+                if (normalFlows.Length > 0)
+                {
+                    definitelyStored.UnionWith(normalFlows[0].DefinitelyStored);
+                    foreach (var flow in normalFlows.Skip(1))
+                    {
+                        definitelyStored.IntersectWith(flow.DefinitelyStored);
+                    }
+                }
+
+                var crossScopeLocals = new HashSet<int>(thenFlow.StoredAnywhere);
+                crossScopeLocals.UnionWith(elseFlow.StoredAnywhere);
+                crossScopeLocals.IntersectWith(continuationLocals);
+                var readBeforeStore = new HashSet<int>(thenFlow.ReadBeforeStore);
+                readBeforeStore.UnionWith(elseFlow.ReadBeforeStore);
+                if (!crossScopeLocals.IsSubsetOf(definitelyStored) ||
+                    crossScopeLocals.Overlaps(readBeforeStore))
+                {
+                    return null;
+                }
+
+                hoistedLocals.UnionWith(crossScopeLocals);
+            }
+
+            foreach (var localIndex in hoistedLocals.Order())
+            {
+                if (declaredLocals.Contains(localIndex))
+                {
+                    continue;
+                }
+
+                var type = LocalDeclarationType(context, localIndex);
+                if (type == "var" || IsGeneratedName(type))
+                {
+                    return null;
+                }
+
+                declaredLocals.Add(localIndex);
+                statements.Add($"{type} {LocalName(context, localIndex)};");
+            }
+
+            var thenStatements = TryStructure(
+                context,
+                instructions,
+                offsetToIndex,
+                index + 1,
+                thenEnd,
+                new HashSet<int>(declaredLocals),
+                depth + 1);
             if (thenStatements is null)
             {
                 return null;
@@ -2526,7 +2685,14 @@ internal static class ManagedSymbolReader
             List<string>? elseStatements = null;
             if (elseStart >= 0)
             {
-                elseStatements = TryStructure(context, instructions, offsetToIndex, elseStart, elseEnd, declaredLocals, depth + 1);
+                elseStatements = TryStructure(
+                    context,
+                    instructions,
+                    offsetToIndex,
+                    elseStart,
+                    elseEnd,
+                    new HashSet<int>(declaredLocals),
+                    depth + 1);
                 if (elseStatements is null)
                 {
                     return null;
@@ -3590,6 +3756,183 @@ internal static class ManagedSymbolReader
         _ => null
     };
 
+    private static int? TryGetAccessedLocalIndex(ReconContext context, Instr instruction) =>
+        TryGetLoadedLocalIndex(context, instruction) ?? TryGetStoredLocalIndex(context, instruction);
+
+    // if/else 內宣告的 C# local 不會自動跨出大括號；只有每一條能正常抵達 join 的
+    // forward path 都已 stloc，才可在 if 前輸出沒有 initializer 的宣告。終止於 ret/throw
+    // 的 path 不參與交集，回邊、leave、越界 target 與非法 local index 一律 fail closed。
+    private static BranchStoreFlow? TryAnalyzeBranchStores(
+        ReconContext context,
+        Instr[] instructions,
+        Dictionary<int, int> offsetToIndex,
+        int start,
+        int end)
+    {
+        if (start < 0 || start > end || end > instructions.Length)
+        {
+            return null;
+        }
+
+        for (var index = start; index < end; index++)
+        {
+            if (context.ExceptionRegions.Any(region =>
+                    IsInsideExceptionRegion(instructions[index].Offset, region)))
+            {
+                return null;
+            }
+        }
+
+        if (start == end)
+        {
+            return new BranchStoreFlow(true, [], [], []);
+        }
+
+        var entries = new Dictionary<int, HashSet<int>>
+        {
+            [start] = []
+        };
+        HashSet<int>? exitStores = null;
+        HashSet<int> storedAnywhere = [];
+        HashSet<int> readBeforeStore = [];
+
+        for (var index = start; index < end; index++)
+        {
+            if (!entries.TryGetValue(index, out var incoming))
+            {
+                continue;
+            }
+
+            var instruction = instructions[index];
+            var outgoing = new HashSet<int>(incoming);
+            if (TryGetLoadedLocalIndex(context, instruction) is int loadedLocal &&
+                !incoming.Contains(loadedLocal))
+            {
+                readBeforeStore.Add(loadedLocal);
+            }
+
+            if (TryGetStoredLocalIndex(context, instruction) is int storedLocal)
+            {
+                if (storedLocal < 0 || storedLocal >= context.LocalTypes.Count)
+                {
+                    return null;
+                }
+
+                outgoing.Add(storedLocal);
+                storedAnywhere.Add(storedLocal);
+            }
+
+            if (instruction.Name is "ret" or "throw" or "rethrow")
+            {
+                continue;
+            }
+
+            if (instruction.Name is "br" or "br.s")
+            {
+                if (!TryMerge(instruction.Target, index, outgoing))
+                {
+                    return null;
+                }
+
+                continue;
+            }
+
+            if (instruction.Name == "switch")
+            {
+                foreach (var target in instruction.SwitchTargets)
+                {
+                    if (!TryMerge(target, index, outgoing))
+                    {
+                        return null;
+                    }
+                }
+
+                if (!TryMergeIndex(index + 1, index, outgoing))
+                {
+                    return null;
+                }
+
+                continue;
+            }
+
+            if (instruction.IsBranch)
+            {
+                if (!IsSupportedConditionalBranch(instruction.Name) ||
+                    !TryMerge(instruction.Target, index, outgoing) ||
+                    !TryMergeIndex(index + 1, index, outgoing))
+                {
+                    return null;
+                }
+
+                continue;
+            }
+
+            if (!TryMergeIndex(index + 1, index, outgoing))
+            {
+                return null;
+            }
+        }
+
+        return new BranchStoreFlow(
+            exitStores is not null,
+            exitStores ?? [],
+            storedAnywhere,
+            readBeforeStore);
+
+        bool TryMerge(int targetOffset, int predecessor, HashSet<int> stores)
+        {
+            return offsetToIndex.TryGetValue(targetOffset, out var successor) &&
+                   TryMergeIndex(successor, predecessor, stores);
+        }
+
+        bool TryMergeIndex(int successor, int predecessor, HashSet<int> stores)
+        {
+            if (successor == end)
+            {
+                if (exitStores is null)
+                {
+                    exitStores = new HashSet<int>(stores);
+                }
+                else
+                {
+                    exitStores.IntersectWith(stores);
+                }
+
+                return true;
+            }
+
+            if (successor < start || successor > end || successor <= predecessor)
+            {
+                return false;
+            }
+
+            if (entries.TryGetValue(successor, out var existing))
+            {
+                existing.IntersectWith(stores);
+            }
+            else
+            {
+                entries[successor] = new HashSet<int>(stores);
+            }
+
+            return true;
+        }
+    }
+
+    private static bool IsSupportedConditionalBranch(string name) => name is
+        "brtrue" or "brtrue.s" or
+        "brfalse" or "brfalse.s" or
+        "beq" or "beq.s" or
+        "bne.un" or "bne.un.s" or
+        "bge" or "bge.s" or
+        "bge.un" or "bge.un.s" or
+        "bgt" or "bgt.s" or
+        "bgt.un" or "bgt.un.s" or
+        "ble" or "ble.s" or
+        "ble.un" or "ble.un.s" or
+        "blt" or "blt.s" or
+        "blt.un" or "blt.un.s";
+
     // 依分支指令算出「順順落下（fall-through）」時的 C# 條件，也就是不跳轉時該執行 then 區塊的條件。
     private static bool TryBuildCondition(ReconContext context, string name, Stack<string> stack, out string condition)
     {
@@ -3962,12 +4305,22 @@ internal static class ManagedSymbolReader
     private static void PushArgument(ReconContext context, Stack<string> stack, int slot) =>
         PushExpression(context, stack, ArgName(context, slot), ArgType(context, slot));
 
-    private static void PushLocal(ReconContext context, Stack<string> stack, int index) =>
-        PushExpression(
-            context,
-            stack,
-            LocalName(context, index),
-            index >= 0 && index < context.LocalTypes.Count ? context.LocalTypes[index] : null);
+    private static bool TryPushLocal(
+        ReconContext context,
+        Stack<string> stack,
+        HashSet<int> declaredLocals,
+        int index)
+    {
+        if (index < 0 ||
+            index >= context.LocalTypes.Count ||
+            !declaredLocals.Contains(index))
+        {
+            return false;
+        }
+
+        PushExpression(context, stack, LocalName(context, index), context.LocalTypes[index]);
+        return true;
+    }
 
     private static void PushExpression(ReconContext context, Stack<string> stack, string expression, CliType? type)
     {
@@ -4153,14 +4506,19 @@ internal static class ManagedSymbolReader
             case "ldloc.1":
             case "ldloc.2":
             case "ldloc.3":
-                PushLocal(context, stack, int.Parse(name["ldloc.".Length..]));
-                return true;
+                return TryPushLocal(
+                    context,
+                    stack,
+                    declaredLocals,
+                    int.Parse(name["ldloc.".Length..]));
             case "ldloc.s":
-                PushLocal(context, stack, il[offset]);
-                return true;
+                return TryPushLocal(context, stack, declaredLocals, il[offset]);
             case "ldloc":
-                PushLocal(context, stack, BinaryPrimitives.ReadUInt16LittleEndian(il.AsSpan(offset, 2)));
-                return true;
+                return TryPushLocal(
+                    context,
+                    stack,
+                    declaredLocals,
+                    BinaryPrimitives.ReadUInt16LittleEndian(il.AsSpan(offset, 2)));
             case "stloc.0":
             case "stloc.1":
             case "stloc.2":
@@ -5336,14 +5694,12 @@ internal static class ManagedSymbolReader
 
     private static bool TryStoreLocal(ReconContext context, Stack<string> stack, List<string> statements, HashSet<int> declaredLocals, int index)
     {
-        if (!TryPop(stack, out var value))
+        if (index < 0 || index >= context.LocalTypes.Count || !TryPop(stack, out var value))
         {
             return false;
         }
 
-        var localType = index >= 0 && index < context.LocalTypes.Count
-            ? context.LocalTypes[index]
-            : null;
+        var localType = context.LocalTypes[index];
         if (!TryRenderTargetExpression(context, value, localType, out value))
         {
             return false;

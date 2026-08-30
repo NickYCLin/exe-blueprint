@@ -121,6 +121,285 @@ public sealed class IlBodyReconstructionTests
     }
 
     [Fact]
+    public void HoistsOnlyLocalsAssignedOnEveryNormalBranchPath()
+    {
+        byte[] simpleDiamond =
+        [
+            0x02,             // ldarg.0
+            0x2C, 0x04,       // brfalse.s ELSE
+            0x17, 0x0A,       // ldc.i4.1; stloc.0
+            0x2B, 0x02,       // br.s JOIN
+            0x18, 0x0A,       // ELSE: ldc.i4.2; stloc.0
+            0x06, 0x2A        // JOIN: ldloc.0; ret
+        ];
+        byte[] nestedDiamond =
+        [
+            0x02, 0x2C, 0x04, // if (!arg0) goto OUTER_ELSE
+            0x17, 0x0A,       // v0 = true
+            0x2B, 0x09,       // goto JOIN
+            0x03, 0x2C, 0x04, // OUTER_ELSE: if (!arg1) goto INNER_ELSE
+            0x16, 0x0A,       // v0 = false
+            0x2B, 0x02,       // goto JOIN
+            0x17, 0x0A,       // INNER_ELSE: v0 = true
+            0x06, 0x2A        // JOIN: return v0
+        ];
+        byte[] terminalSibling =
+        [
+            0x02, 0x2C, 0x04, // if (!arg0) goto OUTER_ELSE
+            0x17, 0x0A,       // v0 = 1
+            0x2B, 0x0A,       // goto JOIN
+            0x03, 0x2C, 0x04, // OUTER_ELSE: if (!arg1) goto INNER_ELSE
+            0x18, 0x0A,       // v0 = 2
+            0x2B, 0x03,       // goto JOIN
+            0x1F, 0x09, 0x2A, // INNER_ELSE: return 9
+            0x06, 0x2A        // JOIN: return v0
+        ];
+
+        Assert.Equal(
+            [
+                "int v0;",
+                "if (arg0)",
+                "{",
+                "    v0 = 1;",
+                "}",
+                "else",
+                "{",
+                "    v0 = 2;",
+                "}",
+                "return v0;"
+            ],
+            Reconstruct(simpleDiamond, false, "int", localTypes: ["int"], parameterTypes: ["bool"]));
+        Assert.Equal(
+            [
+                "bool v0;",
+                "if (arg0)",
+                "{",
+                "    v0 = true;",
+                "}",
+                "else",
+                "{",
+                "    if (arg1)",
+                "    {",
+                "        v0 = false;",
+                "    }",
+                "    else",
+                "    {",
+                "        v0 = true;",
+                "    }",
+                "}",
+                "return v0;"
+            ],
+            Reconstruct(
+                nestedDiamond,
+                false,
+                "bool",
+                localTypes: ["bool"],
+                parameterTypes: ["bool", "bool"]));
+        Assert.Equal(
+            [
+                "int v0;",
+                "if (arg0)",
+                "{",
+                "    v0 = 1;",
+                "}",
+                "else",
+                "{",
+                "    if (arg1)",
+                "    {",
+                "        v0 = 2;",
+                "    }",
+                "    else",
+                "    {",
+                "        return 9;",
+                "    }",
+                "}",
+                "return v0;"
+            ],
+            Reconstruct(
+                terminalSibling,
+                false,
+                "int",
+                localTypes: ["int"],
+                parameterTypes: ["bool", "bool"]));
+    }
+
+    [Fact]
+    public void HoistsDoWhileLocalAssignedBeforeItsFirstRead()
+    {
+        byte[] il =
+        [
+            0x17, 0x0A,       // BODY: v0 = 1
+            0x02, 0x2D, 0xFB, // while (arg0)
+            0x06, 0x2A        // return v0
+        ];
+
+        Assert.Equal(
+            [
+                "int v0;",
+                "do",
+                "{",
+                "    v0 = 1;",
+                "} while (arg0);",
+                "return v0;"
+            ],
+            Reconstruct(il, false, "int", localTypes: ["int"], parameterTypes: ["bool"]));
+    }
+
+    [Fact]
+    public void RejectsBranchLocalsWithoutDefiniteAssignmentOrRepresentableType()
+    {
+        byte[] missingNestedPath =
+        [
+            0x02, 0x2C, 0x04, // if (!arg0) goto OUTER_ELSE
+            0x17, 0x0A,       // v0 = 1
+            0x2B, 0x05,       // goto JOIN
+            0x03, 0x2C, 0x02, // OUTER_ELSE: if (!arg1) goto JOIN
+            0x16, 0x0A,       // v0 = 0
+            0x06, 0x2A        // JOIN: return v0
+        ];
+        byte[] outOfRangeLocal =
+        [
+            0x02, 0x2C, 0x05,       // if (!arg0) goto ELSE
+            0x17, 0x13, 0x01,       // stloc.s 1
+            0x2B, 0x03,             // goto JOIN
+            0x18, 0x13, 0x01,       // ELSE: stloc.s 1
+            0x11, 0x01, 0x2A        // JOIN: ldloc.s 1; ret
+        ];
+        byte[] unreachableStore =
+        [
+            0x02, 0x2C, 0x07, // if (!arg0) goto ELSE
+            0x2B, 0x02,       // skip unreachable store
+            0x17, 0x0A,       // unreachable: v0 = 1
+            0x00,             // normal then path
+            0x2B, 0x02,       // goto JOIN
+            0x18, 0x0A,       // ELSE: v0 = 2
+            0x06, 0x2A        // JOIN: return v0
+        ];
+        byte[] branchBackedge =
+        [
+            0x02, 0x2C, 0x07, // if (!arg0) goto ELSE
+            0x17, 0x0A,       // v0 = 1
+            0x03, 0x2D, 0xFD, // while (arg1), backedge to ldarg.1
+            0x2B, 0x02,       // goto JOIN
+            0x18, 0x0A,       // ELSE: v0 = 2
+            0x06, 0x2A        // JOIN: return v0
+        ];
+        byte[] laterOuterStore =
+        [
+            0x02, 0x2C, 0x02, // if (!arg0) goto JOIN
+            0x17, 0x0A,       // branch-local v0 = 1
+            0x18, 0x0A,       // JOIN: outer v0 = 2
+            0x06, 0x2A        // return v0
+        ];
+        byte[] exceptionEdge =
+        [
+            0x02, 0x2C, 0x07, // if (!arg0) goto ELSE
+            0x14, 0x7A,       // try { throw null; }
+            0x26,             // catch prologue: pop
+            0xDE, 0x00,       // leave.s THEN_END
+            0x2B, 0x02,       // THEN_END: goto JOIN
+            0x17, 0x0A,       // ELSE: v0 = 1
+            0x06, 0x2A        // JOIN: return v0
+        ];
+        var exceptionRegions = new[]
+        {
+            new ManagedSymbolReader.ExceptionRegionInfo(
+                ExceptionRegionKind.Catch,
+                TryOffset: 3,
+                TryLength: 2,
+                HandlerOffset: 5,
+                HandlerLength: 3,
+                CatchType: "System.Exception")
+        };
+        byte[] loopScopeCollision =
+        [
+            0x2B, 0x02,       // goto CONDITION
+            0x17, 0x0A,       // BODY: branch-local v0 = 1
+            0x02, 0x2D, 0xFB, // CONDITION: while (arg0)
+            0x18, 0x0A,       // outer v0 = 2
+            0x2A              // ret
+        ];
+        byte[] branchReadBeforeStore =
+        [
+            0x02, 0x2C, 0x06, // if (!arg0) goto ELSE
+            0x06, 0x26,       // invalid before assignment: pop v0
+            0x17, 0x0A,       // v0 = 1
+            0x2B, 0x02,       // goto JOIN
+            0x18, 0x0A,       // ELSE: v0 = 2
+            0x06, 0x2A        // JOIN: return v0
+        ];
+        byte[] doWhileReadBeforeStore =
+        [
+            0x06, 0x26,       // BODY: invalid before assignment: pop v0
+            0x17, 0x0A,       // v0 = 1
+            0x02, 0x2D, 0xF9, // while (arg0)
+            0x2A              // ret
+        ];
+
+        Assert.Null(Reconstruct(
+            missingNestedPath,
+            false,
+            "int",
+            localTypes: ["int"],
+            parameterTypes: ["bool", "bool"]));
+        Assert.Null(Reconstruct(
+            outOfRangeLocal,
+            false,
+            "int",
+            localTypes: ["int"],
+            parameterTypes: ["bool"]));
+        Assert.Null(Reconstruct(
+            unreachableStore,
+            false,
+            "int",
+            localTypes: ["int"],
+            parameterTypes: ["bool"]));
+        Assert.Null(Reconstruct(
+            branchBackedge,
+            false,
+            "int",
+            localTypes: ["int"],
+            parameterTypes: ["bool", "bool"]));
+        Assert.Null(Reconstruct(
+            laterOuterStore,
+            false,
+            "int",
+            localTypes: ["int"],
+            parameterTypes: ["bool"]));
+        Assert.Null(Reconstruct(
+            exceptionEdge,
+            false,
+            "int",
+            localTypes: ["int"],
+            exceptionRegions: exceptionRegions,
+            parameterTypes: ["bool"]));
+        Assert.Null(Reconstruct(
+            loopScopeCollision,
+            false,
+            "void",
+            localTypes: ["int"],
+            parameterTypes: ["bool"]));
+        Assert.Null(Reconstruct(
+            branchReadBeforeStore,
+            false,
+            "int",
+            localTypes: ["int"],
+            parameterTypes: ["bool"]));
+        Assert.Null(Reconstruct(
+            doWhileReadBeforeStore,
+            false,
+            "void",
+            localTypes: ["int"],
+            parameterTypes: ["bool"]));
+        Assert.Null(Reconstruct(
+            [0x02, 0x2C, 0x04, 0x17, 0x0A, 0x2B, 0x02, 0x18, 0x0A, 0x06, 0x2A],
+            false,
+            "int",
+            localTypes: ["ref int"],
+            parameterTypes: ["bool"]));
+    }
+
+    [Fact]
     public void PreservesEarlyVoidReturnInsideIfAndOmitsOnlyFinalReturn()
     {
         // static void M(bool stop, int value) { if (stop) return; value = 1; }
