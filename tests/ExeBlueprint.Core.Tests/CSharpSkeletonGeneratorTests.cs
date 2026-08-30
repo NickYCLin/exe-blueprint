@@ -74,6 +74,142 @@ public sealed class CSharpSkeletonGeneratorTests
     }
 
     [Fact]
+    public void EmitsWhitelistedConstructorInitializersAndReconstructedBodies()
+    {
+        var artifact = CreateManagedArtifact("ConstructorCases", []) with
+        {
+            Code = new CodeModel
+            {
+                Kind = "managed",
+                NamespaceCount = 1,
+                TypeCount = 1,
+                Types =
+                [
+                    new TypeModel
+                    {
+                        FullName = "ConstructorCases.GenericOwner",
+                        Namespace = "ConstructorCases",
+                        Name = "GenericOwner",
+                        Kind = "class",
+                        Accessibility = "public",
+                        GenericParameters = ["T"],
+                        Methods =
+                        [
+                            new MethodModel
+                            {
+                                Name = ".ctor",
+                                Signature = "void .ctor(!0 value)",
+                                ReturnType = "void",
+                                Accessibility = "public",
+                                IsConstructor = true,
+                                Parameters =
+                                [
+                                    new ParameterModel
+                                    {
+                                        Name = "value",
+                                        Type = "!0"
+                                    }
+                                ],
+                                ConstructorInitializer = new ConstructorInitializerModel
+                                {
+                                    Kind = "base",
+                                    Arguments = ["value", "typeof(!0)", "\"!0\""]
+                                },
+                                BodyReconstructed = true,
+                                Body = ["this.Value = value;", "var token = \"!0\";"]
+                            },
+                            new MethodModel
+                            {
+                                Name = ".ctor",
+                                Signature = "void .ctor(int value)",
+                                ReturnType = "void",
+                                Accessibility = "protected",
+                                IsConstructor = true,
+                                Parameters =
+                                [
+                                    new ParameterModel
+                                    {
+                                        Name = "value",
+                                        Type = "int"
+                                    }
+                                ],
+                                ConstructorInitializer = new ConstructorInitializerModel
+                                {
+                                    Kind = "this",
+                                    Arguments = ["default(!0)"]
+                                },
+                                Body = ["throw new global::System.Exception();"]
+                            },
+                            new MethodModel
+                            {
+                                Name = ".ctor",
+                                Signature = "void .ctor(double value)",
+                                ReturnType = "void",
+                                Accessibility = "internal",
+                                IsConstructor = true,
+                                Parameters =
+                                [
+                                    new ParameterModel
+                                    {
+                                        Name = "value",
+                                        Type = "double"
+                                    }
+                                ],
+                                ConstructorInitializer = new ConstructorInitializerModel
+                                {
+                                    Kind = "global::System.Console.WriteLine",
+                                    Arguments = ["value"]
+                                },
+                                BodyReconstructed = true
+                            }
+                        ]
+                    }
+                ]
+            }
+        };
+        var document = new BlueprintDocument
+        {
+            Input = new InputDescriptor
+            {
+                Name = "constructor-cases",
+                Kind = "file",
+                SourcePath = "ConstructorCases.dll",
+                FileCount = 1,
+                TotalBytes = 0
+            },
+            Summary = new BlueprintSummary(),
+            Files = [artifact]
+        };
+
+        var source = Assert.Single(
+            CSharpSkeletonGenerator.Generate(document),
+            file => file.RelativePath == "ConstructorCases/ConstructorCases.cs").Content.ReplaceLineEndings("\n");
+
+        Assert.Contains(
+            "public GenericOwner(T value) : base(value, typeof(T), \"!0\")\n" +
+            "    {\n" +
+            "        this.Value = value;\n" +
+            "        var token = \"!0\";\n" +
+            "    }",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "protected GenericOwner(int value) : this(default(T))\n" +
+            "    {\n" +
+            "    }",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "internal GenericOwner(double value)\n" +
+            "    {\n" +
+            "    }",
+            source,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("throw new global::System.Exception();", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("global::System.Console.WriteLine", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task PreservesMemberShapesInGeneratedCSharp()
     {
         var assemblyPath = typeof(MemberShapeFixture).Assembly.Location;
@@ -264,6 +400,37 @@ public sealed class CSharpSkeletonGeneratorTests
         {
             typeof(CliStackCoercionFixture).FullName!,
             typeof(Int32StackCoercionEnum).FullName!
+        };
+        var types = artifact.Code!.Types
+            .Where(type => includedTypes.Contains(type.FullName))
+            .ToArray();
+        Assert.Equal(includedTypes.Count, types.Length);
+        var filteredArtifact = artifact with
+        {
+            ManagedReferences = [],
+            Code = artifact.Code with
+            {
+                NamespaceCount = 1,
+                TypeCount = types.Length,
+                MethodCount = types.Sum(type => type.Methods.Count),
+                Types = types
+            }
+        };
+        var generatedFiles = CSharpSkeletonGenerator.Generate(analyzed with { Files = [filteredArtifact] });
+
+        await AssertGeneratedSolutionBuildsAsync(generatedFiles);
+    }
+
+    [Fact]
+    public async Task GeneratedConstructorReconstructionSubsetBuildsInRelease()
+    {
+        var analyzed = await new BlueprintAnalyzer().AnalyzeAsync(typeof(ConstructorDerivedFixture).Assembly.Location);
+        var artifact = Assert.Single(analyzed.Files);
+        var includedTypes = new HashSet<string>(StringComparer.Ordinal)
+        {
+            typeof(ConstructorModeFixture).FullName!,
+            typeof(ConstructorBaseFixture).FullName!,
+            typeof(ConstructorDerivedFixture).FullName!
         };
         var types = artifact.Code!.Types
             .Where(type => includedTypes.Contains(type.FullName))

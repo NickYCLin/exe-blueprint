@@ -225,6 +225,60 @@ public sealed class ManagedSymbolReaderTests
     }
 
     [Fact]
+    public async Task ReconstructsCanonicalConstructorInitializersAndReadonlyAssignments()
+    {
+        var document = await new BlueprintAnalyzer().AnalyzeAsync(
+            typeof(ConstructorDerivedFixture).Assembly.Location);
+        var fixture = Assert.Single(
+            document.Files[0].Code!.Types,
+            type => type.FullName == typeof(ConstructorDerivedFixture).FullName);
+
+        var directBase = Assert.Single(
+            fixture.Methods,
+            method => method.IsConstructor &&
+                      method.Parameters.Select(parameter => parameter.Type).SequenceEqual(["int"]));
+        Assert.NotNull(directBase.ConstructorInitializer);
+        Assert.Equal("base", directBase.ConstructorInitializer.Kind);
+        Assert.Equal(
+            ["unchecked((ExeBlueprint.Core.Tests.ConstructorModeFixture)1)", "true"],
+            directBase.ConstructorInitializer.Arguments);
+        Assert.True(directBase.BodyReconstructed);
+        Assert.Equal(
+            [
+                "this._value = value;",
+                "this._mode = unchecked((ExeBlueprint.Core.Tests.ConstructorModeFixture)1);",
+                "this._enabled = true;"
+            ],
+            directBase.Body);
+
+        var chained = Assert.Single(
+            fixture.Methods,
+            method => method.IsConstructor &&
+                      method.Parameters.Select(parameter => parameter.Type).SequenceEqual(
+                          ["int", "ExeBlueprint.Core.Tests.ConstructorModeFixture"]));
+        Assert.NotNull(chained.ConstructorInitializer);
+        Assert.Equal("this", chained.ConstructorInitializer.Kind);
+        Assert.Equal(["value", "mode", "false"], chained.ConstructorInitializer.Arguments);
+        Assert.True(chained.BodyReconstructed);
+        Assert.Empty(chained.Body);
+
+        var terminal = Assert.Single(
+            fixture.Methods,
+            method => method.IsConstructor && method.Parameters.Count == 3);
+        Assert.NotNull(terminal.ConstructorInitializer);
+        Assert.Equal("base", terminal.ConstructorInitializer.Kind);
+        Assert.Equal(["mode", "enabled"], terminal.ConstructorInitializer.Arguments);
+        Assert.True(terminal.BodyReconstructed);
+        Assert.Equal(
+            [
+                "this._value = value;",
+                "this._mode = mode;",
+                "this._enabled = enabled;"
+            ],
+            terminal.Body);
+    }
+
+    [Fact]
     public async Task ReadsTopLevelNullableMethodAnnotations()
     {
         var assemblyPath = typeof(BlueprintAnalyzer).Assembly.Location;

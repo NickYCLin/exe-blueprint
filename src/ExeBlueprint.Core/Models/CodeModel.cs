@@ -452,6 +452,14 @@ public sealed record EventModel
     public bool IsNewSlot { get; init; }
 }
 
+public sealed record ConstructorInitializerModel
+{
+    // base 或 this；產生器只接受這兩個白名單值。
+    public required string Kind { get; init; }
+
+    public IReadOnlyList<string> Arguments { get; init; } = [];
+}
+
 public sealed record MethodModel
 {
     public required string Name { get; init; }
@@ -496,6 +504,9 @@ public sealed record MethodModel
     public IReadOnlyList<string> Body { get; init; } = [];
 
     public bool BodyReconstructed { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public ConstructorInitializerModel? ConstructorInitializer { get; init; }
 
     // 成功還原的 body 使用 pointer／function pointer local、field 或 call signature 時才會設定。
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingDefault)]

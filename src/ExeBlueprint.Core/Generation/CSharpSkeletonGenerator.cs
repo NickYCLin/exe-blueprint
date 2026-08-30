@@ -429,8 +429,14 @@ public static class CSharpSkeletonGenerator
                 return;
             }
 
-            builder.AppendLine($"{body}{method.Accessibility} {CleanName(type.Name)}({parameters})");
+            var initializer = BuildConstructorInitializer(type, method);
+            builder.AppendLine($"{body}{method.Accessibility} {CleanName(type.Name)}({parameters}){initializer}");
             builder.AppendLine($"{body}{{");
+            if (method.BodyReconstructed)
+            {
+                AppendReconstructedBody(builder, type, method, body + "    ");
+            }
+
             builder.AppendLine($"{body}}}");
             return;
         }
@@ -465,14 +471,7 @@ public static class CSharpSkeletonGenerator
 
         if (method.BodyReconstructed)
         {
-            foreach (var statement in method.Body)
-            {
-                var humanized = HumanizeBodyStatement(
-                    statement,
-                    type.GenericParameters,
-                    method.GenericParameters);
-                builder.AppendLine($"{body}    {humanized}");
-            }
+            AppendReconstructedBody(builder, type, method, body + "    ");
         }
         else
         {
@@ -482,6 +481,35 @@ public static class CSharpSkeletonGenerator
         }
 
         builder.AppendLine($"{body}}}");
+    }
+
+    private static string BuildConstructorInitializer(TypeModel type, MethodModel method)
+    {
+        var initializer = method.ConstructorInitializer;
+        if (initializer?.Kind is not ("base" or "this"))
+        {
+            return string.Empty;
+        }
+
+        var arguments = initializer.Arguments.Select(argument =>
+            HumanizeBodyStatement(argument, type.GenericParameters, method.GenericParameters));
+        return $" : {initializer.Kind}({string.Join(", ", arguments)})";
+    }
+
+    private static void AppendReconstructedBody(
+        StringBuilder builder,
+        TypeModel type,
+        MethodModel method,
+        string indent)
+    {
+        foreach (var statement in method.Body)
+        {
+            var humanized = HumanizeBodyStatement(
+                statement,
+                type.GenericParameters,
+                method.GenericParameters);
+            builder.AppendLine($"{indent}{humanized}");
+        }
     }
 
     private static void AppendIlComment(StringBuilder builder, MethodModel method, string indent)

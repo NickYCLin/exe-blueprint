@@ -22,6 +22,7 @@ internal static class ManagedSymbolReader
     private const int MaxIlInstructions = 400;
     private const int MaxEnumFieldsToInspect = 1_024;
     private const int MaxEnumFieldsToInspectAcrossAssembly = 100_000;
+    private const int MaxConstructorInitializerArguments = 32;
     private const int MaxAssemblyPublicKeyBytes = 4_096;
     private const int MaxGenericParametersPerOwner = 256;
     private const int MaxGenericConstraintsPerParameter = 256;
@@ -106,10 +107,15 @@ internal static class ManagedSymbolReader
                 ? null
                 : GetTypeDefinitionFullName(metadata, declaringTypeHandle);
             var baseTypeName = GetTypeName(metadata, definition.BaseType);
+            var attributes = definition.Attributes;
+            var kind = GetTypeKind(attributes, baseTypeName);
+            var isAbstract = attributes.HasFlag(TypeAttributes.Abstract);
+            var isSealed = attributes.HasFlag(TypeAttributes.Sealed);
             var genericParameterResult = typeGenericParameterResolver.Read(typeHandle);
             var genericParameterDetails = genericParameterResult.Parameters;
             var genericParametersComplete = genericParameterResult.Complete;
             var methods = new List<MethodModel>();
+            var constructorCandidates = new Dictionary<MethodDefinitionHandle, ConstructorReconstruction>();
 
             foreach (var methodHandle in definition.GetMethods())
             {
@@ -119,7 +125,10 @@ internal static class ManagedSymbolReader
                 var declaringName = fullName;
                 var il = hasBody ? TryReadIl(peReader, method) : null;
                 var localTypes = hasBody ? TryReadLocalTypes(peReader, method, enumTypes) : [];
-                var exceptionRegions = hasBody ? TryReadExceptionRegions(peReader, metadata, method) : [];
+                IReadOnlyList<ExceptionRegionInfo>? exceptionRegionResult = hasBody
+                    ? TryReadExceptionRegions(peReader, metadata, method)
+                    : [];
+                var exceptionRegions = exceptionRegionResult ?? [];
 
                 var model = BuildMethod(
                     metadata,
@@ -139,7 +148,9 @@ internal static class ManagedSymbolReader
                     var (instructions, ilTruncated) = Disassemble(metadata, il);
                     model = model with { Il = instructions, IlTruncated = ilTruncated };
 
-                    if (methodName is not (".ctor" or ".cctor") && reconstructionSignature is not null)
+                    if (methodName is not (".ctor" or ".cctor") &&
+                        reconstructionSignature is not null &&
+                        exceptionRegionResult is not null)
                     {
                         var isInstance = !method.Attributes.HasFlag(MethodAttributes.Static);
                         var body = TryReconstructLinearBody(
@@ -166,6 +177,35 @@ internal static class ManagedSymbolReader
                             };
                         }
                     }
+                    else if (methodName == ".ctor" &&
+                             kind == "class" &&
+                             reconstructionSignature is not null &&
+                             exceptionRegionResult is not null)
+                    {
+                        var constructor = TryReconstructConstructor(
+                            metadata,
+                            il,
+                            methodHandle,
+                            typeHandle,
+                            definition.BaseType,
+                            ReadParameterNames(metadata, method),
+                            reconstructionSignature,
+                            localTypes,
+                            exceptionRegions,
+                            enumTypes);
+                        if (constructor is not null)
+                        {
+                            model = model with
+                            {
+                                ConstructorInitializer = constructor.Initializer,
+                                Body = constructor.Body ?? [],
+                                BodyReconstructed = constructor.Body is not null,
+                                RequiresUnsafeContext = constructor.Body is not null &&
+                                                        constructor.RequiresUnsafeContext
+                            };
+                            constructorCandidates.Add(methodHandle, constructor with { MethodIndex = methods.Count });
+                        }
+                    }
                 }
 
                 methods.Add(model);
@@ -184,10 +224,7 @@ internal static class ManagedSymbolReader
                 }
             }
 
-            var attributes = definition.Attributes;
-            var kind = GetTypeKind(attributes, baseTypeName);
-            var isAbstract = attributes.HasFlag(TypeAttributes.Abstract);
-            var isSealed = attributes.HasFlag(TypeAttributes.Sealed);
+            ValidateConstructorChains(methods, constructorCandidates);
             types.Add(new TypeModel
             {
                 FullName = fullName,
@@ -695,6 +732,18 @@ internal static class ManagedSymbolReader
         CliType ReturnType,
         IReadOnlyList<CliType> ParameterTypes);
 
+    private sealed record ConstructorCallTarget(
+        EntityHandle DeclaringType,
+        MethodDefinitionHandle Definition,
+        IReadOnlyList<CliType> ParameterTypes);
+
+    private sealed record ConstructorReconstruction(
+        ConstructorInitializerModel Initializer,
+        IReadOnlyList<string>? Body,
+        bool RequiresUnsafeContext,
+        MethodDefinitionHandle ThisTarget,
+        int MethodIndex = -1);
+
     private static MethodReconstructionSignature? TryReadReconstructionSignature(
         MetadataReader metadata,
         MethodDefinition method,
@@ -724,7 +773,892 @@ internal static class ManagedSymbolReader
         }
     }
 
-    private static IReadOnlyList<ExceptionRegionInfo> TryReadExceptionRegions(
+    private static ConstructorReconstruction? TryReconstructConstructor(
+        MetadataReader metadata,
+        byte[] il,
+        MethodDefinitionHandle methodHandle,
+        TypeDefinitionHandle declaringType,
+        EntityHandle baseType,
+        Dictionary<int, string> parameterNames,
+        MethodReconstructionSignature signature,
+        IReadOnlyList<CliType> localTypes,
+        IReadOnlyList<ExceptionRegionInfo> exceptionRegions,
+        EnumTypeCatalog enumTypes)
+    {
+        var currentConstructor = TryResolveConstructorCall(
+            metadata,
+            enumTypes,
+            MetadataTokens.GetToken(methodHandle));
+        if (currentConstructor is null ||
+            currentConstructor.Definition != methodHandle ||
+            currentConstructor.DeclaringType != declaringType ||
+            currentConstructor.ParameterTypes.Count != signature.ParameterTypes.Count ||
+            signature.ReturnType.PrimitiveType != PrimitiveTypeCode.Void ||
+            baseType.Kind == HandleKind.TypeSpecification ||
+            !HasNonGenericDefinitionChain(metadata, declaringType))
+        {
+            return null;
+        }
+
+        var rawInstructions = EnumerateInstructions(il)
+            .Take(MaxIlInstructions + 1)
+            .ToArray();
+        if (rawInstructions.Length == 0 ||
+            rawInstructions.Length > MaxIlInstructions ||
+            rawInstructions[^1].OperandOffset + rawInstructions[^1].OperandSize != il.Length ||
+            !TryGetInstructionName(rawInstructions[^1], out var finalName) ||
+            finalName != "ret")
+        {
+            return null;
+        }
+
+        var index = 0;
+        SkipConstructorNops(rawInstructions, ref index);
+        if (index >= rawInstructions.Length ||
+            !TryGetInstructionName(rawInstructions[index], out var receiverName) ||
+            receiverName != "ldarg.0")
+        {
+            return null;
+        }
+
+        index++;
+        var arguments = new List<(string Expression, CliType Type)>();
+        IlInstruction callInstruction = default;
+        while (index < rawInstructions.Length)
+        {
+            SkipConstructorNops(rawInstructions, ref index);
+            if (index >= rawInstructions.Length ||
+                !TryGetInstructionName(rawInstructions[index], out var name))
+            {
+                return null;
+            }
+
+            if (name == "call")
+            {
+                callInstruction = rawInstructions[index];
+                break;
+            }
+
+            if (arguments.Count >= MaxConstructorInitializerArguments ||
+                !TryReadConstructorArgument(
+                    metadata,
+                    il,
+                    rawInstructions[index],
+                    name,
+                    parameterNames,
+                    signature.ParameterTypes,
+                    out var argument))
+            {
+                return null;
+            }
+
+            arguments.Add(argument);
+            index++;
+        }
+
+        if (callInstruction.OperandSize != 4 || index + 1 >= rawInstructions.Length)
+        {
+            return null;
+        }
+
+        var callEndOffset = callInstruction.OperandOffset + callInstruction.OperandSize;
+        if (ConstructorExceptionRegionsAreUnsafe(
+                exceptionRegions,
+                rawInstructions,
+                callEndOffset,
+                il.Length) ||
+            ConstructorTailHasUnsafeBranches(il, rawInstructions, index + 1, callEndOffset))
+        {
+            return null;
+        }
+
+        var target = TryResolveConstructorCall(
+            metadata,
+            enumTypes,
+            BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(callInstruction.OperandOffset, 4)));
+        if (target is null || target.ParameterTypes.Count != arguments.Count)
+        {
+            return null;
+        }
+
+        string kind;
+        var thisTarget = default(MethodDefinitionHandle);
+        if (!baseType.IsNil && target.DeclaringType == baseType)
+        {
+            kind = "base";
+        }
+        else if (target.DeclaringType == declaringType &&
+                 !target.Definition.IsNil &&
+                 target.Definition != methodHandle)
+        {
+            kind = "this";
+            thisTarget = target.Definition;
+        }
+        else
+        {
+            return null;
+        }
+
+        var renderedArguments = new string[arguments.Count];
+        for (var argumentIndex = 0; argumentIndex < arguments.Count; argumentIndex++)
+        {
+            var argument = arguments[argumentIndex];
+            if (!TryRenderConstructorArgument(
+                    argument.Expression,
+                    argument.Type,
+                    target.ParameterTypes[argumentIndex],
+                    out renderedArguments[argumentIndex]))
+            {
+                return null;
+            }
+        }
+
+        var instanceType = CreateNominalCliType(metadata, enumTypes, declaringType);
+        IReadOnlyList<string>? body = null;
+        var requiresUnsafeContext = false;
+        if (IsCanonicalConstructorTail(
+                metadata,
+                il,
+                rawInstructions,
+                index + 1,
+                declaringType))
+        {
+            body = TryReconstructLinearBody(
+                metadata,
+                il,
+                isInstance: true,
+                parameterNames,
+                signature.ParameterTypes,
+                signature.ReturnType,
+                localTypes,
+                exceptionRegions,
+                enumTypes,
+                instanceType,
+                out requiresUnsafeContext,
+                callEndOffset);
+        }
+
+        return new ConstructorReconstruction(
+            new ConstructorInitializerModel
+            {
+                Kind = kind,
+                Arguments = renderedArguments
+            },
+            body,
+            requiresUnsafeContext,
+            thisTarget);
+    }
+
+    private static bool IsCanonicalConstructorTail(
+        MetadataReader metadata,
+        byte[] il,
+        IReadOnlyList<IlInstruction> instructions,
+        int startIndex,
+        TypeDefinitionHandle declaringType)
+    {
+        var index = startIndex;
+        while (index < instructions.Count)
+        {
+            SkipConstructorNops(instructions, ref index);
+            if (index >= instructions.Count ||
+                !TryGetInstructionName(instructions[index], out var name))
+            {
+                return false;
+            }
+
+            if (name == "ret")
+            {
+                return index == instructions.Count - 1;
+            }
+
+            if (name != "ldarg.0")
+            {
+                return false;
+            }
+
+            index++;
+            SkipConstructorNops(instructions, ref index);
+            if (index >= instructions.Count ||
+                !TryGetInstructionName(instructions[index], out name) ||
+                !IsConstructorValueLoad(metadata, il, instructions[index], name))
+            {
+                return false;
+            }
+
+            index++;
+            SkipConstructorNops(instructions, ref index);
+            if (index >= instructions.Count ||
+                !TryGetInstructionName(instructions[index], out name) ||
+                name != "stfld" ||
+                !IsCanonicalConstructorFieldStore(
+                    metadata,
+                    il,
+                    instructions[index],
+                    declaringType))
+            {
+                return false;
+            }
+
+            index++;
+        }
+
+        return false;
+    }
+
+    private static bool IsCanonicalConstructorFieldStore(
+        MetadataReader metadata,
+        byte[] il,
+        IlInstruction instruction,
+        TypeDefinitionHandle declaringType)
+    {
+        if (instruction.OperandSize != 4)
+        {
+            return false;
+        }
+
+        try
+        {
+            var handle = MetadataTokens.EntityHandle(
+                BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(instruction.OperandOffset, 4)));
+            if (handle.Kind != HandleKind.FieldDefinition)
+            {
+                return false;
+            }
+
+            var field = metadata.GetFieldDefinition((FieldDefinitionHandle)handle);
+            var fieldType = field.DecodeSignature(SignatureTypeNameProvider.Instance, null);
+            return field.GetDeclaringType() == declaringType &&
+                   !field.Attributes.HasFlag(FieldAttributes.Static) &&
+                   !field.Attributes.HasFlag(FieldAttributes.Literal) &&
+                   IsCanonicalConstructorFieldType(fieldType);
+        }
+        catch (Exception exception) when (
+            exception is BadImageFormatException or ArgumentException or InvalidOperationException)
+        {
+            return false;
+        }
+    }
+
+    private static bool IsCanonicalConstructorFieldType(SignatureTypeName type)
+    {
+        if (type.OuterCustomModifiers.Length != 0 ||
+            type.HasNestedCustomModifiers ||
+            type.IsRestrictedGenericArgument ||
+            type.PrimitiveType is PrimitiveTypeCode.Void or PrimitiveTypeCode.TypedReference)
+        {
+            return false;
+        }
+
+        if (type.PrimitiveType is not null)
+        {
+            return true;
+        }
+
+        if (!type.IsExactNamedType ||
+            type.NominalHandle.IsNil ||
+            IsPrimitiveAliasName(type.Text))
+        {
+            return false;
+        }
+
+        return type.RawTypeKind switch
+        {
+            (byte)SignatureTypeKind.Class => type.SignatureKind == SignatureTypeKind.Class,
+            (byte)SignatureTypeKind.ValueType => type.SignatureKind == SignatureTypeKind.ValueType,
+            _ => false
+        };
+    }
+
+    private static bool IsConstructorValueLoad(
+        MetadataReader metadata,
+        byte[] il,
+        IlInstruction instruction,
+        string name)
+    {
+        if (name is
+            "ldarg.1" or
+            "ldarg.2" or
+            "ldarg.3" or
+            "ldnull" or
+            "ldc.i4.m1" or
+            "ldc.i4.0" or
+            "ldc.i4.1" or
+            "ldc.i4.2" or
+            "ldc.i4.3" or
+            "ldc.i4.4" or
+            "ldc.i4.5" or
+            "ldc.i4.6" or
+            "ldc.i4.7" or
+            "ldc.i4.8" or
+            "ldc.i4.s" or
+            "ldc.i4" or
+            "ldc.i8" or
+            "ldc.r4" or
+            "ldc.r8")
+        {
+            return true;
+        }
+
+        if (name == "ldstr")
+        {
+            try
+            {
+                if (instruction.OperandSize != 4)
+                {
+                    return false;
+                }
+
+                var token = BinaryPrimitives.ReadInt32LittleEndian(
+                    il.AsSpan(instruction.OperandOffset, 4));
+                _ = metadata.GetUserString(MetadataTokens.UserStringHandle(token));
+                return true;
+            }
+            catch (Exception exception) when (
+                exception is BadImageFormatException or ArgumentException)
+            {
+                return false;
+            }
+        }
+
+        return name switch
+        {
+            "ldarg.s" => il[instruction.OperandOffset] != 0,
+            "ldarg" => BinaryPrimitives.ReadUInt16LittleEndian(
+                il.AsSpan(instruction.OperandOffset, 2)) != 0,
+            _ => false
+        };
+    }
+
+    private static ConstructorCallTarget? TryResolveConstructorCall(
+        MetadataReader metadata,
+        EnumTypeCatalog enumTypes,
+        int token)
+    {
+        try
+        {
+            var handle = MetadataTokens.EntityHandle(token);
+            switch (handle.Kind)
+            {
+                case HandleKind.MethodDefinition:
+                    var methodHandle = (MethodDefinitionHandle)handle;
+                    var method = metadata.GetMethodDefinition(methodHandle);
+                    var attributes = method.Attributes;
+                    if (metadata.GetString(method.Name) != ".ctor" ||
+                        attributes.HasFlag(MethodAttributes.Static) ||
+                        attributes.HasFlag(MethodAttributes.Abstract) ||
+                        !attributes.HasFlag(MethodAttributes.SpecialName) ||
+                        !attributes.HasFlag(MethodAttributes.RTSpecialName) ||
+                        method.GetGenericParameters().Count != 0)
+                    {
+                        return null;
+                    }
+
+                    var methodSignature = method.DecodeSignature(SignatureTypeNameProvider.Instance, null);
+                    var methodParameters = TryReadConstructorParameterTypes(methodSignature, enumTypes);
+                    return methodParameters is null
+                        ? null
+                        : new ConstructorCallTarget(
+                            method.GetDeclaringType(),
+                            methodHandle,
+                            methodParameters);
+
+                case HandleKind.MemberReference:
+                    var member = metadata.GetMemberReference((MemberReferenceHandle)handle);
+                    if (member.GetKind() != MemberReferenceKind.Method ||
+                        metadata.GetString(member.Name) != ".ctor" ||
+                        member.Parent.Kind is not (
+                            HandleKind.TypeDefinition or
+                            HandleKind.TypeReference or
+                            HandleKind.TypeSpecification))
+                    {
+                        return null;
+                    }
+
+                    var memberSignature = member.DecodeMethodSignature(SignatureTypeNameProvider.Instance, null);
+                    var memberParameters = TryReadConstructorParameterTypes(memberSignature, enumTypes);
+                    return memberParameters is null
+                        ? null
+                        : new ConstructorCallTarget(member.Parent, default, memberParameters);
+
+                default:
+                    return null;
+            }
+        }
+        catch (Exception exception) when (
+            exception is BadImageFormatException or ArgumentException or InvalidOperationException)
+        {
+            return null;
+        }
+    }
+
+    private static IReadOnlyList<CliType>? TryReadConstructorParameterTypes(
+        MethodSignature<SignatureTypeName> signature,
+        EnumTypeCatalog enumTypes)
+    {
+        if (signature.Header.Kind != SignatureKind.Method ||
+            !signature.Header.IsInstance ||
+            signature.Header.IsGeneric ||
+            signature.Header.HasExplicitThis ||
+            signature.Header.CallingConvention != SignatureCallingConvention.Default ||
+            signature.GenericParameterCount != 0 ||
+            signature.RequiredParameterCount != signature.ParameterTypes.Length ||
+            signature.ParameterTypes.Length > MaxConstructorInitializerArguments ||
+            signature.ReturnType.PrimitiveType != PrimitiveTypeCode.Void ||
+            signature.ReturnType.OuterCustomModifiers.Length != 0 ||
+            signature.ReturnType.HasNestedCustomModifiers ||
+            signature.ReturnType.IsRestrictedGenericArgument ||
+            signature.ParameterTypes.Any(type =>
+                type.OuterCustomModifiers.Length != 0 ||
+                type.HasNestedCustomModifiers ||
+                type.IsRestrictedGenericArgument ||
+                type.PrimitiveType == PrimitiveTypeCode.Void ||
+                (type.IsExactNamedType && IsPrimitiveAliasName(type.Text))))
+        {
+            return null;
+        }
+
+        return signature.ParameterTypes
+            .Select(type => CreateCliType(type, enumTypes))
+            .ToArray();
+    }
+
+    private static bool TryGetInstructionName(IlInstruction instruction, out string name)
+    {
+        if (OpCodesByValue.TryGetValue(instruction.OpValue, out var opCode) && opCode.Name is not null)
+        {
+            name = opCode.Name;
+            return true;
+        }
+
+        name = string.Empty;
+        return false;
+    }
+
+    private static void SkipConstructorNops(IReadOnlyList<IlInstruction> instructions, ref int index)
+    {
+        while (index < instructions.Count &&
+               TryGetInstructionName(instructions[index], out var name) &&
+               name == "nop")
+        {
+            index++;
+        }
+    }
+
+    private static bool TryReadConstructorArgument(
+        MetadataReader metadata,
+        byte[] il,
+        IlInstruction instruction,
+        string name,
+        IReadOnlyDictionary<int, string> parameterNames,
+        IReadOnlyList<CliType> parameterTypes,
+        out (string Expression, CliType Type) argument)
+    {
+        var slot = name switch
+        {
+            "ldarg.1" => 1,
+            "ldarg.2" => 2,
+            "ldarg.3" => 3,
+            "ldarg.s" => il[instruction.OperandOffset],
+            "ldarg" => BinaryPrimitives.ReadUInt16LittleEndian(il.AsSpan(instruction.OperandOffset, 2)),
+            _ => -1
+        };
+        if (slot > 0)
+        {
+            var parameterIndex = slot - 1;
+            if (parameterIndex >= parameterTypes.Count)
+            {
+                argument = default;
+                return false;
+            }
+
+            var parameterName = parameterNames.TryGetValue(slot, out var value) &&
+                                !string.IsNullOrEmpty(value)
+                ? value
+                : $"arg{parameterIndex}";
+            argument = (parameterName, parameterTypes[parameterIndex]);
+            return true;
+        }
+
+        switch (name)
+        {
+            case "ldnull":
+                argument = (
+                    "null",
+                    new CliType("object", PrimitiveType: PrimitiveTypeCode.Object));
+                return true;
+            case "ldstr":
+                try
+                {
+                    var token = BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(instruction.OperandOffset, 4));
+                    argument = (
+                        EscapeCSharpString(metadata.GetUserString(MetadataTokens.UserStringHandle(token))),
+                        new CliType("string", PrimitiveType: PrimitiveTypeCode.String));
+                    return true;
+                }
+                catch (Exception exception) when (exception is BadImageFormatException or ArgumentException)
+                {
+                    argument = default;
+                    return false;
+                }
+            case "ldc.i4.m1":
+                argument = ("-1", new CliType("int", PrimitiveType: PrimitiveTypeCode.Int32));
+                return true;
+            case "ldc.i4.0":
+            case "ldc.i4.1":
+            case "ldc.i4.2":
+            case "ldc.i4.3":
+            case "ldc.i4.4":
+            case "ldc.i4.5":
+            case "ldc.i4.6":
+            case "ldc.i4.7":
+            case "ldc.i4.8":
+                argument = (
+                    name["ldc.i4.".Length..],
+                    new CliType("int", PrimitiveType: PrimitiveTypeCode.Int32));
+                return true;
+            case "ldc.i4.s":
+                argument = (
+                    ((sbyte)il[instruction.OperandOffset]).ToString(CultureInfo.InvariantCulture),
+                    new CliType("int", PrimitiveType: PrimitiveTypeCode.Int32));
+                return true;
+            case "ldc.i4":
+                argument = (
+                    BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(instruction.OperandOffset, 4))
+                        .ToString(CultureInfo.InvariantCulture),
+                    new CliType("int", PrimitiveType: PrimitiveTypeCode.Int32));
+                return true;
+            case "ldc.i8":
+                argument = (
+                    $"{BinaryPrimitives.ReadInt64LittleEndian(il.AsSpan(instruction.OperandOffset, 8)).ToString(CultureInfo.InvariantCulture)}L",
+                    new CliType("long", PrimitiveType: PrimitiveTypeCode.Int64));
+                return true;
+            case "ldc.r4":
+                argument = (
+                    FormatSingleLiteral(BitConverter.Int32BitsToSingle(
+                        BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(instruction.OperandOffset, 4)))),
+                    new CliType("float", PrimitiveType: PrimitiveTypeCode.Single));
+                return true;
+            case "ldc.r8":
+                argument = (
+                    FormatDoubleLiteral(BitConverter.Int64BitsToDouble(
+                        BinaryPrimitives.ReadInt64LittleEndian(il.AsSpan(instruction.OperandOffset, 8)))),
+                    new CliType("double", PrimitiveType: PrimitiveTypeCode.Double));
+                return true;
+            default:
+                argument = default;
+                return false;
+        }
+    }
+
+    private static bool TryRenderConstructorArgument(
+        string expression,
+        CliType sourceType,
+        CliType targetType,
+        out string rendered)
+    {
+        rendered = expression;
+        if (expression == "null")
+        {
+            if (!IsConstructorReferenceType(targetType))
+            {
+                return false;
+            }
+
+            rendered = $"(({targetType.Text})null!)";
+            return true;
+        }
+
+        if (IsExactConstructorAssignment(sourceType, targetType))
+        {
+            if (sourceType.Text.EndsWith('?') && !targetType.Text.EndsWith('?'))
+            {
+                rendered += "!";
+            }
+
+            return true;
+        }
+
+        if (targetType.PrimitiveType == PrimitiveTypeCode.Boolean)
+        {
+            if (sourceType.PrimitiveType != PrimitiveTypeCode.Int32 ||
+                expression is not ("0" or "1"))
+            {
+                return false;
+            }
+
+            rendered = expression == "1" ? "true" : "false";
+            return true;
+        }
+
+        if (sourceType.PrimitiveType == PrimitiveTypeCode.Boolean)
+        {
+            return false;
+        }
+
+        var sourceIsEnum = TryGetKnownEnumUnderlyingType(sourceType, out var sourceUnderlyingType);
+        var targetIsEnum = TryGetKnownEnumUnderlyingType(targetType, out var targetUnderlyingType);
+        var sourceFamily = sourceIsEnum
+            ? IntegralStackFamily(sourceUnderlyingType)
+            : IntegralStackFamily(sourceType.PrimitiveType);
+        var targetFamily = targetIsEnum
+            ? IntegralStackFamily(targetUnderlyingType)
+            : IntegralStackFamily(targetType.PrimitiveType);
+        if (sourceFamily < 0 || sourceFamily != targetFamily)
+        {
+            return false;
+        }
+
+        rendered = $"unchecked(({targetType.Text}){expression})";
+        return true;
+    }
+
+    private static bool IsExactConstructorAssignment(CliType sourceType, CliType targetType)
+    {
+        if (sourceType.IsExactNamedType || targetType.IsExactNamedType)
+        {
+            return IsSameCliType(sourceType, targetType);
+        }
+
+        return sourceType.PrimitiveType is not null &&
+               sourceType.PrimitiveType == targetType.PrimitiveType;
+    }
+
+    private static bool IsConstructorReferenceType(CliType type)
+    {
+        return type.PrimitiveType is PrimitiveTypeCode.String or PrimitiveTypeCode.Object ||
+               (type.IsExactNamedType &&
+                !IsPrimitiveAliasName(type.Text) &&
+                type.RawTypeKind == (byte)SignatureTypeKind.Class &&
+                type.SignatureKind == SignatureTypeKind.Class);
+    }
+
+    private static bool IsPrimitiveAliasName(string type) => type.TrimEnd('?') is
+        "bool" or
+        "char" or
+        "sbyte" or
+        "byte" or
+        "short" or
+        "ushort" or
+        "int" or
+        "uint" or
+        "long" or
+        "ulong" or
+        "nint" or
+        "nuint" or
+        "float" or
+        "double" or
+        "decimal" or
+        "string" or
+        "object" or
+        "void";
+
+    private static bool ConstructorExceptionRegionsAreUnsafe(
+        IReadOnlyList<ExceptionRegionInfo> regions,
+        IReadOnlyList<IlInstruction> instructions,
+        int prefixEndOffset,
+        int ilLength)
+    {
+        var boundaries = instructions.Select(instruction => instruction.Offset).ToHashSet();
+        boundaries.Add(ilLength);
+        foreach (var region in regions)
+        {
+            if (!IsValidRange(region.TryOffset, region.TryLength) ||
+                !IsValidRange(region.HandlerOffset, region.HandlerLength) ||
+                region.TryOffset < prefixEndOffset ||
+                region.HandlerOffset < prefixEndOffset)
+            {
+                return true;
+            }
+
+            if (region.Kind == ExceptionRegionKind.Filter)
+            {
+                if (region.FilterOffset < prefixEndOffset ||
+                    region.FilterOffset >= region.HandlerOffset ||
+                    !boundaries.Contains(region.FilterOffset))
+                {
+                    return true;
+                }
+            }
+            else if (region.FilterOffset >= 0)
+            {
+                return true;
+            }
+        }
+
+        return false;
+
+        bool IsValidRange(int offset, int length)
+        {
+            if (offset < 0 || length <= 0)
+            {
+                return false;
+            }
+
+            var end = (long)offset + length;
+            return end <= ilLength &&
+                   boundaries.Contains(offset) &&
+                   boundaries.Contains((int)end);
+        }
+    }
+
+    private static bool ConstructorTailHasUnsafeBranches(
+        byte[] il,
+        IReadOnlyList<IlInstruction> instructions,
+        int startIndex,
+        int prefixEndOffset)
+    {
+        var tailTargets = instructions
+            .Skip(startIndex)
+            .Select(instruction => instruction.Offset)
+            .ToHashSet();
+        for (var index = startIndex; index < instructions.Count; index++)
+        {
+            var instruction = instructions[index];
+            if (!OpCodesByValue.TryGetValue(instruction.OpValue, out var opCode))
+            {
+                return true;
+            }
+
+            switch (opCode.OperandType)
+            {
+                case OperandType.ShortInlineBrTarget:
+                    if (instruction.OperandSize != 1 ||
+                        !IsValidTarget(
+                            (long)instruction.OperandOffset + 1 +
+                            (sbyte)il[instruction.OperandOffset]))
+                    {
+                        return true;
+                    }
+
+                    break;
+                case OperandType.InlineBrTarget:
+                    if (instruction.OperandSize != 4 ||
+                        !IsValidTarget(
+                            (long)instruction.OperandOffset + 4 +
+                            BinaryPrimitives.ReadInt32LittleEndian(
+                                il.AsSpan(instruction.OperandOffset, 4))))
+                    {
+                        return true;
+                    }
+
+                    break;
+                case OperandType.InlineSwitch:
+                    if (instruction.OperandSize < 4)
+                    {
+                        return true;
+                    }
+
+                    var count = BinaryPrimitives.ReadInt32LittleEndian(
+                        il.AsSpan(instruction.OperandOffset, 4));
+                    if (count < 0 || 4L + ((long)count * 4) != instruction.OperandSize)
+                    {
+                        return true;
+                    }
+
+                    var baseOffset = (long)instruction.OperandOffset + instruction.OperandSize;
+                    for (var targetIndex = 0; targetIndex < count; targetIndex++)
+                    {
+                        var deltaOffset = instruction.OperandOffset + 4 + (targetIndex * 4);
+                        if (!IsValidTarget(
+                                baseOffset + BinaryPrimitives.ReadInt32LittleEndian(
+                                    il.AsSpan(deltaOffset, 4))))
+                        {
+                            return true;
+                        }
+                    }
+
+                    break;
+            }
+        }
+
+        return false;
+
+        bool IsValidTarget(long target) =>
+            target >= prefixEndOffset &&
+            target < il.Length &&
+            target <= int.MaxValue &&
+            tailTargets.Contains((int)target);
+    }
+
+    private static void ValidateConstructorChains(
+        List<MethodModel> methods,
+        IReadOnlyDictionary<MethodDefinitionHandle, ConstructorReconstruction> candidates)
+    {
+        var validation = EvaluateConstructorChains(candidates);
+        foreach (var (handle, candidate) in candidates)
+        {
+            if (validation.GetValueOrDefault(handle))
+            {
+                continue;
+            }
+
+            if (candidate.MethodIndex >= 0 && candidate.MethodIndex < methods.Count)
+            {
+                methods[candidate.MethodIndex] = methods[candidate.MethodIndex] with
+                {
+                    ConstructorInitializer = null,
+                    Body = [],
+                    BodyReconstructed = false,
+                    RequiresUnsafeContext = false
+                };
+            }
+        }
+    }
+
+    private static IReadOnlyDictionary<MethodDefinitionHandle, bool> EvaluateConstructorChains(
+        IReadOnlyDictionary<MethodDefinitionHandle, ConstructorReconstruction> candidates)
+    {
+        var validation = new Dictionary<MethodDefinitionHandle, bool>();
+        foreach (var start in candidates.Keys)
+        {
+            if (validation.ContainsKey(start))
+            {
+                continue;
+            }
+
+            var path = new List<MethodDefinitionHandle>();
+            var active = new HashSet<MethodDefinitionHandle>();
+            var current = start;
+            var valid = false;
+            while (true)
+            {
+                if (validation.TryGetValue(current, out valid))
+                {
+                    break;
+                }
+
+                if (!candidates.TryGetValue(current, out var candidate) || !active.Add(current))
+                {
+                    valid = false;
+                    break;
+                }
+
+                path.Add(current);
+                if (candidate.Initializer.Kind == "base")
+                {
+                    valid = true;
+                    break;
+                }
+
+                if (candidate.Initializer.Kind != "this" || candidate.ThisTarget.IsNil)
+                {
+                    valid = false;
+                    break;
+                }
+
+                current = candidate.ThisTarget;
+            }
+
+            foreach (var handle in path)
+            {
+                validation[handle] = valid;
+            }
+        }
+
+        return validation;
+    }
+
+    private static IReadOnlyList<ExceptionRegionInfo>? TryReadExceptionRegions(
         PEReader peReader,
         MetadataReader metadata,
         MethodDefinition method)
@@ -748,7 +1682,7 @@ internal static class ManagedSymbolReader
         }
         catch (Exception exception) when (exception is BadImageFormatException or InvalidOperationException)
         {
-            return [];
+            return null;
         }
     }
 
@@ -1063,7 +1997,9 @@ internal static class ManagedSymbolReader
         string? EnumUnderlyingType = null,
         EntityHandle NominalHandle = default,
         byte RawTypeKind = 0,
-        bool IsExactNamedType = false)
+        bool IsExactNamedType = false,
+        SignatureTypeKind SignatureKind = SignatureTypeKind.Unknown,
+        PrimitiveTypeCode? PrimitiveType = null)
     {
         public static implicit operator string(CliType value) => value.Text;
 
@@ -1126,6 +2062,75 @@ internal static class ManagedSymbolReader
             out _);
     }
 
+    internal sealed record ConstructorReconstructionTestResult(
+        ConstructorInitializerModel Initializer,
+        IReadOnlyList<string>? Body);
+
+    internal static IReadOnlyDictionary<int, bool> ValidateConstructorChainsForTest(
+        IReadOnlyDictionary<int, int?> chains)
+    {
+        var candidates = new Dictionary<MethodDefinitionHandle, ConstructorReconstruction>();
+        foreach (var (row, targetRow) in chains)
+        {
+            var handle = MetadataTokens.MethodDefinitionHandle(row);
+            candidates.Add(
+                handle,
+                new ConstructorReconstruction(
+                    new ConstructorInitializerModel
+                    {
+                        Kind = targetRow is null ? "base" : "this"
+                    },
+                    Body: [],
+                    RequiresUnsafeContext: false,
+                    targetRow is null
+                        ? default
+                        : MetadataTokens.MethodDefinitionHandle(targetRow.Value)));
+        }
+
+        return EvaluateConstructorChains(candidates).ToDictionary(
+            pair => MetadataTokens.GetRowNumber(pair.Key),
+            pair => pair.Value);
+    }
+
+    internal static ConstructorReconstructionTestResult? ReconstructConstructorForTest(
+        MetadataReader metadata,
+        byte[] il,
+        MethodDefinitionHandle methodHandle,
+        IReadOnlyList<ExceptionRegionInfo>? exceptionRegions = null)
+    {
+        try
+        {
+            var enumTypes = ReadEnumTypeCatalog(metadata);
+            var method = metadata.GetMethodDefinition(methodHandle);
+            var declaringType = method.GetDeclaringType();
+            var definition = metadata.GetTypeDefinition(declaringType);
+            var signature = method.DecodeSignature(SignatureTypeNameProvider.Instance, null);
+            var reconstruction = TryReconstructConstructor(
+                metadata,
+                il,
+                methodHandle,
+                declaringType,
+                definition.BaseType,
+                ReadParameterNames(metadata, method),
+                new MethodReconstructionSignature(
+                    CreateCliType(signature.ReturnType, enumTypes),
+                    signature.ParameterTypes.Select(type => CreateCliType(type, enumTypes)).ToArray()),
+                [],
+                exceptionRegions ?? [],
+                enumTypes);
+            return reconstruction is null || reconstruction.Initializer.Kind != "base"
+                ? null
+                : new ConstructorReconstructionTestResult(
+                    reconstruction.Initializer,
+                    reconstruction.Body);
+        }
+        catch (Exception exception) when (
+            exception is BadImageFormatException or ArgumentException or InvalidOperationException)
+        {
+            return null;
+        }
+    }
+
     // 把方法的 IL 還原成 C#。先解碼成指令陣列，再用區間遞迴結構化還原 if／if-else（可巢狀）。
     // 採全有或全無：遇到無法安全切開的迴圈、非終止型 switch、不支援的例外區域或任何無法結構化的跳轉就整個方法放棄，
     // 退回 IL 註解，寧可不還原也不要產出語意錯誤的程式碼。輸出的 C# 不保證能編譯，但語意貼近原程式。
@@ -1140,7 +2145,8 @@ internal static class ManagedSymbolReader
         IReadOnlyList<ExceptionRegionInfo> exceptionRegions,
         EnumTypeCatalog enumTypes,
         CliType? instanceType,
-        out bool requiresUnsafeContext)
+        out bool requiresUnsafeContext,
+        int startOffset = 0)
     {
         requiresUnsafeContext = false;
         var instructions = new List<Instr>();
@@ -1184,6 +2190,11 @@ internal static class ManagedSymbolReader
         }
 
         offsetToIndex[il.Length] = instructions.Count;
+        if (!offsetToIndex.TryGetValue(startOffset, out var startIndex))
+        {
+            return null;
+        }
+
         var state = new ReconstructionState
         {
             RequiresUnsafeContext = localTypes.Any(type => RequiresUnsafeType(type.Text))
@@ -1211,7 +2222,7 @@ internal static class ManagedSymbolReader
             context,
             [.. instructions],
             offsetToIndex,
-            0,
+            startIndex,
             instructions.Count,
             new HashSet<int>(),
             0);
@@ -2784,7 +3795,8 @@ internal static class ManagedSymbolReader
     // 已知參考型別用 null pattern；其他具名值以 default 比較，保留 CLR 的零值判斷語意。
     private static string RenderBranchCondition(ReconContext context, string expression, bool branchWhenTrue)
     {
-        if (!context.ExpressionTypes.TryGetValue(expression, out var type) || type == "bool")
+        if (!context.ExpressionTypes.TryGetValue(expression, out var type) ||
+            type.PrimitiveType == PrimitiveTypeCode.Boolean)
         {
             return branchWhenTrue ? expression : $"!({expression})";
         }
@@ -2903,7 +3915,13 @@ internal static class ManagedSymbolReader
     }
 
     private static void PushExpression(ReconContext context, Stack<string> stack, string expression, string? type) =>
-        PushExpression(context, stack, expression, type is null ? null : new CliType(type));
+        PushExpression(
+            context,
+            stack,
+            expression,
+            type is null
+                ? null
+                : new CliType(type, PrimitiveType: PrimitiveTypeFromAlias(type.TrimEnd('?'))));
 
     private static bool ApplySimpleInstruction(
         ReconContext context,
@@ -2974,17 +3992,25 @@ internal static class ManagedSymbolReader
                 return true;
 
             case "ldnull":
-                PushExpression(context, stack, "null", "object");
+                PushExpression(
+                    context,
+                    stack,
+                    "null",
+                    new CliType("object", PrimitiveType: PrimitiveTypeCode.Object));
                 return true;
             case "ldstr":
                 PushExpression(
                     context,
                     stack,
                     EscapeCSharpString(ReadUserString(metadata, BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)))),
-                    "string");
+                    new CliType("string", PrimitiveType: PrimitiveTypeCode.String));
                 return true;
             case "ldc.i4.m1":
-                PushExpression(context, stack, "-1", "int");
+                PushExpression(
+                    context,
+                    stack,
+                    "-1",
+                    new CliType("int", PrimitiveType: PrimitiveTypeCode.Int32));
                 return true;
             case "ldc.i4.0":
             case "ldc.i4.1":
@@ -2995,19 +4021,40 @@ internal static class ManagedSymbolReader
             case "ldc.i4.6":
             case "ldc.i4.7":
             case "ldc.i4.8":
-                PushExpression(context, stack, name["ldc.i4.".Length..], "int");
+                PushExpression(
+                    context,
+                    stack,
+                    name["ldc.i4.".Length..],
+                    new CliType("int", PrimitiveType: PrimitiveTypeCode.Int32));
                 return true;
             case "ldc.i4.s":
-                PushExpression(context, stack, ((sbyte)il[offset]).ToString(), "int");
+                PushExpression(
+                    context,
+                    stack,
+                    ((sbyte)il[offset]).ToString(),
+                    new CliType("int", PrimitiveType: PrimitiveTypeCode.Int32));
                 return true;
             case "ldc.i4":
-                PushExpression(context, stack, BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)).ToString(), "int");
+                PushExpression(
+                    context,
+                    stack,
+                    BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)).ToString(),
+                    new CliType("int", PrimitiveType: PrimitiveTypeCode.Int32));
                 return true;
             case "ldc.i8":
-                PushExpression(context, stack, $"{BinaryPrimitives.ReadInt64LittleEndian(il.AsSpan(offset, 8))}L", "long");
+                PushExpression(
+                    context,
+                    stack,
+                    $"{BinaryPrimitives.ReadInt64LittleEndian(il.AsSpan(offset, 8))}L",
+                    new CliType("long", PrimitiveType: PrimitiveTypeCode.Int64));
                 return true;
             case "ldc.r4":
-                PushExpression(context, stack, $"{BitConverter.Int32BitsToSingle(BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)))}f", "float");
+                PushExpression(
+                    context,
+                    stack,
+                    FormatSingleLiteral(BitConverter.Int32BitsToSingle(
+                        BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)))),
+                    new CliType("float", PrimitiveType: PrimitiveTypeCode.Single));
                 return true;
             case "ldc.r8":
                 PushExpression(
@@ -3015,7 +4062,7 @@ internal static class ManagedSymbolReader
                     stack,
                     FormatDoubleLiteral(BitConverter.Int64BitsToDouble(
                         BinaryPrimitives.ReadInt64LittleEndian(il.AsSpan(offset, 8)))),
-                    "double");
+                    new CliType("double", PrimitiveType: PrimitiveTypeCode.Double));
                 return true;
 
             case "ldloc.0":
@@ -3133,13 +4180,25 @@ internal static class ManagedSymbolReader
                     stack,
                     name == "div.un" ? "/" : "%");
             case "ceq":
-                return TryBinary(context, stack, "==", "bool");
+                return TryBinary(
+                    context,
+                    stack,
+                    "==",
+                    new CliType("bool", PrimitiveType: PrimitiveTypeCode.Boolean));
             case "cgt":
-                return TryBinary(context, stack, ">", "bool");
+                return TryBinary(
+                    context,
+                    stack,
+                    ">",
+                    new CliType("bool", PrimitiveType: PrimitiveTypeCode.Boolean));
             case "cgt.un":
                 return TryUnsignedComparison(context, stack, ">", allowReferenceNull: true);
             case "clt":
-                return TryBinary(context, stack, "<", "bool");
+                return TryBinary(
+                    context,
+                    stack,
+                    "<",
+                    new CliType("bool", PrimitiveType: PrimitiveTypeCode.Boolean));
             case "clt.un":
                 return TryUnsignedComparison(context, stack, "<", allowReferenceNull: false);
             case "neg":
@@ -3166,7 +4225,11 @@ internal static class ManagedSymbolReader
                     return false;
                 }
 
-                PushExpression(context, stack, $"(({castType}){castValue})", castType);
+                PushExpression(
+                    context,
+                    stack,
+                    $"(({castType}){castValue})",
+                    new CliType(castType));
                 return true;
             case "isinst":
                 var instType = GetTypeName(metadata, MetadataTokens.EntityHandle(BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4))));
@@ -3175,7 +4238,11 @@ internal static class ManagedSymbolReader
                     return false;
                 }
 
-                PushExpression(context, stack, $"({instValue} as {instType})", instType);
+                PushExpression(
+                    context,
+                    stack,
+                    $"({instValue} as {instType})",
+                    new CliType(instType));
                 return true;
 
             case "call":
@@ -3211,7 +4278,7 @@ internal static class ManagedSymbolReader
                 terminal = true;
                 return true;
             case "ret":
-                if (context.ReturnType == "void")
+                if (context.ReturnType.PrimitiveType == PrimitiveTypeCode.Void)
                 {
                     if (stack.Count != 0)
                     {
@@ -3573,11 +4640,19 @@ internal static class ManagedSymbolReader
             underlyingType,
             type.NominalHandle,
             type.RawTypeKind,
-            type.IsExactNamedType);
+            type.IsExactNamedType,
+            type.SignatureKind,
+            type.PrimitiveType);
     }
 
     private static CliType CreateTestCliType(string type, EnumTypeCatalog enumTypes)
     {
+        var primitiveType = PrimitiveTypeFromAlias(type.TrimEnd('?'));
+        if (primitiveType is not null)
+        {
+            return new CliType(type, PrimitiveType: primitiveType);
+        }
+
         if (!enumTypes.TestTypeHandles.TryGetValue(type, out var handle))
         {
             return new CliType(type);
@@ -3588,8 +4663,32 @@ internal static class ManagedSymbolReader
             enumTypes.UnderlyingTypes[handle],
             handle,
             (byte)SignatureTypeKind.ValueType,
-            IsExactNamedType: true);
+            IsExactNamedType: true,
+            SignatureKind: SignatureTypeKind.ValueType);
     }
+
+    private static PrimitiveTypeCode? PrimitiveTypeFromAlias(string type) => type switch
+    {
+        "bool" => PrimitiveTypeCode.Boolean,
+        "byte" => PrimitiveTypeCode.Byte,
+        "sbyte" => PrimitiveTypeCode.SByte,
+        "char" => PrimitiveTypeCode.Char,
+        "short" => PrimitiveTypeCode.Int16,
+        "ushort" => PrimitiveTypeCode.UInt16,
+        "int" => PrimitiveTypeCode.Int32,
+        "uint" => PrimitiveTypeCode.UInt32,
+        "long" => PrimitiveTypeCode.Int64,
+        "ulong" => PrimitiveTypeCode.UInt64,
+        "float" => PrimitiveTypeCode.Single,
+        "double" => PrimitiveTypeCode.Double,
+        "nint" => PrimitiveTypeCode.IntPtr,
+        "nuint" => PrimitiveTypeCode.UIntPtr,
+        "object" => PrimitiveTypeCode.Object,
+        "string" => PrimitiveTypeCode.String,
+        "void" => PrimitiveTypeCode.Void,
+        "TypedReference" => PrimitiveTypeCode.TypedReference,
+        _ => null
+    };
 
     private static EnumTypeCatalog ReadEnumTypeCatalog(
         MetadataReader metadata,
@@ -4497,6 +5596,9 @@ internal static class ManagedSymbolReader
                !left.NominalHandle.IsNil &&
                left.NominalHandle == right.NominalHandle &&
                (left.RawTypeKind == 0 || right.RawTypeKind == 0 || left.RawTypeKind == right.RawTypeKind) &&
+               (left.SignatureKind == SignatureTypeKind.Unknown ||
+                right.SignatureKind == SignatureTypeKind.Unknown ||
+                left.SignatureKind == right.SignatureKind) &&
                left.EnumUnderlyingType == right.EnumUnderlyingType;
     }
 
@@ -4505,6 +5607,20 @@ internal static class ManagedSymbolReader
         "char" or "sbyte" or "byte" or "short" or "ushort" or "int" or "uint" => 0,
         "long" or "ulong" => 1,
         "nint" or "nuint" => 2,
+        _ => -1
+    };
+
+    private static int IntegralStackFamily(PrimitiveTypeCode? type) => type switch
+    {
+        PrimitiveTypeCode.Char or
+        PrimitiveTypeCode.SByte or
+        PrimitiveTypeCode.Byte or
+        PrimitiveTypeCode.Int16 or
+        PrimitiveTypeCode.UInt16 or
+        PrimitiveTypeCode.Int32 or
+        PrimitiveTypeCode.UInt32 => 0,
+        PrimitiveTypeCode.Int64 or PrimitiveTypeCode.UInt64 => 1,
+        PrimitiveTypeCode.IntPtr or PrimitiveTypeCode.UIntPtr => 2,
         _ => -1
     };
 
@@ -4540,6 +5656,33 @@ internal static class ManagedSymbolReader
         _ when !char.IsControl(value) => $"'{value}'",
         _ => $"'\\u{(int)value:X4}'"
     };
+
+    private static string FormatSingleLiteral(float value)
+    {
+        if (float.IsNaN(value))
+        {
+            return "float.NaN";
+        }
+
+        if (float.IsPositiveInfinity(value))
+        {
+            return "float.PositiveInfinity";
+        }
+
+        if (float.IsNegativeInfinity(value))
+        {
+            return "float.NegativeInfinity";
+        }
+
+        var literal = value.ToString("R", CultureInfo.InvariantCulture);
+        if (!literal.Contains('.', StringComparison.Ordinal) &&
+            !literal.Contains('E', StringComparison.Ordinal))
+        {
+            literal += ".0";
+        }
+
+        return $"{literal}f";
+    }
 
     private static string FormatDoubleLiteral(double value)
     {
@@ -4624,11 +5767,11 @@ internal static class ManagedSymbolReader
                 var genericArguments = decodedGenericArguments.Select(type => type.Text).ToArray();
                 return resolved with
                 {
-                    ReturnType = new CliType(
-                        InstantiateMethodSignatureType(resolved.ReturnType.Text, genericArguments)),
+                    ReturnType = InstantiateMethodSignatureCliType(
+                        resolved.ReturnType,
+                        genericArguments),
                     ParameterTypes = resolved.ParameterTypes
-                        .Select(type => new CliType(
-                            InstantiateMethodSignatureType(type.Text, genericArguments)))
+                        .Select(type => InstantiateMethodSignatureCliType(type, genericArguments))
                         .ToArray(),
                     GenericArguments = genericArguments
                 };
@@ -4636,6 +5779,14 @@ internal static class ManagedSymbolReader
             default:
                 return null;
         }
+    }
+
+    private static CliType InstantiateMethodSignatureCliType(
+        CliType type,
+        IReadOnlyList<string> genericArguments)
+    {
+        var text = InstantiateMethodSignatureType(type.Text, genericArguments);
+        return text == type.Text ? type : new CliType(text);
     }
 
     private static CliType CreateNominalCliType(
@@ -6963,7 +8114,8 @@ internal sealed record SignatureTypeName(
     EntityHandle NominalHandle = default,
     byte RawTypeKind = 0,
     SignatureTypeKind SignatureKind = SignatureTypeKind.Unknown,
-    bool IsExactNamedType = false)
+    bool IsExactNamedType = false,
+    PrimitiveTypeCode? PrimitiveType = null)
 {
     public SignatureTypeName(string text)
         : this(text, [], false, false)
@@ -7179,7 +8331,8 @@ internal sealed class SignatureTypeNameProvider : ISignatureTypeProvider<Signatu
             text,
             [],
             HasNestedCustomModifiers: false,
-            IsRestrictedGenericArgument: typeCode == PrimitiveTypeCode.TypedReference);
+            IsRestrictedGenericArgument: typeCode == PrimitiveTypeCode.TypedReference,
+            PrimitiveType: typeCode);
     }
 
     public SignatureTypeName GetSZArrayType(SignatureTypeName elementType) =>
@@ -7282,7 +8435,8 @@ internal sealed class SignatureTypeNameProvider : ISignatureTypeProvider<Signatu
             NominalHandle = default,
             RawTypeKind = 0,
             SignatureKind = SignatureTypeKind.Unknown,
-            IsExactNamedType = false
+            IsExactNamedType = false,
+            PrimitiveType = null
         };
     }
 }
