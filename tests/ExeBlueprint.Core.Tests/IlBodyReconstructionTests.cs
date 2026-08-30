@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Reflection;
 using System.Reflection.Metadata;
+using System.Reflection.Metadata.Ecma335;
 using System.Reflection.PortableExecutable;
 using ExeBlueprint.Analysis;
 
@@ -716,10 +717,12 @@ public sealed class IlBodyReconstructionTests
         var acceptEnum = typeof(CliStackCoercionFixture)
             .GetMethod(nameof(CliStackCoercionFixture.AcceptEnum), BindingFlags.Static | BindingFlags.Public)!
             .MetadataToken;
-        var closedConstructedType = typeof(GenericConstructorCallFixture)
-            .GetMethod(nameof(GenericConstructorCallFixture.Create), BindingFlags.Static | BindingFlags.Public)!
-            .GetMethodBody()!
-            .GetILAsByteArray()!;
+        var closedConstructedMethod = typeof(GenericConstructorCallFixture)
+            .GetMethod(nameof(GenericConstructorCallFixture.Create), BindingFlags.Static | BindingFlags.Public)!;
+        var openConstructedMethod = typeof(OpenGenericConstructorCallFixture<>)
+            .GetMethod(nameof(OpenGenericConstructorCallFixture<int>.Create), BindingFlags.Static | BindingFlags.Public)!;
+        var currentOwnerConstructedMethod = typeof(GenericOwnerConstructorFixture<>)
+            .GetMethod(nameof(GenericOwnerConstructorFixture<int>.Create), BindingFlags.Instance | BindingFlags.Public)!;
         var unresolvedConstructedType = typeof(OpenGenericConstructorCallFixture<>)
             .GetMethod(nameof(OpenGenericConstructorCallFixture<int>.Create), BindingFlags.Static | BindingFlags.Public)!
             .GetMethodBody()!
@@ -740,12 +743,14 @@ public sealed class IlBodyReconstructionTests
                 returnType: intEnum,
                 parameterTypes: ["byte"]));
         Assert.Equal(
-            ["return new ExeBlueprint.Core.Tests.GenericConstructorTarget<bool>(arg0);"],
-            Reconstruct(
-                closedConstructedType,
-                isInstance: false,
-                returnType: "ExeBlueprint.Core.Tests.GenericConstructorTarget<bool>",
-                parameterTypes: ["bool"]));
+            ["return new ExeBlueprint.Core.Tests.GenericConstructorTarget<bool>(value);"],
+            ReconstructMethod(closedConstructedMethod));
+        Assert.Equal(
+            ["return new ExeBlueprint.Core.Tests.GenericConstructorTarget<!0>(value);"],
+            ReconstructMethod(openConstructedMethod));
+        Assert.Equal(
+            ["return new ExeBlueprint.Core.Tests.GenericOwnerConstructorTarget<!0>(this);"],
+            ReconstructMethod(currentOwnerConstructedMethod));
         Assert.Null(Reconstruct(
             unresolvedConstructedType,
             isInstance: false,
@@ -775,6 +780,29 @@ public sealed class IlBodyReconstructionTests
             BuildNewObjectIl(instanceMethod),
             isInstance: false,
             returnType: typeof(CliStackCoercionFixture).FullName!));
+    }
+
+    [Fact]
+    public void RejectsReevaluatingCapturedStackExpressionsAfterSideEffects()
+    {
+        var fieldToken = typeof(CliStackCoercionFixture)
+            .GetField("s_staticFlag", BindingFlags.Static | BindingFlags.NonPublic)!
+            .MetadataToken;
+        var methodToken = typeof(CliStackCoercionFixture)
+            .GetMethod(
+                nameof(CliStackCoercionFixture.ClearStaticFlag),
+                BindingFlags.Static | BindingFlags.Public)!
+            .MetadataToken;
+        var il = new byte[16];
+        il[0] = 0x7E; // ldsfld
+        BinaryPrimitives.WriteInt32LittleEndian(il.AsSpan(1, 4), fieldToken);
+        il[5] = 0x28; // call
+        BinaryPrimitives.WriteInt32LittleEndian(il.AsSpan(6, 4), methodToken);
+        il[10] = 0x80; // stsfld
+        BinaryPrimitives.WriteInt32LittleEndian(il.AsSpan(11, 4), fieldToken);
+        il[15] = 0x2A; // ret
+
+        Assert.Null(Reconstruct(il, isInstance: false, returnType: "void"));
     }
 
     [Fact]
@@ -1949,6 +1977,18 @@ public sealed class IlBodyReconstructionTests
             parameterTypes);
     }
 
+    private static IReadOnlyList<string>? ReconstructMethod(MethodInfo method)
+    {
+        var assemblyPath = method.DeclaringType!.Assembly.Location;
+        using var peReader = new PEReader(File.OpenRead(assemblyPath));
+        var metadata = peReader.GetMetadataReader();
+        return ManagedSymbolReader.ReconstructMethodForTest(
+            metadata,
+            method.GetMethodBody()!.GetILAsByteArray()!,
+            (MethodDefinitionHandle)MetadataTokens.EntityHandle(method.MetadataToken),
+            peReader);
+    }
+
     private static byte[] BuildUnsignedRelationalIf(byte opcode, bool shortForm) => shortForm
         ?
         [
@@ -2057,6 +2097,16 @@ internal static class GenericConstructorCallFixture
 internal static class OpenGenericConstructorCallFixture<T>
 {
     public static GenericConstructorTarget<T> Create(T value) => new(value);
+}
+
+internal sealed class GenericOwnerConstructorTarget<T>(GenericOwnerConstructorFixture<T> owner)
+{
+    public GenericOwnerConstructorFixture<T> Owner { get; } = owner;
+}
+
+internal sealed class GenericOwnerConstructorFixture<T>
+{
+    public GenericOwnerConstructorTarget<T> Create() => new(this);
 }
 
 internal static class SwitchFixture

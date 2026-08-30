@@ -1,5 +1,6 @@
 using System.Collections.Immutable;
 using System.Reflection.Metadata;
+using System.Reflection.PortableExecutable;
 using ExeBlueprint.Analysis;
 using ExeBlueprint.Generation;
 
@@ -23,9 +24,12 @@ public sealed class FunctionPointerSignatureTests
         Assert.Empty(managed.OuterCustomModifiers);
         Assert.False(managed.HasNestedCustomModifiers);
 
-        var decoratedReturn = provider.GetModifiedType($"{CallConvPrefix}Cdecl", "void", isRequired: false);
+        var decoratedReturn = provider.GetModifiedType(
+            ReadCompilerCallConvention("CallConvCdecl"),
+            "void",
+            isRequired: false);
         decoratedReturn = provider.GetModifiedType(
-            $"{CallConvPrefix}SuppressGCTransition",
+            ReadCompilerCallConvention("CallConvSuppressGCTransition"),
             decoratedReturn,
             isRequired: false);
         var decorated = provider.GetFunctionPointerType(Signature(
@@ -40,9 +44,12 @@ public sealed class FunctionPointerSignatureTests
             "delegate* unmanaged[Cdecl]<void>",
             provider.GetFunctionPointerType(Signature(SignatureCallingConvention.CDecl, "void", [])).Text);
 
-        var duplicateReturn = provider.GetModifiedType($"{CallConvPrefix}Cdecl", "void", isRequired: false);
+        var duplicateReturn = provider.GetModifiedType(
+            ReadCompilerCallConvention("CallConvCdecl"),
+            "void",
+            isRequired: false);
         duplicateReturn = provider.GetModifiedType(
-            $"{CallConvPrefix}Cdecl",
+            ReadCompilerCallConvention("CallConvCdecl"),
             duplicateReturn,
             isRequired: false);
         Assert.Equal(
@@ -69,7 +76,10 @@ public sealed class FunctionPointerSignatureTests
     {
         var provider = SignatureTypeNameProvider.Instance;
         var unknownConvention = provider.GetModifiedType($"{CallConvPrefix}Blue", "void", isRequired: false);
-        var requiredConvention = provider.GetModifiedType($"{CallConvPrefix}Cdecl", "void", isRequired: true);
+        var requiredConvention = provider.GetModifiedType(
+            ReadCompilerCallConvention("CallConvCdecl"),
+            "void",
+            isRequired: true);
         var modifiedParameter = provider.GetModifiedType("Example.OptionalModifier", "int", isRequired: false);
         var nestedModifier = provider.GetPointerType(modifiedParameter);
 
@@ -228,6 +238,25 @@ public sealed class FunctionPointerSignatureTests
             parameterTypes.Length,
             genericParameterCount: 0,
             parameterTypes);
+
+    private static SignatureTypeName ReadCompilerCallConvention(string name)
+    {
+        var assemblyPath = typeof(FunctionPointerSignatureTests).Assembly.Location;
+        using var peReader = new PEReader(File.OpenRead(assemblyPath));
+        var metadata = peReader.GetMetadataReader();
+        var handle = Assert.Single(
+            metadata.TypeReferences,
+            candidate =>
+            {
+                var reference = metadata.GetTypeReference(candidate);
+                return metadata.GetString(reference.Namespace) == "System.Runtime.CompilerServices" &&
+                       metadata.GetString(reference.Name) == name;
+            });
+        return SignatureTypeNameProvider.Instance.GetTypeFromReference(
+            metadata,
+            handle,
+            rawTypeKind: 0);
+    }
 
     private static void AssertMethodSignature(
         ExeBlueprint.Models.TypeModel fixture,

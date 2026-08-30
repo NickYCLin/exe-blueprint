@@ -137,9 +137,18 @@ internal static class ManagedSymbolReader
                 var methodBody = hasBody ? TryReadMethodBody(peReader, method) : null;
                 var il = methodBody is null ? null : TryReadIl(methodBody);
                 var localVariablesInitialized = methodBody?.LocalVariablesInitialized ?? false;
+                var memberReferenceCallerContext = TryCreateMemberReferenceCallerContext(
+                    metadata,
+                    typeHandle,
+                    methodHandle);
                 StandaloneSignatureHandle localSignature = default;
                 var localTypes = methodBody is not null
-                    ? TryReadLocalTypes(metadata, methodBody, enumTypes, out localSignature)
+                    ? TryReadLocalTypes(
+                        metadata,
+                        methodBody,
+                        enumTypes,
+                        memberReferenceCallerContext,
+                        out localSignature)
                     : [];
                 IReadOnlyList<ExceptionRegionInfo>? exceptionRegionResult = !hasBody
                     ? []
@@ -160,7 +169,8 @@ internal static class ManagedSymbolReader
                     metadata,
                     method,
                     model,
-                    enumTypes);
+                    enumTypes,
+                    memberReferenceCallerContext);
                 if (hasBody && il is null)
                 {
                     model = model with { IlTruncated = true };
@@ -179,7 +189,8 @@ internal static class ManagedSymbolReader
                         il,
                         decoded,
                         userStrings,
-                        methodIlComplete);
+                        methodIlComplete,
+                        memberReferenceCallerContext);
                     model = model with { Il = instructions, IlTruncated = ilTruncated };
 
                     if (methodIlComplete &&
@@ -202,9 +213,14 @@ internal static class ManagedSymbolReader
                             enumTypes,
                             userStrings,
                             isInstance
-                                ? CreateNominalCliType(metadata, enumTypes, method.GetDeclaringType())
+                                ? CreateCurrentInstanceCliType(
+                                    metadata,
+                                    enumTypes,
+                                    method.GetDeclaringType(),
+                                    memberReferenceCallerContext)
                                 : null,
-                            out var requiresUnsafeContext);
+                            out var requiresUnsafeContext,
+                            memberReferenceCallerContext: memberReferenceCallerContext);
                         if (body is not null)
                         {
                             model = model with
@@ -258,7 +274,8 @@ internal static class ManagedSymbolReader
                             decoded,
                             $"{declaringName}.{methodName}",
                             edges,
-                            seenEdges))
+                            seenEdges,
+                            memberReferenceCallerContext))
                     {
                         truncated = true;
                     }
@@ -774,6 +791,7 @@ internal static class ManagedSymbolReader
         MetadataReader metadata,
         MethodBodyBlock body,
         EnumTypeCatalog enumTypes,
+        MemberReferenceCallerContext callerContext,
         out StandaloneSignatureHandle localSignature)
     {
         localSignature = default;
@@ -787,7 +805,9 @@ internal static class ManagedSymbolReader
             localSignature = body.LocalSignature;
             var signature = metadata.GetStandaloneSignature(body.LocalSignature);
             return signature
-                .DecodeLocalSignature(SignatureTypeNameProvider.Instance, null)
+                .DecodeLocalSignature(
+                    SignatureTypeNameProvider.Instance,
+                    callerContext.SignatureContext)
                 .Select(type => CreateCliType(type, enumTypes))
                 .ToArray();
         }
@@ -835,11 +855,14 @@ internal static class ManagedSymbolReader
         MetadataReader metadata,
         MethodDefinition method,
         MethodModel model,
-        EnumTypeCatalog enumTypes)
+        EnumTypeCatalog enumTypes,
+        MemberReferenceCallerContext callerContext)
     {
         try
         {
-            var signature = method.DecodeSignature(SignatureTypeNameProvider.Instance, null);
+            var signature = method.DecodeSignature(
+                SignatureTypeNameProvider.Instance,
+                callerContext.SignatureContext);
             if (signature.ParameterTypes.Length != model.Parameters.Count ||
                 signature.ReturnType.HasPinnedQualifier ||
                 signature.ParameterTypes.Any(type => type.HasPinnedQualifier) ||
@@ -859,6 +882,90 @@ internal static class ManagedSymbolReader
             exception is BadImageFormatException or ArgumentException or InvalidOperationException)
         {
             return null;
+        }
+    }
+
+    private static MemberReferenceCallerContext TryCreateMemberReferenceCallerContext(
+        MetadataReader metadata,
+        TypeDefinitionHandle declaringType,
+        MethodDefinitionHandle methodHandle)
+    {
+        try
+        {
+            if (!TryGetCanonicalTypeDefinitionSignatureParameterCount(
+                    metadata,
+                    declaringType,
+                    out var typeParameterCount))
+            {
+                return default;
+            }
+
+            var method = metadata.GetMethodDefinition(methodHandle);
+            var methodParameters = method.GetGenericParameters();
+            var methodDomain = ReadGenericParameterDomain(
+                metadata,
+                methodParameters,
+                methodHandle);
+            var signature = method.DecodeSignature(
+                SignatureTypeNameProvider.Instance,
+                genericContext: null);
+            if (!methodDomain.Complete ||
+                signature.GenericParameterCount != methodDomain.Count)
+            {
+                return default;
+            }
+
+            return new MemberReferenceCallerContext(
+                declaringType,
+                typeParameterCount,
+                methodHandle,
+                methodDomain.Count,
+                IsAvailable: true);
+        }
+        catch (Exception exception) when (
+            exception is BadImageFormatException or ArgumentException or InvalidOperationException)
+        {
+            return default;
+        }
+    }
+
+    private static bool TryGetCanonicalTypeDefinitionSignatureParameterCount(
+        MetadataReader metadata,
+        TypeDefinitionHandle declaringType,
+        out int parameterCount)
+    {
+        parameterCount = 0;
+        try
+        {
+            if (declaringType.IsNil)
+            {
+                return false;
+            }
+
+            var typeParameters = metadata
+                .GetTypeDefinition(declaringType)
+                .GetGenericParameters();
+            var typeDomain = ReadGenericParameterDomain(
+                metadata,
+                typeParameters,
+                declaringType);
+            if (!typeDomain.Complete ||
+                !HasCanonicalConstructorOwnerArity(
+                    metadata,
+                    declaringType,
+                    typeDomain.Count))
+            {
+                return false;
+            }
+
+            parameterCount = typeDomain.Count;
+            return true;
+        }
+        catch (Exception exception) when (
+            exception is BadImageFormatException or ArgumentException or InvalidOperationException)
+        {
+            parameterCount = 0;
+            return false;
         }
     }
 
@@ -1140,7 +1247,15 @@ internal static class ManagedSymbolReader
             }
         }
 
-        var instanceType = CreateNominalCliType(metadata, enumTypes, declaringType);
+        var callerContext = TryCreateMemberReferenceCallerContext(
+            metadata,
+            declaringType,
+            methodHandle);
+        var instanceType = CreateCurrentInstanceCliType(
+            metadata,
+            enumTypes,
+            declaringType,
+            callerContext);
         IReadOnlyList<string>? body = null;
         var requiresUnsafeContext = false;
         if (IsCanonicalConstructorTail(
@@ -1166,7 +1281,8 @@ internal static class ManagedSymbolReader
                 userStrings,
                 instanceType,
                 out requiresUnsafeContext,
-                callEndOffset);
+                callEndOffset,
+                callerContext);
         }
 
         return new ConstructorReconstruction(
@@ -3234,6 +3350,8 @@ internal static class ManagedSymbolReader
             target.HasNestedCustomModifiers ||
             source.IsRestrictedGenericArgument ||
             target.IsRestrictedGenericArgument ||
+            source.IsUnsupported ||
+            target.IsUnsupported ||
             source.IsByReference ||
             target.IsByReference ||
             source.HasPinnedQualifier ||
@@ -3249,6 +3367,41 @@ internal static class ManagedSymbolReader
                    !sourceSlot.Owner.IsNil &&
                    sourceSlot.Index >= 0 &&
                    sourceSlot == targetSlot;
+        }
+
+        if (source.MethodParameterSlot is not null || target.MethodParameterSlot is not null)
+        {
+            return source.MethodParameterSlot is { } sourceSlot &&
+                   target.MethodParameterSlot is { } targetSlot &&
+                   !sourceSlot.Owner.IsNil &&
+                   sourceSlot.Index >= 0 &&
+                   sourceSlot == targetSlot;
+        }
+
+        if (source.ArrayElementType is not null || target.ArrayElementType is not null)
+        {
+            return source.ArrayElementType is { } sourceElement &&
+                   target.ArrayElementType is { } targetElement &&
+                   source.ArrayRank > 0 &&
+                   source.ArrayRank == target.ArrayRank &&
+                   source.ArraySizes.SequenceEqual(target.ArraySizes) &&
+                   source.ArrayLowerBounds.SequenceEqual(target.ArrayLowerBounds) &&
+                   AreSameConstructorSignatureNode(
+                       sourceElement,
+                       targetElement,
+                       depth + 1,
+                       ref remainingNodes);
+        }
+
+        if (source.SzArrayElementType is not null || target.SzArrayElementType is not null)
+        {
+            return source.SzArrayElementType is { } sourceElement &&
+                   target.SzArrayElementType is { } targetElement &&
+                   AreSameConstructorSignatureNode(
+                       sourceElement,
+                       targetElement,
+                       depth + 1,
+                       ref remainingNodes);
         }
 
         if (source.PrimitiveType is not null || target.PrimitiveType is not null)
@@ -3605,7 +3758,8 @@ internal static class ManagedSymbolReader
         IlDecodeResult decoded,
         string caller,
         List<CallEdge> edges,
-        HashSet<(string, string, string)> seenEdges)
+        HashSet<(string, string, string)> seenEdges,
+        MemberReferenceCallerContext callerContext)
     {
         if (decoded.Status != IlDecodeStatus.Complete)
         {
@@ -3623,10 +3777,10 @@ internal static class ManagedSymbolReader
             }
 
             var token = BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(instruction.OperandOffset, 4));
-            var callee = ResolveMemberName(metadata, token);
+            var callee = ResolveMemberName(metadata, token, callerContext);
             if (callee is null)
             {
-                continue;
+                return false;
             }
 
             var edge = (caller, callee, kind);
@@ -3662,7 +3816,8 @@ internal static class ManagedSymbolReader
         byte[] il,
         IlDecodeResult decoded,
         UserStringCatalog userStrings,
-        bool methodIlComplete)
+        bool methodIlComplete,
+        MemberReferenceCallerContext callerContext)
     {
         var instructions = new List<string>(decoded.Instructions.Count);
         foreach (var instruction in decoded.Instructions)
@@ -3677,7 +3832,8 @@ internal static class ManagedSymbolReader
                 il,
                 instruction,
                 opCode.OperandType,
-                userStrings);
+                userStrings,
+                callerContext);
             instructions.Add($"IL_{instruction.Offset:X4}: {opCode.Name}{operand}");
         }
 
@@ -4121,7 +4277,8 @@ internal static class ManagedSymbolReader
         byte[] il,
         IlInstruction instruction,
         OperandType operandType,
-        UserStringCatalog userStrings)
+        UserStringCatalog userStrings,
+        MemberReferenceCallerContext callerContext)
     {
         var offset = instruction.OperandOffset;
         if (operandType == OperandType.InlineNone || offset + instruction.OperandSize > il.Length)
@@ -4135,7 +4292,10 @@ internal static class ManagedSymbolReader
             case OperandType.InlineField:
             case OperandType.InlineType:
             case OperandType.InlineTok:
-                return $" {ResolveTokenName(metadata, BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)))}";
+                return $" {ResolveTokenName(
+                    metadata,
+                    BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)),
+                    callerContext)}";
             case OperandType.InlineString:
                 return $" {FormatUserString(
                     userStrings,
@@ -4217,7 +4377,10 @@ internal static class ManagedSymbolReader
             : escaped;
     }
 
-    private static string ResolveTokenName(MetadataReader metadata, int token)
+    private static string ResolveTokenName(
+        MetadataReader metadata,
+        int token,
+        MemberReferenceCallerContext callerContext)
     {
         var handle = MetadataTokens.EntityHandle(token);
         switch (handle.Kind)
@@ -4225,7 +4388,7 @@ internal static class ManagedSymbolReader
             case HandleKind.MethodDefinition:
             case HandleKind.MemberReference:
             case HandleKind.MethodSpecification:
-                return ResolveMemberName(metadata, token) ?? $"token(0x{token:X8})";
+                return ResolveMemberName(metadata, token, callerContext) ?? $"token(0x{token:X8})";
 
             case HandleKind.FieldDefinition:
                 var field = metadata.GetFieldDefinition((FieldDefinitionHandle)handle);
@@ -4257,9 +4420,53 @@ internal static class ManagedSymbolReader
         IReadOnlyList<CliType> ParameterTypes,
         IReadOnlyList<string> GenericArguments,
         int GenericParameterCount,
-        MethodAttributes? DefinitionAttributes);
+        MethodAttributes? DefinitionAttributes,
+        ArrayPseudoMemberInfo? ArrayPseudoMember = null);
+
+    private readonly record struct FieldInfo(
+        string DeclaringType,
+        CliType DeclaringCliType,
+        EntityHandle DeclaringHandle,
+        int DeclaringGenericArity,
+        string Name,
+        CliType Type,
+        FieldAttributes? DefinitionAttributes);
+
+    private readonly record struct CallGraphMemberName(
+        string Text,
+        int GenericParameterCount);
+
+    private enum ArrayPseudoMemberKind
+    {
+        Get,
+        Set,
+        Constructor
+    }
+
+    private sealed record ArrayPseudoMemberInfo(
+        ArrayPseudoMemberKind Kind,
+        string ElementType,
+        int Rank);
+
+    private readonly record struct MemberReferenceCallerContext(
+        TypeDefinitionHandle TypeParameterOwner,
+        int TypeParameterCount,
+        MethodDefinitionHandle MethodParameterOwner,
+        int MethodParameterCount,
+        bool IsAvailable)
+    {
+        public object? SignatureContext =>
+            IsAvailable
+                ? SignatureGenericContext.ForCaller(
+                    TypeParameterOwner,
+                    TypeParameterCount,
+                    MethodParameterOwner,
+                    MethodParameterCount)
+                : null;
+    }
 
     private const int MaxStructureDepth = 32;
+    private const int MaxInstantiatedMethodSignatureCharacters = 64 * 1_024;
 
     private readonly record struct Instr(
         int Offset,
@@ -4330,7 +4537,8 @@ internal static class ManagedSymbolReader
         SignatureTypeKind SignatureKind = SignatureTypeKind.Unknown,
         PrimitiveTypeCode? PrimitiveType = null,
         bool IsByReference = false,
-        bool HasPinnedQualifier = false)
+        bool HasPinnedQualifier = false,
+        SignatureTypeName? StructuralSignature = null)
     {
         public static implicit operator string(CliType value) => value.Text;
 
@@ -4363,8 +4571,10 @@ internal static class ManagedSymbolReader
         HashSet<string> UnknownExpressionTypes,
         HashSet<string> AmbiguousExpressionTypes,
         HashSet<string> UnsignedIntegralExpressions,
+        HashSet<string> StatementExpressions,
         EnumTypeCatalog EnumTypes,
         UserStringCatalog UserStrings,
+        MemberReferenceCallerContext MemberReferenceCallerContext,
         ReconstructionState State,
         ExceptionLeaveRedirect? LeaveRedirect,
         int CatchDepth);
@@ -4456,10 +4666,16 @@ internal static class ManagedSymbolReader
             }
 
             var method = metadata.GetMethodDefinition(methodHandle);
-            var signature = method.DecodeSignature(SignatureTypeNameProvider.Instance, null);
+            var declaringType = method.GetDeclaringType();
+            var callerContext = TryCreateMemberReferenceCallerContext(
+                metadata,
+                declaringType,
+                methodHandle);
+            var signature = method.DecodeSignature(
+                SignatureTypeNameProvider.Instance,
+                callerContext.SignatureContext);
             var isInstance = signature.Header.IsInstance &&
                              !method.Attributes.HasFlag(MethodAttributes.Static);
-            var declaringType = method.GetDeclaringType();
             return TryReconstructLinearBody(
                 metadata,
                 il,
@@ -4473,14 +4689,79 @@ internal static class ManagedSymbolReader
                 exceptionRegions: [],
                 enumTypes,
                 userStrings,
-                isInstance ? CreateNominalCliType(metadata, enumTypes, declaringType) : null,
-                out _);
+                isInstance
+                    ? CreateCurrentInstanceCliType(
+                        metadata,
+                        enumTypes,
+                        declaringType,
+                        callerContext)
+                    : null,
+                out _,
+                memberReferenceCallerContext: callerContext);
         }
         catch (Exception exception) when (
             exception is BadImageFormatException or ArgumentException or InvalidOperationException)
         {
             return null;
         }
+    }
+
+    internal static (bool Complete, int EdgeCount) CollectCallsForTest(
+        MetadataReader metadata,
+        byte[] il,
+        MethodDefinitionHandle callerMethod = default)
+    {
+        try
+        {
+            var callerContext = default(MemberReferenceCallerContext);
+            if (!callerMethod.IsNil)
+            {
+                var method = metadata.GetMethodDefinition(callerMethod);
+                callerContext = TryCreateMemberReferenceCallerContext(
+                    metadata,
+                    method.GetDeclaringType(),
+                    callerMethod);
+            }
+
+            var edges = new List<CallEdge>();
+            var complete = CollectCalls(
+                metadata,
+                il,
+                DecodeInstructions(il),
+                "Tests.Caller",
+                edges,
+                [],
+                callerContext);
+            return (complete, edges.Count);
+        }
+        catch (Exception exception) when (
+            exception is BadImageFormatException or ArgumentException or InvalidOperationException)
+        {
+            return (false, 0);
+        }
+    }
+
+    internal static bool ValidateMemberReferenceMethodForTest(
+        MetadataReader metadata,
+        MemberReferenceHandle handle,
+        MethodDefinitionHandle callerMethod = default)
+    {
+        var callerContext = default(MemberReferenceCallerContext);
+        if (!callerMethod.IsNil)
+        {
+            var method = metadata.GetMethodDefinition(callerMethod);
+            callerContext = TryCreateMemberReferenceCallerContext(
+                metadata,
+                method.GetDeclaringType(),
+                callerMethod);
+        }
+
+        return MemberReferenceSignatureValidator.TryValidateMethod(
+            metadata,
+            handle,
+            callerContext,
+            out _,
+            out _);
     }
 
     internal sealed record ConstructorReconstructionTestResult(
@@ -4661,7 +4942,8 @@ internal static class ManagedSymbolReader
         UserStringCatalog userStrings,
         CliType? instanceType,
         out bool requiresUnsafeContext,
-        int startOffset = 0)
+        int startOffset = 0,
+        MemberReferenceCallerContext memberReferenceCallerContext = default)
     {
         requiresUnsafeContext = false;
         if (localTypes.Any(type => type.HasPinnedQualifier) ||
@@ -4750,8 +5032,10 @@ internal static class ManagedSymbolReader
             new HashSet<string>(StringComparer.Ordinal),
             new HashSet<string>(StringComparer.Ordinal),
             new HashSet<string>(StringComparer.Ordinal),
+            new HashSet<string>(StringComparer.Ordinal),
             enumTypes,
             userStrings,
+            memberReferenceCallerContext,
             state,
             LeaveRedirect: null,
             CatchDepth: 0);
@@ -4957,7 +5241,13 @@ internal static class ManagedSymbolReader
 
             if (!instr.IsBranch)
             {
-                if (!ApplySimpleInstruction(context, instr, stack, statements, declaredLocals, out var terminal))
+                if (!TryApplyOrderedSimpleInstruction(
+                        context,
+                        instr,
+                        stack,
+                        statements,
+                        declaredLocals,
+                        out var terminal))
                 {
                     return null;
                 }
@@ -6552,7 +6842,15 @@ internal static class ManagedSymbolReader
         for (var index = start; index < end; index++)
         {
             var instr = instructions[index];
-            if (instr.IsBranch || !ApplySimpleInstruction(context, instr, stack, statements, declaredLocals, out var terminal) || terminal)
+            if (instr.IsBranch ||
+                !TryApplyOrderedSimpleInstruction(
+                    context,
+                    instr,
+                    stack,
+                    statements,
+                    declaredLocals,
+                    out var terminal) ||
+                terminal)
             {
                 return null;
             }
@@ -6573,7 +6871,15 @@ internal static class ManagedSymbolReader
         for (var index = condStart; index < branchIndex; index++)
         {
             var instr = instructions[index];
-            if (instr.IsBranch || !ApplySimpleInstruction(context, instr, stack, statements, declaredLocals, out var terminal) || terminal)
+            if (instr.IsBranch ||
+                !TryApplyOrderedSimpleInstruction(
+                    context,
+                    instr,
+                    stack,
+                    statements,
+                    declaredLocals,
+                    out var terminal) ||
+                terminal)
             {
                 return null;
             }
@@ -6586,6 +6892,32 @@ internal static class ManagedSymbolReader
         }
 
         return condition;
+    }
+
+    private static bool TryApplyOrderedSimpleInstruction(
+        ReconContext context,
+        Instr instruction,
+        Stack<string> stack,
+        List<string> statements,
+        HashSet<int> declaredLocals,
+        out bool terminal)
+    {
+        var statementCount = statements.Count;
+        if (!ApplySimpleInstruction(
+                context,
+                instruction,
+                stack,
+                statements,
+                declaredLocals,
+                out terminal))
+        {
+            return false;
+        }
+
+        // IL 可以先把運算結果留在 evaluation stack，再執行有副作用的指令。
+        // 若直接把舊運算式文字留到後方重新求值，副作用可能已改變結果；目前沒有
+        // synthetic temporary provenance，因此這種順序必須 fail closed。
+        return statements.Count == statementCount || stack.Count == 0;
     }
 
     // 分支「成立時」的 C# 條件；用於迴圈（往回跳＝再跑一次主體）。
@@ -6818,7 +7150,7 @@ internal static class ManagedSymbolReader
         }
         else if (context.ExpressionTypes.TryGetValue(expression, out var existingType))
         {
-            if (existingType != type)
+            if (!AreSameExpressionType(existingType, type))
             {
                 context.AmbiguousExpressionTypes.Add(expression);
             }
@@ -7020,8 +7352,17 @@ internal static class ManagedSymbolReader
                 var loadStatic = ResolveField(
                     metadata,
                     context.EnumTypes,
-                    BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)));
-                if (loadStatic is null || IsGeneratedName(loadStatic.Value.DeclaringType) || IsGeneratedName(loadStatic.Value.Name))
+                    BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)),
+                    context.MemberReferenceCallerContext);
+                if (loadStatic is null ||
+                    loadStatic.Value.DefinitionAttributes is { } loadStaticAttributes &&
+                    !loadStaticAttributes.HasFlag(FieldAttributes.Static) ||
+                    !TryRenderStaticFieldTarget(
+                        loadStatic.Value,
+                        context.MemberReferenceCallerContext,
+                        out var loadStaticTarget) ||
+                    IsGeneratedName(loadStaticTarget) ||
+                    IsGeneratedName(loadStatic.Value.Name))
                 {
                     return false;
                 }
@@ -7030,15 +7371,24 @@ internal static class ManagedSymbolReader
                 PushExpression(
                     context,
                     stack,
-                    $"{loadStatic.Value.DeclaringType}.{loadStatic.Value.Name}",
+                    $"{loadStaticTarget}{loadStatic.Value.Name}",
                     loadStatic.Value.Type);
                 return true;
             case "ldfld":
                 var loadField = ResolveField(
                     metadata,
                     context.EnumTypes,
-                    BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)));
-                if (loadField is null || IsGeneratedName(loadField.Value.Name) || !TryPop(stack, out var fieldTarget))
+                    BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)),
+                    context.MemberReferenceCallerContext);
+                if (loadField is null ||
+                    loadField.Value.DefinitionAttributes is { } loadFieldAttributes &&
+                    loadFieldAttributes.HasFlag(FieldAttributes.Static) ||
+                    IsGeneratedName(loadField.Value.Name) ||
+                    !TryPop(stack, out var fieldTarget) ||
+                    !IsCompatibleConstructedReceiver(
+                        context,
+                        fieldTarget,
+                        loadField.Value.DeclaringCliType))
                 {
                     return false;
                 }
@@ -7050,9 +7400,20 @@ internal static class ManagedSymbolReader
                 var storeStatic = ResolveField(
                     metadata,
                     context.EnumTypes,
-                    BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)));
+                    BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)),
+                    context.MemberReferenceCallerContext);
                 if (storeStatic is null
-                    || IsGeneratedName(storeStatic.Value.DeclaringType)
+                    || storeStatic.Value.DefinitionAttributes is { } storeStaticAttributes
+                    && !storeStaticAttributes.HasFlag(FieldAttributes.Static)
+                    || !IsWritableFieldDefinition(
+                        context,
+                        storeStatic.Value,
+                        staticStore: true)
+                    || !TryRenderStaticFieldTarget(
+                        storeStatic.Value,
+                        context.MemberReferenceCallerContext,
+                        out var storeStaticTarget)
+                    || IsGeneratedName(storeStaticTarget)
                     || IsGeneratedName(storeStatic.Value.Name)
                     || !TryPop(stack, out var storeStaticValue)
                     || !TryRenderTargetExpression(
@@ -7065,17 +7426,28 @@ internal static class ManagedSymbolReader
                 }
 
                 MarkUnsafeType(context, storeStatic.Value.Type);
-                statements.Add($"{storeStatic.Value.DeclaringType}.{storeStatic.Value.Name} = {storeStaticValue};");
+                statements.Add($"{storeStaticTarget}{storeStatic.Value.Name} = {storeStaticValue};");
                 return true;
             case "stfld":
                 var storeField = ResolveField(
                     metadata,
                     context.EnumTypes,
-                    BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)));
+                    BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)),
+                    context.MemberReferenceCallerContext);
                 if (storeField is null
+                    || storeField.Value.DefinitionAttributes is { } storeFieldAttributes
+                    && storeFieldAttributes.HasFlag(FieldAttributes.Static)
+                    || !IsWritableFieldDefinition(
+                        context,
+                        storeField.Value,
+                        staticStore: false)
                     || IsGeneratedName(storeField.Value.Name)
                     || !TryPop(stack, out var storeFieldValue)
                     || !TryPop(stack, out var storeFieldTarget)
+                    || !IsCompatibleConstructedReceiver(
+                        context,
+                        storeFieldTarget,
+                        storeField.Value.DeclaringCliType)
                     || !TryRenderTargetExpression(
                         context,
                         storeFieldValue,
@@ -7150,14 +7522,13 @@ internal static class ManagedSymbolReader
             case "castclass":
                 var castHandle = MetadataTokens.EntityHandle(
                     BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)));
-                if (HasInvalidPinnedTypeSpecification(metadata, castHandle))
-                {
-                    return false;
-                }
-
-                var castType = GetTypeName(metadata, castHandle);
-                if (castType is null ||
-                    IsGeneratedName(castType) ||
+                if (!TryCreateInstructionCliType(
+                        metadata,
+                        context.EnumTypes,
+                        castHandle,
+                        context.MemberReferenceCallerContext,
+                        out var castType) ||
+                    IsGeneratedName(castType.Text) ||
                     !TryPop(stack, out var castValue))
                 {
                     return false;
@@ -7166,20 +7537,19 @@ internal static class ManagedSymbolReader
                 PushExpression(
                     context,
                     stack,
-                    $"(({castType}){castValue})",
-                    new CliType(castType));
+                    $"(({castType.Text}){castValue})",
+                    castType);
                 return true;
             case "isinst":
                 var instHandle = MetadataTokens.EntityHandle(
                     BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)));
-                if (HasInvalidPinnedTypeSpecification(metadata, instHandle))
-                {
-                    return false;
-                }
-
-                var instType = GetTypeName(metadata, instHandle);
-                if (instType is null ||
-                    IsGeneratedName(instType) ||
+                if (!TryCreateInstructionCliType(
+                        metadata,
+                        context.EnumTypes,
+                        instHandle,
+                        context.MemberReferenceCallerContext,
+                        out var instType) ||
+                    IsGeneratedName(instType.Text) ||
                     !TryPop(stack, out var instValue))
                 {
                     return false;
@@ -7188,8 +7558,8 @@ internal static class ManagedSymbolReader
                 PushExpression(
                     context,
                     stack,
-                    $"({instValue} as {instType})",
-                    new CliType(instType));
+                    $"({instValue} as {instType.Text})",
+                    instType);
                 return true;
 
             case "call":
@@ -7204,7 +7574,8 @@ internal static class ManagedSymbolReader
                 return TryEmitNewObject(context, BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)), stack);
 
             case "pop":
-                if (!TryPop(stack, out var discarded))
+                if (!TryPop(stack, out var discarded) ||
+                    !context.StatementExpressions.Remove(discarded))
                 {
                     return false;
                 }
@@ -7735,7 +8106,8 @@ internal static class ManagedSymbolReader
             type.SignatureKind,
             type.PrimitiveType,
             type.IsByReference,
-            type.HasPinnedQualifier);
+            type.HasPinnedQualifier,
+            type);
     }
 
     private static CliType CreateTestCliType(string type, EnumTypeCatalog enumTypes)
@@ -8037,7 +8409,7 @@ internal static class ManagedSymbolReader
             assembly.Flags);
     }
 
-    private static bool IsTrustedFrameworkAssembly(
+    internal static bool IsTrustedFrameworkAssembly(
         MetadataReader metadata,
         string name,
         BlobHandle publicKeyOrToken,
@@ -8260,7 +8632,11 @@ internal static class ManagedSymbolReader
         List<string> statements)
     {
         var metadata = context.Metadata;
-        var info = ResolveCall(metadata, context.EnumTypes, token);
+        var info = ResolveCall(
+            metadata,
+            context.EnumTypes,
+            token,
+            context.MemberReferenceCallerContext);
         if (info is null || info.Name is ".ctor" or ".cctor" || IsGeneratedName(info.Name))
         {
             return false;
@@ -8319,6 +8695,19 @@ internal static class ManagedSymbolReader
             return false;
         }
 
+        if (info.ArrayPseudoMember is { } arrayPseudoMember)
+        {
+            return TryEmitArrayPseudoMember(
+                context,
+                info,
+                arrayPseudoMember,
+                usesVirtualDispatch,
+                receiver,
+                args,
+                stack,
+                statements);
+        }
+
         if (info.Name.StartsWith("op_", StringComparison.Ordinal))
         {
             if (info.HasThis)
@@ -8341,11 +8730,12 @@ internal static class ManagedSymbolReader
             return false;
         }
 
+        var targetPrefix = $"{target}.";
         if (info.Name.StartsWith("get_", StringComparison.Ordinal))
         {
             if (info.ParamCount == 0)
             {
-                PushExpression(context, stack, $"{target}.{info.Name["get_".Length..]}", info.ReturnType);
+                PushExpression(context, stack, $"{targetPrefix}{info.Name["get_".Length..]}", info.ReturnType);
                 return true;
             }
 
@@ -8367,7 +8757,7 @@ internal static class ManagedSymbolReader
 
             if (info.ParamCount == 1)
             {
-                statements.Add($"{target}.{info.Name["set_".Length..]} = {args[0]};");
+                statements.Add($"{targetPrefix}{info.Name["set_".Length..]} = {args[0]};");
                 return true;
             }
 
@@ -8383,7 +8773,7 @@ internal static class ManagedSymbolReader
         var methodName = info.GenericArguments.Count == 0
             ? info.Name
             : $"{info.Name}<{string.Join(", ", info.GenericArguments)}>";
-        var call = $"{target}.{methodName}({string.Join(", ", args)})";
+        var call = $"{targetPrefix}{methodName}({string.Join(", ", args)})";
         if (info.ReturnsVoid)
         {
             statements.Add($"{call};");
@@ -8391,9 +8781,55 @@ internal static class ManagedSymbolReader
         else
         {
             PushExpression(context, stack, call, info.ReturnType);
+            context.StatementExpressions.Add(call);
         }
 
         return true;
+    }
+
+    private static bool TryEmitArrayPseudoMember(
+        ReconContext context,
+        CallInfo info,
+        ArrayPseudoMemberInfo pseudoMember,
+        bool usesVirtualDispatch,
+        string? receiver,
+        IReadOnlyList<string> arguments,
+        Stack<string> stack,
+        List<string> statements)
+    {
+        if (usesVirtualDispatch ||
+            receiver is null ||
+            pseudoMember.Kind == ArrayPseudoMemberKind.Constructor ||
+            context.AmbiguousExpressionTypes.Contains(receiver) ||
+            !context.ExpressionTypes.TryGetValue(receiver, out var receiverType) ||
+            receiverType.StructuralSignature is not { } receiverSignature ||
+            info.DeclaringCliType.StructuralSignature is not { } declaringSignature ||
+            !AreSameConstructorSignature(receiverSignature, declaringSignature))
+        {
+            return false;
+        }
+
+        if (pseudoMember.Kind == ArrayPseudoMemberKind.Get &&
+            arguments.Count == pseudoMember.Rank)
+        {
+            PushExpression(
+                context,
+                stack,
+                $"{receiver}[{string.Join(", ", arguments)}]",
+                info.ReturnType);
+            return true;
+        }
+
+        if (pseudoMember.Kind == ArrayPseudoMemberKind.Set &&
+            arguments.Count == pseudoMember.Rank + 1 &&
+            info.ReturnsVoid)
+        {
+            statements.Add(
+                $"{receiver}[{string.Join(", ", arguments.Take(pseudoMember.Rank))}] = {arguments[^1]};");
+            return true;
+        }
+
+        return false;
     }
 
     private static bool TryRenderInstanceCallTarget(
@@ -8453,8 +8889,25 @@ internal static class ManagedSymbolReader
         }
 
         if (string.IsNullOrEmpty(info.DeclaringType) ||
-            IsGeneratedName(info.DeclaringType) ||
-            !IsPotentialInterfaceType(context.Metadata, info.DeclaringType) ||
+            IsGeneratedName(info.DeclaringType))
+        {
+            return false;
+        }
+
+        var isPotentialInterface = IsPotentialInterfaceType(
+            context.Metadata,
+            info.DeclaringType);
+        if (info.DeclaringCliType.StructuralSignature is
+            { IsCanonicalGenericInstantiation: true } &&
+            !IsCompatibleConstructedReceiver(
+                context,
+                receiver,
+                info.DeclaringCliType))
+        {
+            return false;
+        }
+
+        if (!isPotentialInterface ||
             !context.ExpressionTypes.TryGetValue(receiver, out var receiverType) ||
             receiverType.Text == info.DeclaringType)
         {
@@ -8465,6 +8918,38 @@ internal static class ManagedSymbolReader
         // 明確轉成 metadata declaring interface，保留 explicit interface dispatch、overload 與回傳型別。
         target = $"(({info.DeclaringType}){receiver})";
         return true;
+    }
+
+    private static bool IsCompatibleConstructedReceiver(
+        ReconContext context,
+        string receiver,
+        CliType declaringType)
+    {
+        if (declaringType.StructuralSignature is not
+            { IsCanonicalGenericInstantiation: true } declaringSignature)
+        {
+            return true;
+        }
+
+        if (context.AmbiguousExpressionTypes.Contains(receiver) ||
+            !context.ExpressionTypes.TryGetValue(receiver, out var receiverType))
+        {
+            return false;
+        }
+
+        if (receiverType.StructuralSignature is
+            { IsCanonicalGenericInstantiation: true } receiverSignature &&
+            receiverSignature.GenericDefinitionHandle ==
+                declaringSignature.GenericDefinitionHandle)
+        {
+            return AreSameExpressionType(receiverType, declaringType);
+        }
+
+        // A same-text type from another assembly cannot be disambiguated in emitted C#.
+        // Different nominal definitions remain eligible because the receiver may derive
+        // from the declaring constructed class or implement the declaring interface.
+        return receiverType.Text != declaringType.Text ||
+               AreSameExpressionType(receiverType, declaringType);
     }
 
     private static bool IsExactCurrentInstanceReceiver(ReconContext context, string receiver) =>
@@ -8482,15 +8967,25 @@ internal static class ManagedSymbolReader
         out bool isBaseCall)
     {
         isBaseCall = false;
-        if (instanceType is null ||
-            !instanceType.IsExactNamedType ||
-            instanceType.NominalHandle.Kind != HandleKind.TypeDefinition ||
-            declaringHandle.IsNil)
+        if (instanceType is null || declaringHandle.IsNil)
         {
             return false;
         }
 
-        var current = (TypeDefinitionHandle)instanceType.NominalHandle;
+        var current = instanceType.NominalHandle.Kind == HandleKind.TypeDefinition
+            ? (TypeDefinitionHandle)instanceType.NominalHandle
+            : instanceType.StructuralSignature is
+            {
+                IsCanonicalGenericInstantiation: true,
+                GenericDefinitionHandle.Kind: HandleKind.TypeDefinition
+            } signature
+                ? (TypeDefinitionHandle)signature.GenericDefinitionHandle
+                : default;
+        if (current.IsNil)
+        {
+            return false;
+        }
+
         if (declaringHandle == current)
         {
             return true;
@@ -8616,7 +9111,11 @@ internal static class ManagedSymbolReader
     private static bool TryEmitNewObject(ReconContext context, int token, Stack<string> stack)
     {
         var metadata = context.Metadata;
-        var info = ResolveCall(metadata, context.EnumTypes, token);
+        var info = ResolveCall(
+            metadata,
+            context.EnumTypes,
+            token,
+            context.MemberReferenceCallerContext);
         if (info is null ||
             info.Name != ".ctor" ||
             !info.HasThis ||
@@ -8641,15 +9140,6 @@ internal static class ManagedSymbolReader
             return false;
         }
 
-        // MemberRef signatures on a constructed declaring TypeSpec are decoded with that
-        // declaring-type context. A remaining !n is therefore still open and does not identify
-        // the actual constructor parameter; do not guess its identity from the stack value.
-        if (info.DeclaringHandle.Kind == HandleKind.TypeSpecification &&
-            info.ParameterTypes.Any(type => ContainsUninstantiatedTypeGenericParameter(type.Text)))
-        {
-            return false;
-        }
-
         MarkUnsafeSignature(context, info);
 
         var args = new string[info.ParamCount];
@@ -8670,11 +9160,16 @@ internal static class ManagedSymbolReader
             }
         }
 
-        PushExpression(
-            context,
-            stack,
-            $"new {info.DeclaringType}({string.Join(", ", args)})",
-            info.DeclaringCliType);
+        var expression = info.ArrayPseudoMember is
+        { Kind: ArrayPseudoMemberKind.Constructor } arrayConstructor
+            ? $"new {arrayConstructor.ElementType}[{string.Join(", ", args)}]"
+            : $"new {info.DeclaringType}({string.Join(", ", args)})";
+        PushExpression(context, stack, expression, info.DeclaringCliType);
+        if (info.ArrayPseudoMember is null)
+        {
+            context.StatementExpressions.Add(expression);
+        }
+
         return true;
     }
 
@@ -8724,9 +9219,13 @@ internal static class ManagedSymbolReader
         }
 
         if (parameterType is not null &&
-            context.ExpressionTypes.TryGetValue(argument, out var argumentType) &&
-            argumentType.Text != parameterType.Text)
+            context.ExpressionTypes.TryGetValue(argument, out var argumentType))
         {
+            if (argumentType.Text == parameterType.Text)
+            {
+                return AreSameExpressionType(argumentType, parameterType);
+            }
+
             var argumentIsEnum = TryGetKnownEnumUnderlyingType(argumentType, out var argumentUnderlyingType);
             var parameterIsEnum = TryGetKnownEnumUnderlyingType(parameterType, out var parameterUnderlyingType);
             var argumentFamily = IntegralStackFamily(argumentIsEnum ? argumentUnderlyingType : argumentType.Text);
@@ -8772,6 +9271,21 @@ internal static class ManagedSymbolReader
         return false;
     }
 
+    private static bool ContainsUninstantiatedMethodGenericParameter(string type)
+    {
+        for (var index = 0; index + 2 < type.Length; index++)
+        {
+            if (type[index] == '!' &&
+                type[index + 1] == '!' &&
+                char.IsAsciiDigit(type[index + 2]))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private static bool IsSameIntegralStackFamily(string left, string right)
     {
         var leftFamily = IntegralStackFamily(left);
@@ -8802,7 +9316,7 @@ internal static class ManagedSymbolReader
 
         if (sourceType.Text == targetType.Text)
         {
-            return IsSameCliType(sourceType, targetType);
+            return AreSameExpressionType(sourceType, targetType);
         }
 
         if (targetType.Text == "bool")
@@ -8879,7 +9393,15 @@ internal static class ManagedSymbolReader
 
     private static bool IsSameCliType(CliType left, CliType right)
     {
-        if (left == right)
+        if (left.Text == right.Text &&
+            left.EnumUnderlyingType == right.EnumUnderlyingType &&
+            left.NominalHandle == right.NominalHandle &&
+            left.RawTypeKind == right.RawTypeKind &&
+            left.IsExactNamedType == right.IsExactNamedType &&
+            left.SignatureKind == right.SignatureKind &&
+            left.PrimitiveType == right.PrimitiveType &&
+            left.IsByReference == right.IsByReference &&
+            left.HasPinnedQualifier == right.HasPinnedQualifier)
         {
             return true;
         }
@@ -8893,6 +9415,213 @@ internal static class ManagedSymbolReader
                 right.SignatureKind == SignatureTypeKind.Unknown ||
                 left.SignatureKind == right.SignatureKind) &&
                left.EnumUnderlyingType == right.EnumUnderlyingType;
+    }
+
+    private static bool AreSameExpressionType(CliType left, CliType right)
+    {
+        if (!IsSameCliType(left, right))
+        {
+            return false;
+        }
+
+        if (left.StructuralSignature is null || right.StructuralSignature is null)
+        {
+            return left.StructuralSignature is null && right.StructuralSignature is null ||
+                   left.PrimitiveType is not null &&
+                   left.PrimitiveType == right.PrimitiveType ||
+                   left.IsExactNamedType &&
+                   right.IsExactNamedType &&
+                   !left.NominalHandle.IsNil &&
+                   left.NominalHandle == right.NominalHandle;
+        }
+
+        var remainingNodes = 512;
+        return AreSameExpressionSignature(
+            left.StructuralSignature,
+            right.StructuralSignature,
+            depth: 0,
+            ref remainingNodes);
+    }
+
+    private static bool AreSameExpressionSignature(
+        SignatureTypeName left,
+        SignatureTypeName right,
+        int depth,
+        ref int remainingNodes)
+    {
+        if (depth > MaxStructureDepth ||
+            remainingNodes-- <= 0 ||
+            left.Text != right.Text ||
+            left.HasNestedCustomModifiers != right.HasNestedCustomModifiers ||
+            left.IsRestrictedGenericArgument != right.IsRestrictedGenericArgument ||
+            !HaveCompatibleExpressionNominalIdentity(left, right) ||
+            left.PrimitiveType != right.PrimitiveType ||
+            left.IsByReference != right.IsByReference ||
+            left.IsCanonicalGenericInstantiation != right.IsCanonicalGenericInstantiation ||
+            left.GenericDefinitionHandle != right.GenericDefinitionHandle ||
+            !HaveCompatibleExpressionSignatureKind(
+                left.GenericDefinitionRawTypeKind,
+                left.GenericDefinitionSignatureKind,
+                right.GenericDefinitionRawTypeKind,
+                right.GenericDefinitionSignatureKind) ||
+            left.GenericDefinitionText != right.GenericDefinitionText ||
+            left.TypeParameterSlot != right.TypeParameterSlot ||
+            left.MethodParameterSlot != right.MethodParameterSlot ||
+            left.ArrayRank != right.ArrayRank ||
+            left.HasPinnedQualifier != right.HasPinnedQualifier ||
+            left.IsUnsupported != right.IsUnsupported ||
+            !AreSameImmutableValues(left.OuterCustomModifiers, right.OuterCustomModifiers) ||
+            !AreSameImmutableValues(left.ArraySizes, right.ArraySizes) ||
+            !AreSameImmutableValues(left.ArrayLowerBounds, right.ArrayLowerBounds) ||
+            !AreSameOptionalExpressionSignature(
+                left.ArrayElementType,
+                right.ArrayElementType,
+                depth,
+                ref remainingNodes) ||
+            !AreSameOptionalExpressionSignature(
+                left.SzArrayElementType,
+                right.SzArrayElementType,
+                depth,
+                ref remainingNodes) ||
+            !AreSameOptionalExpressionSignature(
+                left.ByReferenceElementType,
+                right.ByReferenceElementType,
+                depth,
+                ref remainingNodes) ||
+            !AreSameOptionalExpressionSignature(
+                left.PointerElementType,
+                right.PointerElementType,
+                depth,
+                ref remainingNodes) ||
+            !AreSameOptionalFunctionPointerSignature(
+                left.FunctionPointerSignature,
+                right.FunctionPointerSignature,
+                depth,
+                ref remainingNodes))
+        {
+            return false;
+        }
+
+        var leftArguments = left.GenericArguments.IsDefault
+            ? ImmutableArray<SignatureTypeName>.Empty
+            : left.GenericArguments;
+        var rightArguments = right.GenericArguments.IsDefault
+            ? ImmutableArray<SignatureTypeName>.Empty
+            : right.GenericArguments;
+        if (leftArguments.Length != rightArguments.Length)
+        {
+            return false;
+        }
+
+        for (var index = 0; index < leftArguments.Length; index++)
+        {
+            if (!AreSameExpressionSignature(
+                    leftArguments[index],
+                    rightArguments[index],
+                    depth + 1,
+                    ref remainingNodes))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static bool HaveCompatibleExpressionNominalIdentity(
+        SignatureTypeName left,
+        SignatureTypeName right)
+    {
+        if (left.IsExactNamedType != right.IsExactNamedType ||
+            left.NominalHandle != right.NominalHandle)
+        {
+            return false;
+        }
+
+        if (!left.IsExactNamedType)
+        {
+            return left.RawTypeKind == right.RawTypeKind &&
+                   left.SignatureKind == right.SignatureKind;
+        }
+
+        return !left.NominalHandle.IsNil &&
+               HaveCompatibleExpressionSignatureKind(
+                   left.RawTypeKind,
+                   left.SignatureKind,
+                   right.RawTypeKind,
+                   right.SignatureKind);
+    }
+
+    private static bool HaveCompatibleExpressionSignatureKind(
+        byte leftRawTypeKind,
+        SignatureTypeKind leftSignatureKind,
+        byte rightRawTypeKind,
+        SignatureTypeKind rightSignatureKind) =>
+        (leftRawTypeKind == 0 ||
+         rightRawTypeKind == 0 ||
+         leftRawTypeKind == rightRawTypeKind) &&
+        (leftSignatureKind == SignatureTypeKind.Unknown ||
+         rightSignatureKind == SignatureTypeKind.Unknown ||
+         leftSignatureKind == rightSignatureKind);
+
+    private static bool AreSameOptionalFunctionPointerSignature(
+        SignatureFunctionPointer? left,
+        SignatureFunctionPointer? right,
+        int depth,
+        ref int remainingNodes)
+    {
+        if (left is null || right is null)
+        {
+            return left is null && right is null;
+        }
+
+        if (!left.Header.Equals(right.Header) ||
+            left.RequiredParameterCount != right.RequiredParameterCount ||
+            left.GenericParameterCount != right.GenericParameterCount ||
+            left.ParameterTypes.Length != right.ParameterTypes.Length ||
+            !AreSameExpressionSignature(
+                left.ReturnType,
+                right.ReturnType,
+                depth + 1,
+                ref remainingNodes))
+        {
+            return false;
+        }
+
+        for (var index = 0; index < left.ParameterTypes.Length; index++)
+        {
+            if (!AreSameExpressionSignature(
+                    left.ParameterTypes[index],
+                    right.ParameterTypes[index],
+                    depth + 1,
+                    ref remainingNodes))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static bool AreSameOptionalExpressionSignature(
+        SignatureTypeName? left,
+        SignatureTypeName? right,
+        int depth,
+        ref int remainingNodes) =>
+        left is null || right is null
+            ? left is null && right is null
+            : AreSameExpressionSignature(left, right, depth + 1, ref remainingNodes);
+
+    private static bool AreSameImmutableValues<T>(
+        ImmutableArray<T> left,
+        ImmutableArray<T> right)
+    {
+        if (left.IsDefaultOrEmpty || right.IsDefaultOrEmpty)
+        {
+            return left.IsDefaultOrEmpty && right.IsDefaultOrEmpty;
+        }
+
+        return left.SequenceEqual(right);
     }
 
     private static int IntegralStackFamily(string type) => type switch
@@ -9004,26 +9733,71 @@ internal static class ManagedSymbolReader
     private static CallInfo? ResolveCall(
         MetadataReader metadata,
         EnumTypeCatalog enumTypes,
-        int token)
+        int token,
+        MemberReferenceCallerContext callerContext)
     {
         var handle = MetadataTokens.EntityHandle(token);
         switch (handle.Kind)
         {
             case HandleKind.MethodDefinition:
-                var method = metadata.GetMethodDefinition((MethodDefinitionHandle)handle);
-                var methodSignature = method.DecodeSignature(SignatureTypeNameProvider.Instance, null);
+                var methodHandle = (MethodDefinitionHandle)handle;
+                var method = metadata.GetMethodDefinition(methodHandle);
                 var methodDeclaringType = method.GetDeclaringType();
+                var methodContext = TryCreateMemberReferenceCallerContext(
+                    metadata,
+                    methodDeclaringType,
+                    methodHandle);
+                if (!methodContext.IsAvailable)
+                {
+                    return null;
+                }
+
+                var methodSignature = method.DecodeSignature(
+                    SignatureTypeNameProvider.Instance,
+                    methodContext.SignatureContext);
                 if (methodSignature.GenericParameterCount != method.GetGenericParameters().Count ||
-                    methodSignature.ReturnType.HasPinnedQualifier ||
-                    methodSignature.ParameterTypes.Any(type => type.HasPinnedQualifier) ||
+                    methodSignature.Header.CallingConvention !=
+                        SignatureCallingConvention.Default ||
+                    methodSignature.Header.HasExplicitThis ||
+                    methodSignature.RequiredParameterCount !=
+                        methodSignature.ParameterTypes.Length ||
+                    HasUnrepresentableMemberReferenceType(methodSignature.ReturnType) ||
+                    methodSignature.ParameterTypes.Any(HasUnrepresentableMemberReferenceType) ||
                     methodSignature.Header.IsInstance == method.Attributes.HasFlag(MethodAttributes.Static))
                 {
                     return null;
                 }
 
+                CliType methodDeclaringCliType;
+                if (methodContext.TypeParameterCount > 0)
+                {
+                    if (!TryCreateCurrentGenericOwnerCliType(
+                            metadata,
+                            enumTypes,
+                            methodDeclaringType,
+                            methodContext.TypeParameterCount,
+                            callerContext,
+                            out methodDeclaringCliType))
+                    {
+                        return null;
+                    }
+                }
+                else
+                {
+                    methodDeclaringCliType = CreateNominalCliType(
+                        metadata,
+                        enumTypes,
+                        methodDeclaringType);
+                }
+
+                if (methodDeclaringCliType.Text.Length == 0)
+                {
+                    return null;
+                }
+
                 return new CallInfo(
-                    GetTypeName(metadata, methodDeclaringType) ?? string.Empty,
-                    CreateNominalCliType(metadata, enumTypes, methodDeclaringType),
+                    methodDeclaringCliType.Text,
+                    methodDeclaringCliType,
                     methodDeclaringType,
                     metadata.GetString(method.Name),
                     methodSignature.ParameterTypes.Length,
@@ -9036,48 +9810,76 @@ internal static class ManagedSymbolReader
                     method.Attributes);
 
             case HandleKind.MemberReference:
-                var member = metadata.GetMemberReference((MemberReferenceHandle)handle);
-                if (member.GetKind() != MemberReferenceKind.Method)
+                if (!MemberReferenceSignatureValidator.TryValidateMethod(
+                        metadata,
+                        (MemberReferenceHandle)handle,
+                        callerContext,
+                        out var member,
+                        out var parentContext))
                 {
                     return null;
                 }
 
-                object? declaringTypeContext = null;
-                if (member.Parent.Kind == HandleKind.TypeSpecification)
+                var memberSignature = member.DecodeMethodSignature(
+                    SignatureTypeNameProvider.Instance,
+                    parentContext.SignatureContext);
+                if (memberSignature.Header.CallingConvention !=
+                        SignatureCallingConvention.Default ||
+                    memberSignature.Header.HasExplicitThis ||
+                    memberSignature.RequiredParameterCount !=
+                        memberSignature.ParameterTypes.Length ||
+                    HasUnrepresentableMemberReferenceType(memberSignature.ReturnType) ||
+                    memberSignature.ParameterTypes.Any(HasUnrepresentableMemberReferenceType))
                 {
-                    var declaringType = TryReadSignatureTypeSpecification(
-                        metadata,
-                        (TypeSpecificationHandle)member.Parent);
-                    if (declaringType is null || declaringType.HasPinnedQualifier)
+                    return null;
+                }
+
+                var memberName = metadata.GetString(member.Name);
+                ArrayPseudoMemberInfo? arrayPseudoMember = null;
+                if (parentContext.IsArray &&
+                    !TryClassifyArrayPseudoMember(
+                        memberName,
+                        memberSignature,
+                        parentContext,
+                        out arrayPseudoMember))
+                {
+                    return null;
+                }
+
+                CliType declaringCliType;
+                if (member.Parent.Kind == HandleKind.TypeDefinition &&
+                    parentContext.TypeParameterLimit > 0)
+                {
+                    if (!TryCreateCurrentGenericOwnerCliType(
+                            metadata,
+                            enumTypes,
+                            (TypeDefinitionHandle)member.Parent,
+                            parentContext.TypeParameterLimit,
+                            callerContext,
+                            out declaringCliType))
                     {
                         return null;
                     }
-
-                    if (declaringType.IsCanonicalGenericInstantiation &&
-                        !declaringType.GenericArguments.IsDefaultOrEmpty &&
-                        !declaringType.HasNestedCustomModifiers &&
-                        !declaringType.HasPinnedQualifier &&
-                        declaringType.OuterCustomModifiers.IsEmpty)
-                    {
-                        declaringTypeContext = SignatureGenericContext.ForSubstitution(
-                            declaringType.GenericArguments);
-                    }
+                }
+                else
+                {
+                    var decodedName = GetTypeName(metadata, member.Parent) ?? string.Empty;
+                    declaringCliType = parentContext.DecodedType is { } decodedParent
+                        ? CreateCliType(decodedParent, enumTypes) with { Text = decodedName }
+                        : CreateNominalCliType(metadata, enumTypes, member.Parent);
                 }
 
-                var memberSignature = member.DecodeMethodSignature(
-                    SignatureTypeNameProvider.Instance,
-                    declaringTypeContext);
-                if (memberSignature.ReturnType.HasPinnedQualifier ||
-                    memberSignature.ParameterTypes.Any(type => type.HasPinnedQualifier))
+                var declaringTypeName = declaringCliType.Text;
+                if (declaringTypeName.Length == 0)
                 {
                     return null;
                 }
 
                 return new CallInfo(
-                    GetTypeName(metadata, member.Parent) ?? string.Empty,
-                    CreateNominalCliType(metadata, enumTypes, member.Parent),
+                    declaringTypeName,
+                    declaringCliType,
                     member.Parent,
-                    metadata.GetString(member.Name),
+                    memberName,
                     memberSignature.ParameterTypes.Length,
                     memberSignature.Header.IsInstance,
                     CreateCliType(memberSignature.ReturnType, enumTypes),
@@ -9085,41 +9887,74 @@ internal static class ManagedSymbolReader
                     memberSignature.ParameterTypes.Select(type => CreateCliType(type, enumTypes)).ToArray(),
                     [],
                     memberSignature.GenericParameterCount,
-                    DefinitionAttributes: null);
+                    DefinitionAttributes: null,
+                    arrayPseudoMember);
 
             case HandleKind.MethodSpecification:
-                var spec = metadata.GetMethodSpecification((MethodSpecificationHandle)handle);
-                var resolved = ResolveCall(metadata, enumTypes, MetadataTokens.GetToken(spec.Method));
+                if (!MemberReferenceSignatureValidator.TryValidateMethodSpecification(
+                        metadata,
+                        (MethodSpecificationHandle)handle,
+                        callerContext,
+                        out var spec))
+                {
+                    return null;
+                }
+
+                var resolved = ResolveCall(
+                    metadata,
+                    enumTypes,
+                    MetadataTokens.GetToken(spec.Method),
+                    callerContext);
                 if (resolved is null)
                 {
                     return null;
                 }
 
-                var decodedGenericArguments = spec.DecodeSignature(SignatureTypeNameProvider.Instance, null);
+                var decodedGenericArguments = spec.DecodeSignature(
+                    SignatureTypeNameProvider.Instance,
+                    callerContext.SignatureContext);
                 if (resolved.GenericParameterCount <= 0 ||
                     decodedGenericArguments.Length != resolved.GenericParameterCount ||
                     decodedGenericArguments.Length > MaxGenericParametersPerOwner ||
-                    decodedGenericArguments.Any(type =>
-                        type.OuterCustomModifiers.Length != 0 ||
-                        type.HasNestedCustomModifiers ||
-                        type.IsRestrictedGenericArgument ||
-                        type.HasPinnedQualifier ||
-                        type.PrimitiveType is PrimitiveTypeCode.Void or PrimitiveTypeCode.TypedReference ||
-                        (type.Text == "nint" && type.PrimitiveType is null) ||
-                        (type.IsExactNamedType && IsPrimitiveAliasName(type.Text))))
+                    decodedGenericArguments.Any(IsInvalidMethodSpecificationArgument))
                 {
                     return null;
+                }
+
+                var remainingRenderedCharacters =
+                    MaxInstantiatedMethodSignatureCharacters;
+                if (!TryReserveMethodSpecificationGenericArgumentCharacters(
+                        decodedGenericArguments,
+                        ref remainingRenderedCharacters) ||
+                    !TryInstantiateMethodSignatureCliType(
+                        resolved.ReturnType,
+                        decodedGenericArguments,
+                        enumTypes,
+                        ref remainingRenderedCharacters,
+                        out var instantiatedReturnType))
+                {
+                    return null;
+                }
+
+                var instantiatedParameterTypes = new CliType[resolved.ParameterTypes.Count];
+                for (var index = 0; index < instantiatedParameterTypes.Length; index++)
+                {
+                    if (!TryInstantiateMethodSignatureCliType(
+                            resolved.ParameterTypes[index],
+                            decodedGenericArguments,
+                            enumTypes,
+                            ref remainingRenderedCharacters,
+                            out instantiatedParameterTypes[index]))
+                    {
+                        return null;
+                    }
                 }
 
                 var genericArguments = decodedGenericArguments.Select(type => type.Text).ToArray();
                 return resolved with
                 {
-                    ReturnType = InstantiateMethodSignatureCliType(
-                        resolved.ReturnType,
-                        genericArguments),
-                    ParameterTypes = resolved.ParameterTypes
-                        .Select(type => InstantiateMethodSignatureCliType(type, genericArguments))
-                        .ToArray(),
+                    ReturnType = instantiatedReturnType,
+                    ParameterTypes = instantiatedParameterTypes,
                     GenericArguments = genericArguments
                 };
 
@@ -9128,17 +9963,507 @@ internal static class ManagedSymbolReader
         }
     }
 
-    private static CliType InstantiateMethodSignatureCliType(
-        CliType type,
-        IReadOnlyList<string> genericArguments)
+    private static bool IsInvalidMethodSpecificationArgument(SignatureTypeName type) =>
+        HasUnrepresentableSignatureNode(type) ||
+        type.OuterCustomModifiers.Length != 0 ||
+        type.HasNestedCustomModifiers ||
+        type.IsRestrictedGenericArgument ||
+        type.HasPinnedQualifier ||
+        type.PrimitiveType is PrimitiveTypeCode.Void or PrimitiveTypeCode.TypedReference ||
+        (type.Text == "nint" && type.PrimitiveType is null);
+
+    private static bool TryReserveMethodSpecificationGenericArgumentCharacters(
+        ImmutableArray<SignatureTypeName> genericArguments,
+        ref int remainingRenderedCharacters)
     {
-        var text = InstantiateMethodSignatureType(type.Text, genericArguments);
-        return text == type.Text
-            ? type
-            : new CliType(
-                text,
-                IsByReference: type.IsByReference,
-                HasPinnedQualifier: type.HasPinnedQualifier);
+        long requiredCharacters = 2;
+        if (genericArguments.Length > 1)
+        {
+            requiredCharacters += (genericArguments.Length - 1L) * 2L;
+        }
+
+        foreach (var argument in genericArguments)
+        {
+            requiredCharacters += argument.Text.Length;
+            if (requiredCharacters > remainingRenderedCharacters)
+            {
+                return false;
+            }
+        }
+
+        return TryReserveRenderedCharacters(
+            (int)requiredCharacters,
+            ref remainingRenderedCharacters);
+    }
+
+    private static bool TryInstantiateMethodSignatureCliType(
+        CliType type,
+        ImmutableArray<SignatureTypeName> genericArguments,
+        EnumTypeCatalog enumTypes,
+        ref int remainingRenderedCharacters,
+        out CliType instantiated)
+    {
+        instantiated = type;
+        var argumentNames = genericArguments.Select(argument => argument.Text).ToArray();
+        if (type.StructuralSignature is not { } structuralType)
+        {
+            if (!TryInstantiateMethodSignatureText(
+                    type.Text,
+                    argumentNames,
+                    ref remainingRenderedCharacters,
+                    out var fallbackText))
+            {
+                return false;
+            }
+
+            instantiated = fallbackText == type.Text
+                ? type
+                : new CliType(
+                    fallbackText,
+                    IsByReference: type.IsByReference,
+                    HasPinnedQualifier: type.HasPinnedQualifier);
+            return !ContainsUninstantiatedMethodGenericParameter(instantiated.Text);
+        }
+
+        var remainingNodes = 512;
+        if (!TryInstantiateMethodSignatureTypeName(
+                structuralType,
+                genericArguments,
+                argumentNames,
+                depth: 0,
+                ref remainingNodes,
+                ref remainingRenderedCharacters,
+                out var instantiatedSignature))
+        {
+            return false;
+        }
+
+        instantiated = CreateCliType(instantiatedSignature, enumTypes) with
+        {
+            IsByReference = type.IsByReference,
+            HasPinnedQualifier = type.HasPinnedQualifier
+        };
+        return true;
+    }
+
+    private static bool TryInstantiateMethodSignatureTypeName(
+        SignatureTypeName type,
+        ImmutableArray<SignatureTypeName> genericArguments,
+        IReadOnlyList<string> argumentNames,
+        int depth,
+        ref int remainingNodes,
+        ref int remainingRenderedCharacters,
+        out SignatureTypeName instantiated)
+    {
+        instantiated = type;
+        if (depth > MaxStructureDepth || remainingNodes-- <= 0)
+        {
+            return false;
+        }
+
+        if (TryReadExactMethodGenericParameter(type, out var parameterIndex))
+        {
+            if (parameterIndex < 0 || parameterIndex >= genericArguments.Length)
+            {
+                return false;
+            }
+
+            if (!TryReserveRenderedCharacters(
+                    genericArguments[parameterIndex].Text.Length,
+                    ref remainingRenderedCharacters))
+            {
+                return false;
+            }
+
+            instantiated = genericArguments[parameterIndex];
+            return true;
+        }
+
+        if (!TryInstantiateMethodSignatureText(
+                type.Text,
+                argumentNames,
+                ref remainingRenderedCharacters,
+                out var text))
+        {
+            return false;
+        }
+
+        if (type.ArrayElementType is { } arrayElement)
+        {
+            if (!TryInstantiateMethodSignatureTypeName(
+                    arrayElement,
+                    genericArguments,
+                    argumentNames,
+                    depth + 1,
+                    ref remainingNodes,
+                    ref remainingRenderedCharacters,
+                    out var instantiatedElement))
+            {
+                return false;
+            }
+
+            instantiated = type with
+            {
+                Text = text,
+                ArrayElementType = instantiatedElement,
+                HasPinnedQualifier = instantiatedElement.HasPinnedQualifier,
+                IsUnsupported = instantiatedElement.IsUnsupported
+            };
+            return true;
+        }
+
+        if (type.SzArrayElementType is { } szArrayElement)
+        {
+            if (!TryInstantiateMethodSignatureTypeName(
+                    szArrayElement,
+                    genericArguments,
+                    argumentNames,
+                    depth + 1,
+                    ref remainingNodes,
+                    ref remainingRenderedCharacters,
+                    out var instantiatedElement))
+            {
+                return false;
+            }
+
+            instantiated = type with
+            {
+                Text = text,
+                SzArrayElementType = instantiatedElement,
+                HasPinnedQualifier = instantiatedElement.HasPinnedQualifier,
+                IsUnsupported = instantiatedElement.IsUnsupported
+            };
+            return true;
+        }
+
+        if (type.ByReferenceElementType is { } byReferenceElement)
+        {
+            if (!TryInstantiateMethodSignatureTypeName(
+                    byReferenceElement,
+                    genericArguments,
+                    argumentNames,
+                    depth + 1,
+                    ref remainingNodes,
+                    ref remainingRenderedCharacters,
+                    out var instantiatedElement))
+            {
+                return false;
+            }
+
+            instantiated = type with
+            {
+                Text = text,
+                ByReferenceElementType = instantiatedElement,
+                HasPinnedQualifier = instantiatedElement.HasPinnedQualifier,
+                IsUnsupported = instantiatedElement.IsUnsupported
+            };
+            return true;
+        }
+
+        if (type.PointerElementType is { } pointerElement)
+        {
+            if (!TryInstantiateMethodSignatureTypeName(
+                    pointerElement,
+                    genericArguments,
+                    argumentNames,
+                    depth + 1,
+                    ref remainingNodes,
+                    ref remainingRenderedCharacters,
+                    out var instantiatedElement))
+            {
+                return false;
+            }
+
+            instantiated = type with
+            {
+                Text = text,
+                PointerElementType = instantiatedElement,
+                HasPinnedQualifier = instantiatedElement.HasPinnedQualifier,
+                IsUnsupported = instantiatedElement.IsUnsupported
+            };
+            return true;
+        }
+
+        if (type.FunctionPointerSignature is { } functionPointer)
+        {
+            if (!TryInstantiateMethodSignatureTypeName(
+                    functionPointer.ReturnType,
+                    genericArguments,
+                    argumentNames,
+                    depth + 1,
+                    ref remainingNodes,
+                    ref remainingRenderedCharacters,
+                    out var instantiatedReturnType))
+            {
+                return false;
+            }
+
+            var parameterTypes = ImmutableArray.CreateBuilder<SignatureTypeName>(
+                functionPointer.ParameterTypes.Length);
+            foreach (var parameterType in functionPointer.ParameterTypes)
+            {
+                if (!TryInstantiateMethodSignatureTypeName(
+                        parameterType,
+                        genericArguments,
+                        argumentNames,
+                        depth + 1,
+                        ref remainingNodes,
+                        ref remainingRenderedCharacters,
+                        out var instantiatedParameterType))
+                {
+                    return false;
+                }
+
+                parameterTypes.Add(instantiatedParameterType);
+            }
+
+            var instantiatedParameterTypes = parameterTypes.MoveToImmutable();
+            instantiated = type with
+            {
+                Text = text,
+                FunctionPointerSignature = functionPointer with
+                {
+                    ReturnType = instantiatedReturnType,
+                    ParameterTypes = instantiatedParameterTypes
+                },
+                HasPinnedQualifier = instantiatedReturnType.HasPinnedQualifier ||
+                                     instantiatedParameterTypes.Any(parameter =>
+                                         parameter.HasPinnedQualifier),
+                IsUnsupported = type.IsUnsupported ||
+                                instantiatedReturnType.IsUnsupported ||
+                                instantiatedParameterTypes.Any(parameter =>
+                                    parameter.IsUnsupported)
+            };
+            return true;
+        }
+
+        if (!type.GenericArguments.IsDefaultOrEmpty)
+        {
+            var arguments = ImmutableArray.CreateBuilder<SignatureTypeName>(
+                type.GenericArguments.Length);
+            foreach (var argument in type.GenericArguments)
+            {
+                if (!TryInstantiateMethodSignatureTypeName(
+                        argument,
+                        genericArguments,
+                        argumentNames,
+                        depth + 1,
+                        ref remainingNodes,
+                        ref remainingRenderedCharacters,
+                        out var instantiatedArgument))
+                {
+                    return false;
+                }
+
+                arguments.Add(instantiatedArgument);
+            }
+
+            var instantiatedArguments = arguments.MoveToImmutable();
+            instantiated = type with
+            {
+                Text = text,
+                GenericArguments = instantiatedArguments,
+                HasPinnedQualifier = instantiatedArguments.Any(argument =>
+                    argument.HasPinnedQualifier),
+                IsUnsupported = type.IsUnsupported ||
+                                instantiatedArguments.Any(argument => argument.IsUnsupported)
+            };
+            return true;
+        }
+
+        instantiated = type with { Text = text };
+        return type.MethodParameterSlot is not null ||
+               !ContainsUninstantiatedMethodGenericParameter(text);
+    }
+
+    private static bool TryReadExactMethodGenericParameter(
+        SignatureTypeName type,
+        out int index)
+    {
+        index = -1;
+        if (type.TypeParameterSlot is not null ||
+            type.PrimitiveType is not null ||
+            !type.NominalHandle.IsNil ||
+            !type.GenericArguments.IsDefaultOrEmpty ||
+            type.ArrayElementType is not null ||
+            type.SzArrayElementType is not null ||
+            type.ByReferenceElementType is not null ||
+            type.PointerElementType is not null ||
+            type.FunctionPointerSignature is not null ||
+            type.IsByReference ||
+            type.HasPinnedQualifier ||
+            !type.OuterCustomModifiers.IsEmpty ||
+            type.HasNestedCustomModifiers ||
+            !type.Text.StartsWith("!!", StringComparison.Ordinal) ||
+            !int.TryParse(
+                type.Text.AsSpan(2),
+                NumberStyles.None,
+                CultureInfo.InvariantCulture,
+                out index))
+        {
+            return false;
+        }
+
+        return type.MethodParameterSlot is not { } slot || slot.Index == index;
+    }
+
+    private static bool HasUnrepresentableMemberReferenceType(SignatureTypeName type) =>
+        HasUnrepresentableSignatureNode(type) ||
+        type.HasPinnedQualifier ||
+        type.IsByReference ||
+        type.HasNestedCustomModifiers ||
+        !type.OuterCustomModifiers.IsEmpty ||
+        type.PrimitiveType == PrimitiveTypeCode.TypedReference ||
+        (type.Text == "nint" && type.PrimitiveType is null);
+
+    private static bool HasUnrepresentableSignatureNode(SignatureTypeName type)
+    {
+        var remainingNodes = 1_024;
+        return HasUnrepresentableSignatureNode(type, depth: 0, ref remainingNodes);
+    }
+
+    private static bool HasUnrepresentableSignatureNode(
+        SignatureTypeName type,
+        int depth,
+        ref int remainingNodes)
+    {
+        if (depth > MaxStructureDepth ||
+            remainingNodes-- <= 0 ||
+            type.IsUnsupported ||
+            type.ArrayElementType is not null && type.ArrayRank == 1 ||
+            type.IsExactNamedType && IsPrimitiveAliasName(type.Text) ||
+            type.IsCanonicalGenericInstantiation &&
+            type.GenericDefinitionText is { } genericDefinition &&
+            HasPrimitiveAliasGenericDefinitionSegment(genericDefinition))
+        {
+            return true;
+        }
+
+        foreach (var argument in type.GenericArguments.IsDefault
+                     ? ImmutableArray<SignatureTypeName>.Empty
+                     : type.GenericArguments)
+        {
+            if (HasUnrepresentableSignatureNode(
+                    argument,
+                    depth + 1,
+                    ref remainingNodes))
+            {
+                return true;
+            }
+        }
+
+        if (type.FunctionPointerSignature is { } functionPointer)
+        {
+            if (HasUnrepresentableSignatureNode(
+                    functionPointer.ReturnType,
+                    depth + 1,
+                    ref remainingNodes))
+            {
+                return true;
+            }
+
+            foreach (var parameter in functionPointer.ParameterTypes)
+            {
+                if (HasUnrepresentableSignatureNode(
+                        parameter,
+                        depth + 1,
+                        ref remainingNodes))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return type.ArrayElementType is { } arrayElement &&
+                   HasUnrepresentableSignatureNode(
+                       arrayElement,
+                       depth + 1,
+                       ref remainingNodes) ||
+               type.SzArrayElementType is { } szArrayElement &&
+                   HasUnrepresentableSignatureNode(
+                       szArrayElement,
+                       depth + 1,
+                       ref remainingNodes) ||
+               type.ByReferenceElementType is { } byReferenceElement &&
+                   HasUnrepresentableSignatureNode(
+                       byReferenceElement,
+                       depth + 1,
+                       ref remainingNodes) ||
+               type.PointerElementType is { } pointerElement &&
+                   HasUnrepresentableSignatureNode(
+                       pointerElement,
+                       depth + 1,
+                       ref remainingNodes);
+    }
+
+    private static bool TryClassifyArrayPseudoMember(
+        string memberName,
+        MethodSignature<SignatureTypeName> signature,
+        MemberReferenceSignatureValidator.ParentContext parentContext,
+        out ArrayPseudoMemberInfo? pseudoMember)
+    {
+        pseudoMember = null;
+        if (!parentContext.IsArray ||
+            parentContext.DecodedType is not { } arrayType ||
+            parentContext.ArrayElementType is not { } elementType ||
+            parentContext.ArrayRank is <= 1 or > 32 ||
+            signature.Header.CallingConvention != SignatureCallingConvention.Default ||
+            !signature.Header.IsInstance ||
+            signature.Header.IsGeneric ||
+            signature.Header.HasExplicitThis ||
+            signature.GenericParameterCount != 0 ||
+            signature.RequiredParameterCount != signature.ParameterTypes.Length ||
+            !arrayType.ArraySizes.IsDefaultOrEmpty ||
+            arrayType.ArrayLowerBounds.Any(bound => bound != 0))
+        {
+            return false;
+        }
+
+        var rank = parentContext.ArrayRank;
+        var parameters = signature.ParameterTypes;
+        var indexCount = memberName == "Set" ? parameters.Length - 1 : parameters.Length;
+        if (indexCount != rank ||
+            parameters.Take(rank).Any(type =>
+                type.PrimitiveType != PrimitiveTypeCode.Int32 ||
+                type.IsByReference ||
+                type.IsUnsupported ||
+                type.HasNestedCustomModifiers ||
+                !type.OuterCustomModifiers.IsEmpty))
+        {
+            return false;
+        }
+
+        switch (memberName)
+        {
+            case "Get" when parameters.Length == rank &&
+                            AreSameConstructorSignature(signature.ReturnType, elementType):
+                pseudoMember = new ArrayPseudoMemberInfo(
+                    ArrayPseudoMemberKind.Get,
+                    elementType.Text,
+                    rank);
+                return true;
+
+            case "Set" when parameters.Length == rank + 1 &&
+                            signature.ReturnType.PrimitiveType == PrimitiveTypeCode.Void &&
+                            AreSameConstructorSignature(parameters[^1], elementType):
+                pseudoMember = new ArrayPseudoMemberInfo(
+                    ArrayPseudoMemberKind.Set,
+                    elementType.Text,
+                    rank);
+                return true;
+
+            case ".ctor" when arrayType.ArrayElementType is not null &&
+                              parameters.Length == rank &&
+                              signature.ReturnType.PrimitiveType == PrimitiveTypeCode.Void:
+                pseudoMember = new ArrayPseudoMemberInfo(
+                    ArrayPseudoMemberKind.Constructor,
+                    elementType.Text,
+                    rank);
+                return true;
+
+            default:
+                return false;
+        }
     }
 
     private static CliType CreateNominalCliType(
@@ -9165,15 +10490,105 @@ internal static class ManagedSymbolReader
         return CreateCliType(type, enumTypes) with { Text = text };
     }
 
+    private static CliType CreateCurrentInstanceCliType(
+        MetadataReader metadata,
+        EnumTypeCatalog enumTypes,
+        TypeDefinitionHandle declaringType,
+        MemberReferenceCallerContext callerContext)
+    {
+        if (callerContext.TypeParameterCount > 0 &&
+            TryCreateCurrentGenericOwnerCliType(
+                metadata,
+                enumTypes,
+                declaringType,
+                callerContext.TypeParameterCount,
+                callerContext,
+                out var currentGenericType))
+        {
+            return currentGenericType;
+        }
+
+        return CreateNominalCliType(metadata, enumTypes, declaringType);
+    }
+
+    private static bool TryCreateCurrentGenericOwnerCliType(
+        MetadataReader metadata,
+        EnumTypeCatalog enumTypes,
+        TypeDefinitionHandle handle,
+        int genericArity,
+        MemberReferenceCallerContext callerContext,
+        out CliType type)
+    {
+        type = new CliType(string.Empty);
+        if (genericArity <= 0 ||
+            !callerContext.IsAvailable ||
+            callerContext.TypeParameterOwner != handle ||
+            callerContext.TypeParameterCount != genericArity)
+        {
+            return false;
+        }
+
+        var provider = SignatureTypeNameProvider.Instance;
+        var genericType = provider.GetTypeFromDefinition(
+            metadata,
+            handle,
+            rawTypeKind: 0);
+        var ownerContext = SignatureGenericContext.ForOwner(handle, genericArity);
+        var arguments = ImmutableArray.CreateBuilder<SignatureTypeName>(genericArity);
+        for (var index = 0; index < genericArity; index++)
+        {
+            arguments.Add(provider.GetGenericTypeParameter(ownerContext, index));
+        }
+
+        var instantiated = provider.GetGenericInstantiation(
+            genericType,
+            arguments.MoveToImmutable());
+        if (!instantiated.IsCanonicalGenericInstantiation ||
+            instantiated.IsUnsupported ||
+            instantiated.Text.Length == 0 ||
+            instantiated.Text.Contains('`'))
+        {
+            return false;
+        }
+
+        type = CreateCliType(instantiated, enumTypes);
+        return true;
+    }
+
+    private static bool TryCreateInstructionCliType(
+        MetadataReader metadata,
+        EnumTypeCatalog enumTypes,
+        EntityHandle handle,
+        MemberReferenceCallerContext callerContext,
+        out CliType type)
+    {
+        type = new CliType(string.Empty);
+        if (!MemberReferenceSignatureValidator.TryValidateTypeOperand(
+                metadata,
+                handle,
+                callerContext,
+                out var signature) ||
+            HasUnrepresentableSignatureNode(signature) ||
+            signature.HasPinnedQualifier ||
+            signature.Text.Length == 0)
+        {
+            return false;
+        }
+
+        type = CreateCliType(signature, enumTypes);
+        return true;
+    }
+
     private static SignatureTypeName? TryReadSignatureTypeSpecification(
         MetadataReader metadata,
-        TypeSpecificationHandle handle)
+        TypeSpecificationHandle handle,
+        object? genericContext = null)
     {
         try
         {
             return SignatureTypeNameProvider.Instance.GetTypeFromSpecification(
                 metadata,
-                genericContext: null,
+                genericContext,
                 handle,
                 rawTypeKind: 0);
         }
@@ -9184,70 +10599,1496 @@ internal static class ManagedSymbolReader
         }
     }
 
-    private static bool HasInvalidPinnedTypeSpecification(
-        MetadataReader metadata,
-        EntityHandle handle)
+    private sealed class MemberReferenceSignatureValidator
     {
-        if (handle.Kind != HandleKind.TypeSpecification)
+        private const int MaxSignatureBytes = 4 * 1_024;
+        private const int MaxTypeSpecificationBytes = 256;
+        private const int MaxAggregateTypeSpecificationBytes = 4 * 1_024;
+        private const int MaxSignatureNodes = 1_024;
+        private const int MaxSignatureDepth = 64;
+        private const int MaxParameters = 256;
+        private const int MaxGenericArguments = 64;
+        private const int MaxArrayRank = 32;
+        private const int MaxCustomModifiers = 64;
+        private const int MaxNominalNameDepth = 64;
+        private const int MaxNameSegmentBytes = 4 * 1_024;
+        private const int MaxNominalNameBytes = 256 * 1_024;
+
+        private readonly MetadataReader _metadata;
+        private readonly MemberReferenceCallerContext _callerContext;
+        private readonly HashSet<TypeSpecificationHandle> _activeTypeSpecifications = [];
+        private int _typeSpecificationBytes;
+        private int _signatureNodes;
+        private int _customModifiers;
+        private int _nominalNameBytes;
+
+        internal readonly record struct ParentContext(
+            object? SignatureContext,
+            int TypeParameterLimit,
+            int ContextualMethodParameterLimit,
+            SignatureTypeName? DecodedType,
+            SignatureTypeName? ArrayElementType,
+            int ArrayRank)
+        {
+            public bool IsArray => ArrayElementType is not null && ArrayRank > 0;
+        }
+
+        private MemberReferenceSignatureValidator(
+            MetadataReader metadata,
+            MemberReferenceCallerContext callerContext)
+        {
+            _metadata = metadata;
+            _callerContext = callerContext;
+        }
+
+        public static bool TryValidateMethod(
+            MetadataReader metadata,
+            MemberReferenceHandle handle,
+            MemberReferenceCallerContext callerContext,
+            out MemberReference member,
+            out ParentContext parentContext)
+        {
+            member = default;
+            parentContext = default;
+            try
+            {
+                var validator = new MemberReferenceSignatureValidator(metadata, callerContext);
+                if (!validator.IsValidRow(handle, TableIndex.MemberRef))
+                {
+                    return false;
+                }
+
+                member = metadata.GetMemberReference(handle);
+                if (!validator.TryReserveMemberName(member.Name))
+                {
+                    return false;
+                }
+
+                if (!validator.TryValidateParent(member.Parent, out parentContext))
+                {
+                    return false;
+                }
+
+                var reader = metadata.GetBlobReader(member.Signature);
+                return reader.Length is > 0 and <= MaxSignatureBytes &&
+                       validator.TryValidateMethodSignature(
+                           ref reader,
+                           parentContext.TypeParameterLimit,
+                           parentContext.ContextualMethodParameterLimit,
+                           memberReference: true,
+                           requireEnd: true,
+                           typeDepth: 0);
+            }
+            catch (Exception exception) when (
+                exception is BadImageFormatException or ArgumentException or InvalidOperationException)
+            {
+                member = default;
+                parentContext = default;
+                return false;
+            }
+        }
+
+        public static bool TryValidateField(
+            MetadataReader metadata,
+            MemberReferenceHandle handle,
+            MemberReferenceCallerContext callerContext,
+            out MemberReference member,
+            out ParentContext parentContext)
+        {
+            member = default;
+            parentContext = default;
+            try
+            {
+                var validator = new MemberReferenceSignatureValidator(metadata, callerContext);
+                if (!validator.IsValidRow(handle, TableIndex.MemberRef))
+                {
+                    return false;
+                }
+
+                member = metadata.GetMemberReference(handle);
+                if (!validator.TryReserveMemberName(member.Name))
+                {
+                    return false;
+                }
+
+                if (!validator.TryValidateParent(member.Parent, out parentContext) ||
+                    parentContext.IsArray)
+                {
+                    return false;
+                }
+
+                var reader = metadata.GetBlobReader(member.Signature);
+                return reader.Length is > 1 and <= MaxSignatureBytes &&
+                       reader.ReadByte() == 0x06 &&
+                       validator.TryValidateFieldType(
+                           ref reader,
+                           parentContext.TypeParameterLimit,
+                           methodParameterLimit: 0,
+                           depth: 0) &&
+                       reader.RemainingBytes == 0;
+            }
+            catch (Exception exception) when (
+                exception is BadImageFormatException or ArgumentException or InvalidOperationException)
+            {
+                member = default;
+                parentContext = default;
+                return false;
+            }
+        }
+
+        public static bool TryValidateMethodSpecification(
+            MetadataReader metadata,
+            MethodSpecificationHandle handle,
+            MemberReferenceCallerContext callerContext,
+            out MethodSpecification specification)
+        {
+            specification = default;
+            try
+            {
+                var validator = new MemberReferenceSignatureValidator(metadata, callerContext);
+                if (!validator.IsValidRow(handle, TableIndex.MethodSpec))
+                {
+                    return false;
+                }
+
+                specification = metadata.GetMethodSpecification(handle);
+                if (specification.Method.Kind == HandleKind.MethodDefinition)
+                {
+                    if (!validator.IsValidRow(specification.Method, TableIndex.MethodDef))
+                    {
+                        return false;
+                    }
+                }
+                else if (specification.Method.Kind == HandleKind.MemberReference)
+                {
+                    if (!validator.IsValidRow(specification.Method, TableIndex.MemberRef))
+                    {
+                        return false;
+                    }
+                }
+                else
+                {
+                    return false;
+                }
+
+                var reader = metadata.GetBlobReader(specification.Signature);
+                if (reader.Length is <= 2 or > MaxSignatureBytes ||
+                    reader.ReadByte() != 0x0A ||
+                    !TryReadCanonicalCompressedInteger(
+                        ref reader,
+                        out var genericArgumentCount) ||
+                    genericArgumentCount is <= 0 or > MaxGenericArguments)
+                {
+                    return false;
+                }
+
+                for (var index = 0; index < genericArgumentCount; index++)
+                {
+                    if (!validator.TryValidateCoreType(
+                            ref reader,
+                            callerContext.IsAvailable
+                                ? callerContext.TypeParameterCount
+                                : 0,
+                            callerContext.IsAvailable
+                                ? callerContext.MethodParameterCount
+                                : 0,
+                            depth: 0))
+                    {
+                        return false;
+                    }
+                }
+
+                return reader.RemainingBytes == 0;
+            }
+            catch (Exception exception) when (
+                exception is BadImageFormatException or ArgumentException or InvalidOperationException)
+            {
+                specification = default;
+                return false;
+            }
+        }
+
+        public static bool TryValidateTypeOperand(
+            MetadataReader metadata,
+            EntityHandle handle,
+            MemberReferenceCallerContext callerContext,
+            out SignatureTypeName type)
+        {
+            type = new SignatureTypeName(string.Empty) with { IsUnsupported = true };
+            try
+            {
+                var validator = new MemberReferenceSignatureValidator(metadata, callerContext);
+                if (!validator.TryValidateParent(handle, out var parentContext))
+                {
+                    return false;
+                }
+
+                if (handle.Kind is HandleKind.TypeDefinition or HandleKind.TypeReference)
+                {
+                    if (parentContext.TypeParameterLimit != 0)
+                    {
+                        return false;
+                    }
+
+                    type = handle.Kind == HandleKind.TypeDefinition
+                        ? SignatureTypeNameProvider.Instance.GetTypeFromDefinition(
+                            metadata,
+                            (TypeDefinitionHandle)handle,
+                            rawTypeKind: 0)
+                        : SignatureTypeNameProvider.Instance.GetTypeFromReference(
+                            metadata,
+                            (TypeReferenceHandle)handle,
+                            rawTypeKind: 0);
+                }
+                else if (parentContext.DecodedType is { } decodedType)
+                {
+                    type = decodedType;
+                }
+                else
+                {
+                    return false;
+                }
+
+                return type.IsExactNamedType ||
+                       type.IsCanonicalGenericInstantiation ||
+                       type.ArrayElementType is not null ||
+                       type.SzArrayElementType is not null;
+            }
+            catch (Exception exception) when (
+                exception is BadImageFormatException or ArgumentException or InvalidOperationException)
+            {
+                type = new SignatureTypeName(string.Empty) with { IsUnsupported = true };
+                return false;
+            }
+        }
+
+        private bool TryValidateParent(
+            EntityHandle parent,
+            out ParentContext context)
+        {
+            context = default;
+            switch (parent.Kind)
+            {
+                case HandleKind.TypeDefinition:
+                    var definitionHandle = (TypeDefinitionHandle)parent;
+                    if (!TryGetCanonicalTypeDefinitionParameterCount(
+                            definitionHandle,
+                            out var definitionParameterCount) ||
+                        definitionParameterCount > 0 &&
+                        (!_callerContext.IsAvailable ||
+                         _callerContext.TypeParameterOwner != definitionHandle))
+                    {
+                        return false;
+                    }
+
+                    context = new ParentContext(
+                        SignatureGenericContext.ForOwner(
+                            definitionHandle,
+                            definitionParameterCount),
+                        definitionParameterCount,
+                        ContextualMethodParameterLimit: 0,
+                        DecodedType: null,
+                        ArrayElementType: null,
+                        ArrayRank: 0);
+                    return true;
+
+                case HandleKind.TypeReference:
+                    if (!TryGetCanonicalTypeReferenceParameterCount(
+                            (TypeReferenceHandle)parent,
+                            out var referenceParameterCount) ||
+                        referenceParameterCount > 0)
+                    {
+                        return false;
+                    }
+
+                    context = new ParentContext(
+                        SignatureContext: null,
+                        TypeParameterLimit: 0,
+                        ContextualMethodParameterLimit: 0,
+                        DecodedType: null,
+                        ArrayElementType: null,
+                        ArrayRank: 0);
+                    return true;
+
+                case HandleKind.TypeSpecification:
+                    var specificationHandle = (TypeSpecificationHandle)parent;
+                    if (!TryValidateTypeSpecification(
+                            specificationHandle,
+                            depth: 0,
+                            _callerContext.IsAvailable
+                                ? _callerContext.TypeParameterCount
+                                : 0,
+                            _callerContext.IsAvailable
+                                ? _callerContext.MethodParameterCount
+                                : 0,
+                            out var rootTypeCode,
+                            out _) ||
+                        rootTypeCode is not (0x14 or 0x15 or 0x1D) ||
+                        TryReadSignatureTypeSpecification(
+                            _metadata,
+                            specificationHandle,
+                            _callerContext.SignatureContext) is not { } declaringType ||
+                        HasUnrepresentableSignatureNode(declaringType) ||
+                        declaringType.HasPinnedQualifier ||
+                        declaringType.IsRestrictedGenericArgument ||
+                        declaringType.HasNestedCustomModifiers ||
+                        !declaringType.OuterCustomModifiers.IsEmpty ||
+                        declaringType.PrimitiveType is not null ||
+                        declaringType.Text == "nint")
+                    {
+                        return false;
+                    }
+
+                    if (rootTypeCode == 0x15 &&
+                        !declaringType.IsCanonicalGenericInstantiation)
+                    {
+                        return false;
+                    }
+
+                    if (declaringType.IsCanonicalGenericInstantiation)
+                    {
+                        if (declaringType.GenericArguments.IsDefaultOrEmpty ||
+                            declaringType.GenericArguments.Length > MaxGenericArguments)
+                        {
+                            return false;
+                        }
+
+                        context = new ParentContext(
+                            SignatureGenericContext.ForSubstitution(
+                                declaringType.GenericArguments),
+                            declaringType.GenericArguments.Length,
+                            ContextualMethodParameterLimit: 0,
+                            declaringType,
+                            ArrayElementType: null,
+                            ArrayRank: 0);
+                        return true;
+                    }
+
+                    var arrayElementType = rootTypeCode == 0x14
+                        ? declaringType.ArrayElementType
+                        : declaringType.SzArrayElementType;
+                    var arrayRank = rootTypeCode == 0x14 ? declaringType.ArrayRank : 1;
+                    if (arrayElementType is null ||
+                        rootTypeCode == 0x14 && arrayRank == 1 ||
+                        arrayRank is <= 0 or > MaxArrayRank)
+                    {
+                        return false;
+                    }
+
+                    context = new ParentContext(
+                        _callerContext.SignatureContext,
+                        _callerContext.IsAvailable ? _callerContext.TypeParameterCount : 0,
+                        _callerContext.IsAvailable ? _callerContext.MethodParameterCount : 0,
+                        declaringType,
+                        arrayElementType,
+                        arrayRank);
+                    return true;
+
+                default:
+                    return false;
+            }
+        }
+
+        private bool TryValidateMethodSignature(
+            ref BlobReader reader,
+            int typeParameterLimit,
+            int contextualMethodParameterLimit,
+            bool memberReference,
+            bool requireEnd,
+            int typeDepth)
+        {
+            if (reader.RemainingBytes == 0)
+            {
+                return false;
+            }
+
+            var header = reader.ReadByte();
+            if ((header & 0x80) != 0)
+            {
+                return false;
+            }
+
+            var callingConvention = header & 0x0F;
+            var allowsSentinel = callingConvention == 0x05 ||
+                                 (!memberReference && callingConvention == 0x01);
+            if (memberReference
+                    ? callingConvention is not (0x00 or 0x05)
+                    : callingConvention > 0x05 && callingConvention != 0x09)
+            {
+                return false;
+            }
+
+            var hasThis = (header & 0x20) != 0;
+            var hasExplicitThis = (header & 0x40) != 0;
+            if (hasExplicitThis && !hasThis)
+            {
+                return false;
+            }
+
+            var methodParameterLimit = 0;
+            if ((header & 0x10) != 0)
+            {
+                if (!TryReadCanonicalCompressedInteger(
+                        ref reader,
+                        out methodParameterLimit) ||
+                    methodParameterLimit is <= 0 or > MaxParameters)
+                {
+                    return false;
+                }
+            }
+            else
+            {
+                methodParameterLimit = contextualMethodParameterLimit;
+            }
+
+            if (!TryReadCanonicalCompressedInteger(ref reader, out var parameterCount) ||
+                parameterCount is < 0 or > MaxParameters ||
+                !TryValidateReturnType(
+                    ref reader,
+                    typeParameterLimit,
+                    methodParameterLimit,
+                    depth: typeDepth))
+            {
+                return false;
+            }
+
+            var sawSentinel = false;
+            for (var parameterIndex = 0; parameterIndex < parameterCount; parameterIndex++)
+            {
+                if (reader.RemainingBytes > 0 && PeekByte(reader) == 0x41)
+                {
+                    if (!allowsSentinel || sawSentinel)
+                    {
+                        return false;
+                    }
+
+                    reader.ReadByte();
+                    sawSentinel = true;
+                }
+
+                if (!TryValidateParameterType(
+                        ref reader,
+                        typeParameterLimit,
+                        methodParameterLimit,
+                        depth: typeDepth))
+                {
+                    return false;
+                }
+            }
+
+            return (!requireEnd || reader.RemainingBytes == 0) &&
+                   (allowsSentinel || !sawSentinel);
+        }
+
+        private bool TryValidateFieldType(
+            ref BlobReader reader,
+            int typeParameterLimit,
+            int methodParameterLimit,
+            int depth) =>
+            TryValidateCustomModifiers(ref reader, depth, out var typeDepth) &&
+            TryValidateCoreType(
+                ref reader,
+                typeParameterLimit,
+                methodParameterLimit,
+                typeDepth);
+
+        private bool TryValidateParameterType(
+            ref BlobReader reader,
+            int typeParameterLimit,
+            int methodParameterLimit,
+            int depth)
+        {
+            if (!TryValidateCustomModifiers(ref reader, depth, out var typeDepth))
+            {
+                return false;
+            }
+
+            if (reader.RemainingBytes > 0 && PeekByte(reader) == 0x16) // TYPEDBYREF
+            {
+                return TryConsumeTerminalType(ref reader, 0x16, typeDepth);
+            }
+
+            if (reader.RemainingBytes > 0 && PeekByte(reader) == 0x10 &&
+                !TryConsumeTypePrefix(ref reader, 0x10, ref typeDepth)) // BYREF
+            {
+                return false;
+            }
+
+            return TryValidateCoreType(
+                ref reader,
+                typeParameterLimit,
+                methodParameterLimit,
+                typeDepth);
+        }
+
+        private bool TryValidateReturnType(
+            ref BlobReader reader,
+            int typeParameterLimit,
+            int methodParameterLimit,
+            int depth)
+        {
+            if (!TryValidateCustomModifiers(ref reader, depth, out var typeDepth))
+            {
+                return false;
+            }
+
+            if (reader.RemainingBytes > 0 && PeekByte(reader) is 0x01 or 0x16)
+            {
+                return TryConsumeTerminalType(ref reader, PeekByte(reader), typeDepth);
+            }
+
+            if (reader.RemainingBytes > 0 && PeekByte(reader) == 0x10 &&
+                !TryConsumeTypePrefix(ref reader, 0x10, ref typeDepth)) // BYREF
+            {
+                return false;
+            }
+
+            return TryValidateCoreType(
+                ref reader,
+                typeParameterLimit,
+                methodParameterLimit,
+                typeDepth);
+        }
+
+        private bool TryValidateCoreType(
+            ref BlobReader reader,
+            int typeParameterLimit,
+            int methodParameterLimit,
+            int depth)
+        {
+            if (depth >= MaxSignatureDepth ||
+                ++_signatureNodes > MaxSignatureNodes ||
+                reader.RemainingBytes == 0)
+            {
+                return false;
+            }
+
+            var typeCode = reader.ReadByte();
+            switch (typeCode)
+            {
+                case >= 0x02 and <= 0x0E: // primitive and STRING
+                case 0x18: // native int
+                case 0x19: // native uint
+                case 0x1C: // OBJECT
+                    return true;
+
+                case 0x0F: // PTR
+                    if (!TryValidateCustomModifiers(
+                            ref reader,
+                            depth + 1,
+                            out var pointedTypeDepth))
+                    {
+                        return false;
+                    }
+
+                    return reader.RemainingBytes > 0 && PeekByte(reader) == 0x01
+                        ? TryConsumeTerminalType(ref reader, 0x01, pointedTypeDepth)
+                        : TryValidateCoreType(
+                            ref reader,
+                            typeParameterLimit,
+                            methodParameterLimit,
+                            pointedTypeDepth);
+
+                case 0x1D: // SZARRAY
+                    return TryValidateCustomModifiers(
+                               ref reader,
+                               depth + 1,
+                               out var elementTypeDepth) &&
+                           TryValidateCoreType(
+                        ref reader,
+                        typeParameterLimit,
+                        methodParameterLimit,
+                        elementTypeDepth);
+
+                case 0x11: // VALUETYPE
+                case 0x12: // CLASS
+                    return TryValidateClassOrValueType(
+                        ref reader,
+                        typeCode,
+                        typeParameterLimit,
+                        methodParameterLimit,
+                        depth);
+
+                case 0x13: // VAR
+                    return TryReadCanonicalCompressedInteger(ref reader, out var typeParameter) &&
+                           typeParameter >= 0 &&
+                           typeParameter < typeParameterLimit;
+
+                case 0x14: // ARRAY
+                    if (!TryValidateCoreType(
+                            ref reader,
+                            typeParameterLimit,
+                            methodParameterLimit,
+                            depth + 1) ||
+                        !TryReadCanonicalCompressedInteger(ref reader, out var rank) ||
+                        rank is <= 0 or > MaxArrayRank ||
+                        !TryReadCanonicalCompressedInteger(ref reader, out var sizeCount) ||
+                        sizeCount < 0 ||
+                        sizeCount > rank)
+                    {
+                        return false;
+                    }
+
+                    for (var index = 0; index < sizeCount; index++)
+                    {
+                        if (!TryReadCanonicalCompressedInteger(ref reader, out _))
+                        {
+                            return false;
+                        }
+                    }
+
+                    if (!TryReadCanonicalCompressedInteger(
+                            ref reader,
+                            out var lowerBoundCount) ||
+                        lowerBoundCount < 0 ||
+                        lowerBoundCount > rank)
+                    {
+                        return false;
+                    }
+
+                    for (var index = 0; index < lowerBoundCount; index++)
+                    {
+                        if (!TryReadCanonicalCompressedSignedInteger(ref reader, out _))
+                        {
+                            return false;
+                        }
+                    }
+
+                    return true;
+
+                case 0x15: // GENERICINST
+                    var genericRawTypeKind = reader.RemainingBytes == 0
+                        ? (byte)0
+                        : reader.ReadByte();
+                    if (genericRawTypeKind is not (0x11 or 0x12) ||
+                        !TryReadNominalTypeHandle(
+                            ref reader,
+                            out var genericDefinition) ||
+                        !TryReadCanonicalCompressedInteger(
+                            ref reader,
+                            out var genericArgumentCount) ||
+                        genericArgumentCount is <= 0 or > MaxGenericArguments ||
+                        !HasCanonicalGenericArity(
+                            genericDefinition,
+                            genericArgumentCount) ||
+                        !HasMatchingLocalSignatureKind(
+                            genericDefinition,
+                            genericRawTypeKind))
+                    {
+                        return false;
+                    }
+
+                    for (var index = 0; index < genericArgumentCount; index++)
+                    {
+                        if (!TryValidateCoreType(
+                                ref reader,
+                                typeParameterLimit,
+                                methodParameterLimit,
+                                depth + 1))
+                        {
+                            return false;
+                        }
+                    }
+
+                    return true;
+
+                case 0x1B: // FNPTR
+                    return TryValidateMethodSignature(
+                        ref reader,
+                        typeParameterLimit,
+                        contextualMethodParameterLimit: methodParameterLimit,
+                        memberReference: false,
+                        requireEnd: false,
+                        typeDepth: depth + 1);
+
+                case 0x1E: // MVAR
+                    return TryReadCanonicalCompressedInteger(ref reader, out var methodParameter) &&
+                           methodParameter >= 0 &&
+                           methodParameter < methodParameterLimit;
+
+                default:
+                    return false;
+            }
+        }
+
+        private bool TryValidateCustomModifiers(
+            ref BlobReader reader,
+            int depth,
+            out int typeDepth)
+        {
+            typeDepth = depth;
+            while (reader.RemainingBytes > 0 && PeekByte(reader) is 0x1F or 0x20)
+            {
+                if (!TryConsumeTypePrefix(
+                        ref reader,
+                        PeekByte(reader),
+                        ref typeDepth) ||
+                    ++_customModifiers > MaxCustomModifiers ||
+                    !TryReadNominalTypeHandle(
+                        ref reader,
+                        out var modifierType) ||
+                    !HasCanonicalNonGenericNominalArity(modifierType))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private bool TryConsumeTypePrefix(
+            ref BlobReader reader,
+            byte expectedCode,
+            ref int depth)
+        {
+            if (depth >= MaxSignatureDepth ||
+                ++_signatureNodes > MaxSignatureNodes ||
+                reader.RemainingBytes == 0 ||
+                reader.ReadByte() != expectedCode)
+            {
+                return false;
+            }
+
+            depth++;
+            return true;
+        }
+
+        private bool TryConsumeTerminalType(
+            ref BlobReader reader,
+            byte expectedCode,
+            int depth) =>
+            depth < MaxSignatureDepth &&
+            ++_signatureNodes <= MaxSignatureNodes &&
+            reader.RemainingBytes > 0 &&
+            reader.ReadByte() == expectedCode;
+
+        private bool TryReadNominalTypeHandle(
+            ref BlobReader reader,
+            out EntityHandle handle)
+        {
+            handle = default;
+            if (!TryReadCanonicalTypeHandle(ref reader, out handle) || handle.IsNil)
+            {
+                return false;
+            }
+
+            return handle.Kind switch
+            {
+                HandleKind.TypeDefinition =>
+                    TryValidateTypeDefinitionName((TypeDefinitionHandle)handle),
+                HandleKind.TypeReference =>
+                    TryValidateTypeReferenceName((TypeReferenceHandle)handle),
+                _ => false
+            };
+        }
+
+        private bool TryValidateClassOrValueType(
+            ref BlobReader reader,
+            byte rawTypeKind,
+            int typeParameterLimit,
+            int methodParameterLimit,
+            int depth)
+        {
+            if (!TryReadCanonicalTypeHandle(ref reader, out var handle) || handle.IsNil)
+            {
+                return false;
+            }
+
+            if (handle.Kind is HandleKind.TypeDefinition or HandleKind.TypeReference)
+            {
+                return (handle.Kind == HandleKind.TypeDefinition
+                            ? TryValidateTypeDefinitionName((TypeDefinitionHandle)handle)
+                            : TryValidateTypeReferenceName((TypeReferenceHandle)handle)) &&
+                       HasCanonicalNonGenericNominalArity(handle) &&
+                       HasMatchingLocalSignatureKind(handle, rawTypeKind);
+            }
+
+            return handle.Kind == HandleKind.TypeSpecification &&
+                   TryValidateTypeSpecification(
+                       (TypeSpecificationHandle)handle,
+                       depth + 1,
+                       typeParameterLimit,
+                       methodParameterLimit,
+                       out _,
+                       out var specificationKind) &&
+                   specificationKind == (rawTypeKind == 0x11
+                       ? SignatureTypeKind.ValueType
+                       : SignatureTypeKind.Class);
+        }
+
+        private bool TryValidateTypeSpecification(
+            TypeSpecificationHandle handle,
+            int depth,
+            int typeParameterLimit,
+            int methodParameterLimit,
+            out byte rootTypeCode,
+            out SignatureTypeKind signatureKind)
+        {
+            rootTypeCode = 0;
+            signatureKind = SignatureTypeKind.Unknown;
+            if (!IsValidRow(handle, TableIndex.TypeSpec))
+            {
+                return false;
+            }
+
+            if (depth >= MaxSignatureDepth ||
+                _activeTypeSpecifications.Count >= MaxSignatureDepth ||
+                !_activeTypeSpecifications.Add(handle))
+            {
+                return false;
+            }
+
+            try
+            {
+                var specification = _metadata.GetTypeSpecification(handle);
+                var reader = _metadata.GetBlobReader(specification.Signature);
+                if (reader.Length is <= 0 or > MaxTypeSpecificationBytes ||
+                    _typeSpecificationBytes > MaxAggregateTypeSpecificationBytes - reader.Length)
+                {
+                    return false;
+                }
+
+                _typeSpecificationBytes += reader.Length;
+                rootTypeCode = PeekByte(reader);
+                signatureKind = GetTypeSpecificationSignatureKind(reader);
+                if (signatureKind == SignatureTypeKind.Unknown)
+                {
+                    return false;
+                }
+
+                if (!TryValidateCoreType(
+                        ref reader,
+                        typeParameterLimit,
+                        methodParameterLimit,
+                        depth) ||
+                    reader.RemainingBytes != 0)
+                {
+                    return false;
+                }
+
+                return true;
+            }
+            finally
+            {
+                _activeTypeSpecifications.Remove(handle);
+            }
+        }
+
+        private static SignatureTypeKind GetTypeSpecificationSignatureKind(BlobReader reader)
+        {
+            if (reader.RemainingBytes == 0)
+            {
+                return SignatureTypeKind.Unknown;
+            }
+
+            return reader.ReadByte() switch
+            {
+                0x11 => SignatureTypeKind.ValueType,
+                0x12 or 0x14 or 0x1D => SignatureTypeKind.Class,
+                0x15 when reader.RemainingBytes > 0 => reader.ReadByte() switch
+                {
+                    0x11 => SignatureTypeKind.ValueType,
+                    0x12 => SignatureTypeKind.Class,
+                    _ => SignatureTypeKind.Unknown
+                },
+                _ => SignatureTypeKind.Unknown
+            };
+        }
+
+        private bool HasCanonicalGenericArity(
+            EntityHandle handle,
+            int argumentCount)
+        {
+            if (handle.Kind == HandleKind.TypeReference)
+            {
+                return TryGetCanonicalTypeReferenceParameterCount(
+                           (TypeReferenceHandle)handle,
+                           out var parameterCount) &&
+                       parameterCount == argumentCount;
+            }
+
+            return TryGetCanonicalTypeDefinitionParameterCount(
+                       (TypeDefinitionHandle)handle,
+                       out var definitionParameterCount) &&
+                   definitionParameterCount == argumentCount;
+        }
+
+        private bool HasCanonicalNonGenericNominalArity(EntityHandle handle) =>
+            HasCanonicalGenericArity(handle, argumentCount: 0);
+
+        private bool HasMatchingLocalSignatureKind(
+            EntityHandle handle,
+            byte rawTypeKind)
+        {
+            if (handle.Kind != HandleKind.TypeDefinition)
+            {
+                return true;
+            }
+
+            var definition = _metadata.GetTypeDefinition((TypeDefinitionHandle)handle);
+            if (!TryClassifyTrustedValueTypeBase(definition.BaseType, out var isValueType))
+            {
+                return false;
+            }
+
+            return rawTypeKind switch
+            {
+                0x11 => isValueType,
+                0x12 => !isValueType,
+                _ => false
+            };
+        }
+
+        private bool TryClassifyTrustedValueTypeBase(
+            EntityHandle baseType,
+            out bool isValueType)
+        {
+            isValueType = false;
+            if (baseType.IsNil)
+            {
+                return true;
+            }
+
+            switch (baseType.Kind)
+            {
+                case HandleKind.TypeSpecification:
+                    return IsValidRow(baseType, TableIndex.TypeSpec);
+
+                case HandleKind.TypeDefinition:
+                    var definitionHandle = (TypeDefinitionHandle)baseType;
+                    if (!TryValidateTypeDefinitionName(definitionHandle))
+                    {
+                        return false;
+                    }
+
+                    var definition = _metadata.GetTypeDefinition(definitionHandle);
+                    if (!definition.GetDeclaringType().IsNil ||
+                        _metadata.GetString(definition.Namespace) != "System" ||
+                        _metadata.GetString(definition.Name) is not ("ValueType" or "Enum"))
+                    {
+                        return true;
+                    }
+
+                    if (!_metadata.IsAssembly)
+                    {
+                        return false;
+                    }
+
+                    var assemblyDefinition = _metadata.GetAssemblyDefinition();
+                    isValueType = IsTrustedFrameworkAssembly(
+                        _metadata,
+                        _metadata.GetString(assemblyDefinition.Name),
+                        assemblyDefinition.PublicKey,
+                        assemblyDefinition.Culture,
+                        assemblyDefinition.Flags);
+                    return isValueType;
+
+                case HandleKind.TypeReference:
+                    var referenceHandle = (TypeReferenceHandle)baseType;
+                    if (!TryValidateTypeReferenceName(referenceHandle))
+                    {
+                        return false;
+                    }
+
+                    var reference = _metadata.GetTypeReference(referenceHandle);
+                    if (reference.ResolutionScope.Kind != HandleKind.AssemblyReference ||
+                        _metadata.GetString(reference.Namespace) != "System" ||
+                        _metadata.GetString(reference.Name) is not ("ValueType" or "Enum"))
+                    {
+                        return true;
+                    }
+
+                    var assembly = _metadata.GetAssemblyReference(
+                        (AssemblyReferenceHandle)reference.ResolutionScope);
+                    isValueType = IsTrustedFrameworkAssembly(
+                        _metadata,
+                        _metadata.GetString(assembly.Name),
+                        assembly.PublicKeyOrToken,
+                        assembly.Culture,
+                        assembly.Flags);
+                    return isValueType;
+
+                default:
+                    return false;
+            }
+        }
+
+        private bool TryGetCanonicalTypeDefinitionParameterCount(
+            TypeDefinitionHandle handle,
+            out int parameterCount)
+        {
+            parameterCount = 0;
+            if (!TryValidateTypeDefinitionName(handle))
+            {
+                return false;
+            }
+
+            var chain = new List<TypeDefinitionHandle>();
+            var current = handle;
+            while (!current.IsNil)
+            {
+                if (chain.Count >= MaxNominalNameDepth)
+                {
+                    return false;
+                }
+
+                chain.Add(current);
+                current = _metadata.GetTypeDefinition(current).GetDeclaringType();
+            }
+
+            var cumulativeArity = 0;
+            for (var index = chain.Count - 1; index >= 0; index--)
+            {
+                var definitionHandle = chain[index];
+                var definition = _metadata.GetTypeDefinition(definitionHandle);
+                if (!TryReadDeclaredGenericArity(definition.Name, out var declaredArity) ||
+                    declaredArity > MaxParameters - cumulativeArity)
+                {
+                    return false;
+                }
+
+                cumulativeArity += declaredArity;
+                var parameters = definition.GetGenericParameters();
+                if (parameters.Count != cumulativeArity ||
+                    !HasCanonicalGenericParameterDomain(
+                        definitionHandle,
+                        parameters,
+                        cumulativeArity))
+                {
+                    return false;
+                }
+            }
+
+            parameterCount = cumulativeArity;
+            return true;
+        }
+
+        private bool TryGetCanonicalTypeReferenceParameterCount(
+            TypeReferenceHandle handle,
+            out int parameterCount)
+        {
+            parameterCount = 0;
+            if (!TryValidateTypeReferenceName(handle))
+            {
+                return false;
+            }
+
+            var current = handle;
+            while (!current.IsNil)
+            {
+                var reference = _metadata.GetTypeReference(current);
+                if (!TryReadDeclaredGenericArity(reference.Name, out var declaredArity) ||
+                    declaredArity > MaxParameters - parameterCount)
+                {
+                    return false;
+                }
+
+                parameterCount += declaredArity;
+                current = reference.ResolutionScope.Kind == HandleKind.TypeReference
+                    ? (TypeReferenceHandle)reference.ResolutionScope
+                    : default;
+            }
+
+            return true;
+        }
+
+        private bool HasCanonicalGenericParameterDomain(
+            TypeDefinitionHandle owner,
+            GenericParameterHandleCollection parameters,
+            int parameterCount)
+        {
+            var positions = new bool[parameterCount];
+            foreach (var parameterHandle in parameters)
+            {
+                var parameter = _metadata.GetGenericParameter(parameterHandle);
+                if (parameter.Parent != owner ||
+                    parameter.Index < 0 ||
+                    parameter.Index >= positions.Length ||
+                    positions[parameter.Index])
+                {
+                    return false;
+                }
+
+                positions[parameter.Index] = true;
+            }
+
+            return true;
+        }
+
+        private bool TryReadDeclaredGenericArity(
+            StringHandle nameHandle,
+            out int arity)
+        {
+            arity = 0;
+            var name = _metadata.GetString(nameHandle);
+            var backtick = name.IndexOf('`', StringComparison.Ordinal);
+            if (backtick < 0)
+            {
+                return true;
+            }
+
+            if (backtick == 0 ||
+                name.LastIndexOf('`') != backtick ||
+                backtick == name.Length - 1 ||
+                name[backtick + 1] == '0' ||
+                !int.TryParse(
+                    name.AsSpan(backtick + 1),
+                    NumberStyles.None,
+                    CultureInfo.InvariantCulture,
+                    out arity) ||
+                arity is <= 0 or > MaxParameters)
+            {
+                arity = 0;
+                return false;
+            }
+
+            return true;
+        }
+
+        private bool TryValidateTypeDefinitionName(TypeDefinitionHandle handle)
+        {
+            var seen = new HashSet<TypeDefinitionHandle>();
+            var current = handle;
+            while (!current.IsNil)
+            {
+                if (seen.Count >= MaxNominalNameDepth ||
+                    !seen.Add(current) ||
+                    !IsValidRow(current, TableIndex.TypeDef))
+                {
+                    return false;
+                }
+
+                var definition = _metadata.GetTypeDefinition(current);
+                if (!TryReserveNominalName(
+                        definition.Name,
+                        definition.Namespace))
+                {
+                    return false;
+                }
+
+                current = definition.GetDeclaringType();
+            }
+
+            return true;
+        }
+
+        private bool TryValidateTypeReferenceName(TypeReferenceHandle handle)
+        {
+            var seen = new HashSet<TypeReferenceHandle>();
+            var current = handle;
+            while (!current.IsNil)
+            {
+                if (seen.Count >= MaxNominalNameDepth ||
+                    !seen.Add(current) ||
+                    !IsValidRow(current, TableIndex.TypeRef))
+                {
+                    return false;
+                }
+
+                var reference = _metadata.GetTypeReference(current);
+                if (!TryReserveNominalName(
+                        reference.Name,
+                        reference.Namespace))
+                {
+                    return false;
+                }
+
+                var scope = reference.ResolutionScope;
+                if (scope.IsNil)
+                {
+                    return true;
+                }
+
+                if (scope.Kind == HandleKind.TypeReference)
+                {
+                    current = (TypeReferenceHandle)scope;
+                    continue;
+                }
+
+                return IsValidResolutionScope(scope);
+            }
+
+            return true;
+        }
+
+        private bool TryReserveNominalName(
+            StringHandle name,
+            StringHandle @namespace)
+        {
+            var nameBytes = _metadata.GetBlobReader(name).Length;
+            var namespaceBytes = _metadata.GetBlobReader(@namespace).Length;
+            if (nameBytes is <= 0 or > MaxNameSegmentBytes ||
+                namespaceBytes > MaxNameSegmentBytes)
+            {
+                return false;
+            }
+
+            var bytes = nameBytes + namespaceBytes;
+            if (bytes < 0 || _nominalNameBytes > MaxNominalNameBytes - bytes)
+            {
+                return false;
+            }
+
+            _nominalNameBytes += bytes;
+            return true;
+        }
+
+        private bool TryReserveMemberName(StringHandle name)
+        {
+            var bytes = _metadata.GetBlobReader(name).Length;
+            if (bytes is <= 0 or > MaxNameSegmentBytes ||
+                _nominalNameBytes > MaxNominalNameBytes - bytes)
+            {
+                return false;
+            }
+
+            _nominalNameBytes += bytes;
+            return true;
+        }
+
+        private bool IsValidResolutionScope(EntityHandle handle) => handle.Kind switch
+        {
+            HandleKind.ModuleDefinition => IsValidRow(handle, TableIndex.Module),
+            HandleKind.ModuleReference => IsValidRow(handle, TableIndex.ModuleRef),
+            HandleKind.AssemblyReference => IsValidRow(handle, TableIndex.AssemblyRef),
+            _ => false
+        };
+
+        private bool IsValidRow(EntityHandle handle, TableIndex table) =>
+            !handle.IsNil &&
+            MetadataTokens.GetRowNumber(handle) is var row &&
+            row > 0 &&
+            row <= _metadata.GetTableRowCount(table);
+
+        private bool IsValidRow(MemberReferenceHandle handle, TableIndex table) =>
+            !handle.IsNil &&
+            MetadataTokens.GetRowNumber(handle) is var row &&
+            row > 0 &&
+            row <= _metadata.GetTableRowCount(table);
+
+        private bool IsValidRow(TypeDefinitionHandle handle, TableIndex table) =>
+            !handle.IsNil &&
+            MetadataTokens.GetRowNumber(handle) is var row &&
+            row > 0 &&
+            row <= _metadata.GetTableRowCount(table);
+
+        private bool IsValidRow(TypeReferenceHandle handle, TableIndex table) =>
+            !handle.IsNil &&
+            MetadataTokens.GetRowNumber(handle) is var row &&
+            row > 0 &&
+            row <= _metadata.GetTableRowCount(table);
+
+        private bool IsValidRow(TypeSpecificationHandle handle, TableIndex table) =>
+            !handle.IsNil &&
+            MetadataTokens.GetRowNumber(handle) is var row &&
+            row > 0 &&
+            row <= _metadata.GetTableRowCount(table);
+
+        private bool IsValidRow(MethodSpecificationHandle handle, TableIndex table) =>
+            !handle.IsNil &&
+            MetadataTokens.GetRowNumber(handle) is var row &&
+            row > 0 &&
+            row <= _metadata.GetTableRowCount(table);
+
+        private static bool TryReadCanonicalCompressedSignedInteger(
+            ref BlobReader reader,
+            out int value)
+        {
+            var start = reader.Offset;
+            if (!reader.TryReadCompressedSignedInteger(out value))
+            {
+                return false;
+            }
+
+            var expectedBytes = value switch
+            {
+                >= -64 and <= 63 => 1,
+                >= -8_192 and <= 8_191 => 2,
+                _ => 4
+            };
+            return reader.Offset - start == expectedBytes;
+        }
+
+        private static byte PeekByte(BlobReader reader) => reader.ReadByte();
+    }
+
+    private static bool TryRenderStaticFieldTarget(
+        FieldInfo field,
+        MemberReferenceCallerContext callerContext,
+        out string target)
+    {
+        target = string.Empty;
+        if (field.DeclaringType.Length == 0)
         {
             return false;
         }
 
-        var type = TryReadSignatureTypeSpecification(
-            metadata,
-            (TypeSpecificationHandle)handle);
-        return type is null || type.HasPinnedQualifier;
+        if (field.DeclaringGenericArity > 0 &&
+            (field.DeclaringHandle.Kind != HandleKind.TypeDefinition ||
+             !callerContext.IsAvailable ||
+             callerContext.TypeParameterCount != field.DeclaringGenericArity ||
+             callerContext.TypeParameterOwner !=
+                 (TypeDefinitionHandle)field.DeclaringHandle))
+        {
+            return false;
+        }
+
+        target = $"{field.DeclaringType}.";
+        return true;
     }
 
-    private static (string DeclaringType, string Name, CliType Type)? ResolveField(
+    private static bool IsWritableFieldDefinition(
+        ReconContext context,
+        FieldInfo field,
+        bool staticStore)
+    {
+        if (field.DefinitionAttributes is not { } attributes)
+        {
+            return true;
+        }
+
+        if (attributes.HasFlag(FieldAttributes.Literal))
+        {
+            return false;
+        }
+
+        if (!attributes.HasFlag(FieldAttributes.InitOnly))
+        {
+            return true;
+        }
+
+        var caller = context.MemberReferenceCallerContext;
+        if (!caller.IsAvailable ||
+            caller.MethodParameterOwner.IsNil ||
+            field.DeclaringHandle.Kind != HandleKind.TypeDefinition ||
+            caller.TypeParameterOwner != (TypeDefinitionHandle)field.DeclaringHandle)
+        {
+            return false;
+        }
+
+        var method = context.Metadata.GetMethodDefinition(caller.MethodParameterOwner);
+        return method.Attributes.HasFlag(MethodAttributes.Static) == staticStore &&
+               context.Metadata.GetString(method.Name) ==
+                   (staticStore ? ".cctor" : ".ctor");
+    }
+
+    private static FieldInfo? ResolveField(
         MetadataReader metadata,
         EnumTypeCatalog enumTypes,
-        int token)
+        int token,
+        MemberReferenceCallerContext callerContext)
     {
         var handle = MetadataTokens.EntityHandle(token);
         switch (handle.Kind)
         {
             case HandleKind.FieldDefinition:
                 var field = metadata.GetFieldDefinition((FieldDefinitionHandle)handle);
-                var fieldType = field.DecodeSignature(SignatureTypeNameProvider.Instance, null);
+                var fieldDeclaringType = field.GetDeclaringType();
+                if (!TryGetCanonicalTypeDefinitionSignatureParameterCount(
+                        metadata,
+                        fieldDeclaringType,
+                        out var fieldTypeParameterCount) ||
+                    fieldTypeParameterCount > 0 &&
+                    (!callerContext.IsAvailable ||
+                     callerContext.TypeParameterOwner != fieldDeclaringType ||
+                     callerContext.TypeParameterCount != fieldTypeParameterCount))
+                {
+                    return null;
+                }
+
+                var fieldType = field.DecodeSignature(
+                    SignatureTypeNameProvider.Instance,
+                    SignatureGenericContext.ForOwner(
+                        fieldDeclaringType,
+                        fieldTypeParameterCount));
                 if (fieldType.HasPinnedQualifier)
                 {
                     return null;
                 }
 
-                return (
-                    GetTypeName(metadata, field.GetDeclaringType()) ?? string.Empty,
-                    NormalizeFieldName(metadata.GetString(field.Name)),
-                    CreateCliType(fieldType, enumTypes));
-
-            case HandleKind.MemberReference:
-                var member = metadata.GetMemberReference((MemberReferenceHandle)handle);
-                if (member.GetKind() != MemberReferenceKind.Field)
+                CliType fieldDeclaringCliType;
+                if (fieldTypeParameterCount > 0)
                 {
-                    return null;
+                    if (!TryCreateCurrentGenericOwnerCliType(
+                            metadata,
+                            enumTypes,
+                            fieldDeclaringType,
+                            fieldTypeParameterCount,
+                            callerContext,
+                            out fieldDeclaringCliType))
+                    {
+                        return null;
+                    }
+                }
+                else
+                {
+                    fieldDeclaringCliType = CreateNominalCliType(
+                        metadata,
+                        enumTypes,
+                        fieldDeclaringType);
                 }
 
-                if (member.Parent.Kind == HandleKind.TypeSpecification &&
-                    (TryReadSignatureTypeSpecification(
-                         metadata,
-                         (TypeSpecificationHandle)member.Parent) is not { } parentType ||
-                     parentType.HasPinnedQualifier))
+                return new FieldInfo(
+                    fieldDeclaringCliType.Text,
+                    fieldDeclaringCliType,
+                    fieldDeclaringType,
+                    fieldTypeParameterCount,
+                    NormalizeFieldName(metadata.GetString(field.Name)),
+                    CreateCliType(fieldType, enumTypes),
+                    field.Attributes);
+
+            case HandleKind.MemberReference:
+                if (!MemberReferenceSignatureValidator.TryValidateField(
+                        metadata,
+                        (MemberReferenceHandle)handle,
+                        callerContext,
+                        out var member,
+                        out var parentContext))
                 {
                     return null;
                 }
 
                 var memberType = member.DecodeFieldSignature(
                     SignatureTypeNameProvider.Instance,
-                    null);
-                if (memberType.HasPinnedQualifier)
+                    parentContext.SignatureContext);
+                if (HasUnrepresentableMemberReferenceType(memberType))
                 {
                     return null;
                 }
 
-                return (
-                    GetTypeName(metadata, member.Parent) ?? string.Empty,
+                CliType memberDeclaringCliType;
+                if (member.Parent.Kind == HandleKind.TypeDefinition &&
+                    parentContext.TypeParameterLimit > 0)
+                {
+                    if (!TryCreateCurrentGenericOwnerCliType(
+                            metadata,
+                            enumTypes,
+                            (TypeDefinitionHandle)member.Parent,
+                            parentContext.TypeParameterLimit,
+                            callerContext,
+                            out memberDeclaringCliType))
+                    {
+                        return null;
+                    }
+                }
+                else
+                {
+                    var declaringName = GetTypeName(metadata, member.Parent) ?? string.Empty;
+                    memberDeclaringCliType = parentContext.DecodedType is { } decodedParent
+                        ? CreateCliType(decodedParent, enumTypes) with { Text = declaringName }
+                        : CreateNominalCliType(metadata, enumTypes, member.Parent);
+                }
+
+                return new FieldInfo(
+                    memberDeclaringCliType.Text,
+                    memberDeclaringCliType,
+                    member.Parent,
+                    member.Parent.Kind == HandleKind.TypeDefinition
+                        ? parentContext.TypeParameterLimit
+                        : 0,
                     NormalizeFieldName(metadata.GetString(member.Name)),
-                    CreateCliType(memberType, enumTypes));
+                    CreateCliType(memberType, enumTypes),
+                    DefinitionAttributes: null);
 
             default:
                 return null;
@@ -9373,43 +12214,282 @@ internal static class ManagedSymbolReader
         return null;
     }
 
-    private static string? ResolveMemberName(MetadataReader metadata, int token)
+    private static string? ResolveMemberName(
+        MetadataReader metadata,
+        int token,
+        MemberReferenceCallerContext callerContext)
     {
-        var handle = MetadataTokens.EntityHandle(token);
+        try
+        {
+            return TryResolveCallGraphMemberName(
+                metadata,
+                MetadataTokens.EntityHandle(token),
+                callerContext)?.Text;
+        }
+        catch (Exception exception) when (
+            exception is BadImageFormatException or ArgumentException or InvalidOperationException)
+        {
+            return null;
+        }
+    }
+
+    private static CallGraphMemberName? TryResolveCallGraphMemberName(
+        MetadataReader metadata,
+        EntityHandle handle,
+        MemberReferenceCallerContext callerContext)
+    {
         switch (handle.Kind)
         {
             case HandleKind.MethodDefinition:
-                var method = metadata.GetMethodDefinition((MethodDefinitionHandle)handle);
-                var typeName = GetTypeDefinitionFullName(metadata, method.GetDeclaringType());
-                return $"{typeName}.{metadata.GetString(method.Name)}";
+                var methodHandle = (MethodDefinitionHandle)handle;
+                var method = metadata.GetMethodDefinition(methodHandle);
+                var methodDeclaringType = method.GetDeclaringType();
+                var methodContext = TryCreateMemberReferenceCallerContext(
+                    metadata,
+                    methodDeclaringType,
+                    methodHandle);
+                if (!methodContext.IsAvailable)
+                {
+                    return null;
+                }
+
+                var methodSignature = method.DecodeSignature(
+                    SignatureTypeNameProvider.Instance,
+                    methodContext.SignatureContext);
+                if (methodSignature.Header.IsInstance ==
+                        method.Attributes.HasFlag(MethodAttributes.Static))
+                {
+                    return null;
+                }
+
+                var declaringType = GetTypeDefinitionFullName(
+                    metadata,
+                    methodDeclaringType);
+                var methodName = metadata.GetString(method.Name);
+                return new CallGraphMemberName(
+                    string.IsNullOrEmpty(declaringType)
+                        ? methodName
+                        : $"{declaringType}.{methodName}",
+                    methodContext.MethodParameterCount);
 
             case HandleKind.MemberReference:
-                var member = metadata.GetMemberReference((MemberReferenceHandle)handle);
-                if (member.GetKind() != MemberReferenceKind.Method)
+                if (!MemberReferenceSignatureValidator.TryValidateMethod(
+                        metadata,
+                        (MemberReferenceHandle)handle,
+                        callerContext,
+                        out var member,
+                        out var parentContext))
+                {
+                    return null;
+                }
+
+                var signature = member.DecodeMethodSignature(
+                    SignatureTypeNameProvider.Instance,
+                    parentContext.SignatureContext);
+                var memberName = metadata.GetString(member.Name);
+                if (parentContext.IsArray &&
+                    !TryClassifyArrayPseudoMember(
+                        memberName,
+                        signature,
+                        parentContext,
+                        out _) &&
+                    !IsCanonicalArrayAddressPseudoMember(
+                        memberName,
+                        signature,
+                        parentContext))
                 {
                     return null;
                 }
 
                 var parent = GetTypeName(metadata, member.Parent);
-                var memberName = metadata.GetString(member.Name);
-                return parent is null ? memberName : $"{parent}.{memberName}";
+                return new CallGraphMemberName(
+                    string.IsNullOrEmpty(parent)
+                        ? memberName
+                        : $"{parent}.{memberName}",
+                    signature.GenericParameterCount);
 
             case HandleKind.MethodSpecification:
-                var spec = metadata.GetMethodSpecification((MethodSpecificationHandle)handle);
-                var resolved = ResolveMemberName(metadata, MetadataTokens.GetToken(spec.Method));
-                if (resolved is null)
+                if (!MemberReferenceSignatureValidator.TryValidateMethodSpecification(
+                        metadata,
+                        (MethodSpecificationHandle)handle,
+                        callerContext,
+                        out var specification))
                 {
                     return null;
                 }
 
-                var genericArguments = spec.DecodeSignature(SignatureTypeNameProvider.Instance, null);
-                return genericArguments.Length == 0
-                    ? resolved
-                    : $"{resolved}<{string.Join(", ", genericArguments)}>";
+                var resolved = TryResolveCallGraphMemberName(
+                    metadata,
+                    specification.Method,
+                    callerContext);
+                if (resolved is not { GenericParameterCount: > 0 })
+                {
+                    return null;
+                }
+
+                var genericArguments = specification.DecodeSignature(
+                    SignatureTypeNameProvider.Instance,
+                    callerContext.SignatureContext);
+                if (genericArguments.Length != resolved.Value.GenericParameterCount ||
+                    genericArguments.Any(IsInvalidMethodSpecificationArgument) ||
+                    !TryRenderMethodSpecificationCallGraphName(
+                        resolved.Value.Text,
+                        genericArguments,
+                        out var renderedName))
+                {
+                    return null;
+                }
+
+                return new CallGraphMemberName(
+                    renderedName,
+                    GenericParameterCount: 0);
 
             default:
                 return null;
         }
+    }
+
+    private static bool TryRenderMethodSpecificationCallGraphName(
+        string methodName,
+        ImmutableArray<SignatureTypeName> genericArguments,
+        out string rendered)
+    {
+        rendered = string.Empty;
+        long requiredCharacters = methodName.Length + 2L;
+        if (genericArguments.Length > 1)
+        {
+            requiredCharacters += (genericArguments.Length - 1L) * 2L;
+        }
+
+        foreach (var argument in genericArguments)
+        {
+            requiredCharacters += argument.Text.Length;
+            if (requiredCharacters > MaxInstantiatedMethodSignatureCharacters)
+            {
+                return false;
+            }
+        }
+
+        rendered = $"{methodName}<{string.Join(", ", genericArguments)}>";
+        return true;
+    }
+
+    private static bool IsCanonicalArrayAddressPseudoMember(
+        string memberName,
+        MethodSignature<SignatureTypeName> signature,
+        MemberReferenceSignatureValidator.ParentContext parentContext)
+    {
+        if (memberName != "Address" ||
+            parentContext.ArrayElementType is not { } elementType ||
+            parentContext.ArrayRank is <= 1 or > 32 ||
+            signature.Header.CallingConvention != SignatureCallingConvention.Default ||
+            !signature.Header.IsInstance ||
+            signature.Header.IsGeneric ||
+            signature.Header.HasExplicitThis ||
+            signature.GenericParameterCount != 0 ||
+            signature.RequiredParameterCount != signature.ParameterTypes.Length ||
+            signature.ParameterTypes.Length != parentContext.ArrayRank ||
+            signature.ParameterTypes.Any(type =>
+                type.PrimitiveType != PrimitiveTypeCode.Int32 ||
+                type.IsByReference ||
+                type.IsUnsupported ||
+                type.HasNestedCustomModifiers ||
+                !type.OuterCustomModifiers.IsEmpty) ||
+            !signature.ReturnType.IsByReference ||
+            signature.ReturnType.IsUnsupported ||
+            signature.ReturnType.HasNestedCustomModifiers ||
+            !signature.ReturnType.OuterCustomModifiers.IsEmpty)
+        {
+            return false;
+        }
+
+        return signature.ReturnType.ByReferenceElementType is { } returnElement &&
+               AreSameConstructorSignature(returnElement, elementType);
+    }
+
+    private static bool TryInstantiateMethodSignatureText(
+        string signatureType,
+        IReadOnlyList<string> genericArguments,
+        ref int remainingRenderedCharacters,
+        out string instantiated)
+    {
+        instantiated = signatureType;
+        long requiredCharacters = 0;
+        for (var position = 0; position < signatureType.Length;)
+        {
+            if (signatureType[position] != '!' ||
+                position + 2 >= signatureType.Length ||
+                signatureType[position + 1] != '!' ||
+                !char.IsAsciiDigit(signatureType[position + 2]))
+            {
+                requiredCharacters++;
+                position++;
+                continue;
+            }
+
+            var digitEnd = position + 2;
+            var argumentIndex = 0;
+            var overflow = false;
+            while (digitEnd < signatureType.Length &&
+                   char.IsAsciiDigit(signatureType[digitEnd]))
+            {
+                var digit = signatureType[digitEnd] - '0';
+                if (argumentIndex > (int.MaxValue - digit) / 10)
+                {
+                    overflow = true;
+                }
+                else if (!overflow)
+                {
+                    argumentIndex = (argumentIndex * 10) + digit;
+                }
+
+                digitEnd++;
+            }
+
+            var hasTokenBoundary = digitEnd == signatureType.Length ||
+                !(char.IsLetterOrDigit(signatureType[digitEnd]) ||
+                  signatureType[digitEnd] == '_');
+            if (!overflow &&
+                hasTokenBoundary &&
+                argumentIndex < genericArguments.Count)
+            {
+                requiredCharacters += genericArguments[argumentIndex].Length;
+            }
+            else
+            {
+                requiredCharacters += digitEnd - position;
+            }
+
+            if (requiredCharacters > remainingRenderedCharacters)
+            {
+                return false;
+            }
+
+            position = digitEnd;
+        }
+
+        if (requiredCharacters > remainingRenderedCharacters)
+        {
+            return false;
+        }
+
+        instantiated = InstantiateMethodSignatureType(signatureType, genericArguments);
+        remainingRenderedCharacters -= (int)requiredCharacters;
+        return true;
+    }
+
+    private static bool TryReserveRenderedCharacters(
+        int requiredCharacters,
+        ref int remainingRenderedCharacters)
+    {
+        if (requiredCharacters < 0 ||
+            requiredCharacters > remainingRenderedCharacters)
+        {
+            return false;
+        }
+
+        remainingRenderedCharacters -= requiredCharacters;
+        return true;
     }
 
     internal static string InstantiateMethodSignatureType(
@@ -11745,25 +14825,54 @@ internal static class ManagedSymbolReader
     };
 }
 
-internal readonly record struct SignatureCustomModifier(string Type, bool IsRequired);
+internal readonly record struct SignatureCustomModifier(
+    string Type,
+    bool IsRequired,
+    EntityHandle NominalHandle,
+    bool IsTrustedFunctionPointerCallingConvention);
 
 internal readonly record struct SignatureTypeParameterSlot(
     TypeDefinitionHandle Owner,
     int Index);
 
+internal readonly record struct SignatureMethodParameterSlot(
+    MethodDefinitionHandle Owner,
+    int Index);
+
+internal sealed record SignatureFunctionPointer(
+    SignatureHeader Header,
+    int RequiredParameterCount,
+    int GenericParameterCount,
+    SignatureTypeName ReturnType,
+    ImmutableArray<SignatureTypeName> ParameterTypes);
+
 internal readonly record struct SignatureGenericContext(
     ImmutableArray<SignatureTypeName> TypeArguments,
     TypeDefinitionHandle TypeParameterOwner,
-    int TypeParameterCount)
+    int TypeParameterCount,
+    MethodDefinitionHandle MethodParameterOwner,
+    int MethodParameterCount)
 {
     public static SignatureGenericContext ForSubstitution(
         ImmutableArray<SignatureTypeName> typeArguments) =>
-        new(typeArguments, default, 0);
+        new(typeArguments, default, 0, default, 0);
 
     public static SignatureGenericContext ForOwner(
         TypeDefinitionHandle owner,
         int typeParameterCount) =>
-        new(default, owner, typeParameterCount);
+        new(default, owner, typeParameterCount, default, 0);
+
+    public static SignatureGenericContext ForCaller(
+        TypeDefinitionHandle typeParameterOwner,
+        int typeParameterCount,
+        MethodDefinitionHandle methodParameterOwner,
+        int methodParameterCount) =>
+        new(
+            default,
+            typeParameterOwner,
+            typeParameterCount,
+            methodParameterOwner,
+            methodParameterCount);
 }
 
 internal sealed record SignatureTypeName(
@@ -11784,8 +14893,18 @@ internal sealed record SignatureTypeName(
     SignatureTypeKind GenericDefinitionSignatureKind = SignatureTypeKind.Unknown,
     string? GenericDefinitionText = null,
     SignatureTypeParameterSlot? TypeParameterSlot = null,
+    SignatureMethodParameterSlot? MethodParameterSlot = null,
+    SignatureTypeName? ArrayElementType = null,
+    int ArrayRank = 0,
+    ImmutableArray<int> ArraySizes = default,
+    ImmutableArray<int> ArrayLowerBounds = default,
     SignatureTypeName? SzArrayElementType = null,
-    bool HasPinnedQualifier = false)
+    SignatureTypeName? ByReferenceElementType = null,
+    SignatureTypeName? PointerElementType = null,
+    SignatureFunctionPointer? FunctionPointerSignature = null,
+    bool HasPinnedQualifier = false,
+    bool IsUnsupported = false,
+    bool IsTrustedFunctionPointerCallingConvention = false)
 {
     public SignatureTypeName(string text)
         : this(text, [], false, false)
@@ -11819,12 +14938,22 @@ internal sealed class SignatureTypeNameProvider : ISignatureTypeProvider<Signatu
         Wrap(
             $"{elementType.Text}[{new string(',', Math.Max(shape.Rank - 1, 0))}]",
             elementType,
-            isRestrictedGenericArgument: false);
+            isRestrictedGenericArgument: false) with
+        {
+            ArrayElementType = elementType,
+            ArrayRank = shape.Rank,
+            ArraySizes = shape.Sizes,
+            ArrayLowerBounds = shape.LowerBounds,
+            // ELEMENT_TYPE_ARRAY rank 1 denotes CLR T[*], which C# cannot name.
+            // SZARRAY is represented separately by GetSZArrayType and remains T[].
+            IsUnsupported = elementType.IsUnsupported || shape.Rank == 1
+        };
 
     public SignatureTypeName GetByReferenceType(SignatureTypeName elementType) =>
         Wrap($"ref {elementType.Text}", elementType, isRestrictedGenericArgument: true) with
         {
-            IsByReference = true
+            IsByReference = true,
+            ByReferenceElementType = elementType
         };
 
     public SignatureTypeName GetFunctionPointerType(MethodSignature<SignatureTypeName> signature)
@@ -11838,9 +14967,11 @@ internal sealed class SignatureTypeNameProvider : ISignatureTypeProvider<Signatu
             signature.Header.HasExplicitThis ||
             signature.GenericParameterCount != 0 ||
             signature.RequiredParameterCount != signature.ParameterTypes.Length ||
+            signature.ReturnType.IsUnsupported ||
             signature.ReturnType.Text is "ref void" or "TypedReference" or "ref TypedReference" ||
             signature.ReturnType.HasNestedCustomModifiers ||
             signature.ParameterTypes.Any(parameter =>
+                parameter.IsUnsupported ||
                 parameter.Text is "void" or "ref void" ||
                 parameter.HasNestedCustomModifiers ||
                 parameter.OuterCustomModifiers.Length > 0))
@@ -11870,6 +15001,8 @@ internal sealed class SignatureTypeNameProvider : ISignatureTypeProvider<Signatu
         foreach (var modifier in signature.ReturnType.OuterCustomModifiers.Reverse())
         {
             if (modifier.IsRequired ||
+                !modifier.IsTrustedFunctionPointerCallingConvention ||
+                modifier.NominalHandle.Kind != HandleKind.TypeReference ||
                 !modifier.Type.StartsWith(callConventionPrefix, StringComparison.Ordinal))
             {
                 return Unsupported();
@@ -11901,12 +15034,19 @@ internal sealed class SignatureTypeNameProvider : ISignatureTypeProvider<Signatu
             [],
             HasNestedCustomModifiers: false,
             IsRestrictedGenericArgument: true,
+            FunctionPointerSignature: new SignatureFunctionPointer(
+                signature.Header,
+                signature.RequiredParameterCount,
+                signature.GenericParameterCount,
+                signature.ReturnType,
+                signature.ParameterTypes),
             HasPinnedQualifier: hasPinnedQualifier);
 
         SignatureTypeName Unsupported() =>
             new SignatureTypeName("nint") with
             {
-                HasPinnedQualifier = hasPinnedQualifier
+                HasPinnedQualifier = hasPinnedQualifier,
+                IsUnsupported = true
             };
 
         string AddConvention(string convention)
@@ -11923,11 +15063,14 @@ internal sealed class SignatureTypeNameProvider : ISignatureTypeProvider<Signatu
         var hasPinnedQualifier = genericType.HasPinnedQualifier ||
                                  typeArguments.Any(type => type.HasPinnedQualifier);
         if (genericType.IsRestrictedGenericArgument ||
-            typeArguments.Any(type => type.IsRestrictedGenericArgument))
+            genericType.IsUnsupported ||
+            typeArguments.Any(type =>
+                type.IsRestrictedGenericArgument || type.IsUnsupported))
         {
             return new SignatureTypeName("nint") with
             {
-                HasPinnedQualifier = hasPinnedQualifier
+                HasPinnedQualifier = hasPinnedQualifier,
+                IsUnsupported = true
             };
         }
 
@@ -11971,7 +15114,25 @@ internal sealed class SignatureTypeNameProvider : ISignatureTypeProvider<Signatu
             : FormatLegacyGenericInstantiation(genericType, typeArguments);
     }
 
-    public SignatureTypeName GetGenericMethodParameter(object? genericContext, int index) => new($"!!{index}");
+    public SignatureTypeName GetGenericMethodParameter(object? genericContext, int index)
+    {
+        if (genericContext is SignatureGenericContext context &&
+            !context.MethodParameterOwner.IsNil &&
+            index >= 0 &&
+            index < context.MethodParameterCount)
+        {
+            return new SignatureTypeName(
+                $"!!{index}",
+                [],
+                HasNestedCustomModifiers: false,
+                IsRestrictedGenericArgument: false,
+                MethodParameterSlot: new SignatureMethodParameterSlot(
+                    context.MethodParameterOwner,
+                    index));
+        }
+
+        return new SignatureTypeName($"!!{index}");
+    }
 
     public SignatureTypeName GetGenericTypeParameter(object? genericContext, int index)
     {
@@ -12010,7 +15171,11 @@ internal sealed class SignatureTypeNameProvider : ISignatureTypeProvider<Signatu
         unmodifiedType with
         {
             OuterCustomModifiers = unmodifiedType.OuterCustomModifiers.Add(
-                new SignatureCustomModifier(modifier.Text, isRequired)),
+                new SignatureCustomModifier(
+                    modifier.Text,
+                    isRequired,
+                    modifier.NominalHandle,
+                    modifier.IsTrustedFunctionPointerCallingConvention)),
             NominalHandle = default,
             RawTypeKind = 0,
             SignatureKind = SignatureTypeKind.Unknown,
@@ -12021,7 +15186,10 @@ internal sealed class SignatureTypeNameProvider : ISignatureTypeProvider<Signatu
         elementType with { HasPinnedQualifier = true };
 
     public SignatureTypeName GetPointerType(SignatureTypeName elementType) =>
-        Wrap($"{elementType.Text}*", elementType, isRestrictedGenericArgument: true);
+        Wrap($"{elementType.Text}*", elementType, isRestrictedGenericArgument: true) with
+        {
+            PointerElementType = elementType
+        };
 
     public SignatureTypeName GetPrimitiveType(PrimitiveTypeCode typeCode)
     {
@@ -12084,6 +15252,29 @@ internal sealed class SignatureTypeNameProvider : ISignatureTypeProvider<Signatu
             IsExactNamedType: true);
     }
 
+    private static bool IsTrustedFunctionPointerCallingConvention(
+        MetadataReader reader,
+        TypeReference reference,
+        string name,
+        string namespaceName)
+    {
+        if (namespaceName != "System.Runtime.CompilerServices" ||
+            !name.StartsWith("CallConv", StringComparison.Ordinal) ||
+            reference.ResolutionScope.Kind != HandleKind.AssemblyReference)
+        {
+            return false;
+        }
+
+        var assembly = reader.GetAssemblyReference(
+            (AssemblyReferenceHandle)reference.ResolutionScope);
+        return ManagedSymbolReader.IsTrustedFrameworkAssembly(
+            reader,
+            reader.GetString(assembly.Name),
+            assembly.PublicKeyOrToken,
+            assembly.Culture,
+            assembly.Flags);
+    }
+
     public SignatureTypeName GetTypeFromReference(
         MetadataReader reader,
         TypeReferenceHandle handle,
@@ -12103,7 +15294,9 @@ internal sealed class SignatureTypeNameProvider : ISignatureTypeProvider<Signatu
             handle,
             rawTypeKind,
             reader.ResolveSignatureTypeKind(handle, rawTypeKind),
-            IsExactNamedType: true);
+            IsExactNamedType: true,
+            IsTrustedFunctionPointerCallingConvention:
+                IsTrustedFunctionPointerCallingConvention(reader, reference, name, namespaceName));
     }
 
     private static SignatureTypeName FormatLegacyGenericInstantiation(
@@ -12139,7 +15332,9 @@ internal sealed class SignatureTypeNameProvider : ISignatureTypeProvider<Signatu
                 : SignatureTypeKind.Unknown,
             GenericDefinitionText: hasExactDefinition ? genericType.Text : null,
             HasPinnedQualifier: genericType.HasPinnedQualifier ||
-                                typeArguments.Any(type => type.HasPinnedQualifier));
+                                typeArguments.Any(type => type.HasPinnedQualifier),
+            IsUnsupported: genericType.IsUnsupported ||
+                           typeArguments.Any(type => type.IsUnsupported));
     }
 
     private static SignatureTypeName Wrap(
@@ -12151,7 +15346,8 @@ internal sealed class SignatureTypeNameProvider : ISignatureTypeProvider<Signatu
             [],
             HasAnyCustomModifiers(elementType),
             isRestrictedGenericArgument,
-            HasPinnedQualifier: elementType.HasPinnedQualifier);
+            HasPinnedQualifier: elementType.HasPinnedQualifier,
+            IsUnsupported: elementType.IsUnsupported);
 
     private static bool HasAnyCustomModifiers(SignatureTypeName type) =>
         type.HasNestedCustomModifiers || type.OuterCustomModifiers.Length > 0;

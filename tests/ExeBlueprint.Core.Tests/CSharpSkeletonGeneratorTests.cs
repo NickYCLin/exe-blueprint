@@ -2068,6 +2068,95 @@ public sealed class CSharpSkeletonGeneratorTests
     }
 
     [Fact]
+    public async Task ReconstructsAndBuildsCanonicalGenericMultidimensionalArrayMembers()
+    {
+        var assemblyPath = typeof(MultiDimensionalArrayBodyFixture<>).Assembly.Location;
+        var analyzed = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
+        var artifact = Assert.Single(analyzed.Files);
+        var fixture = Assert.Single(
+            artifact.Code!.Types,
+            type => type.FullName == "ExeBlueprint.Core.Tests.MultiDimensionalArrayBodyFixture");
+
+        Assert.Equal(
+            ["return values[row, column];"],
+            Assert.Single(fixture.Methods, method => method.Name == "GetTypeMatrix").Body);
+        Assert.Equal(
+            ["values[row, column] = value;"],
+            Assert.Single(fixture.Methods, method => method.Name == "SetTypeMatrix").Body);
+        Assert.Equal(
+            ["return new !0[rows, columns];"],
+            Assert.Single(fixture.Methods, method => method.Name == "CreateTypeMatrix").Body);
+        Assert.Equal(
+            ["return ExeBlueprint.Core.Tests.MultiDimensionalArrayBodyFixture<!0>.Identity<!0[,]>(values)[row, column];"],
+            Assert.Single(
+                fixture.Methods,
+                method => method.Name == "GetTypeMatrixAfterIdentity").Body);
+        Assert.Equal(
+            ["ExeBlueprint.Core.Tests.MultiDimensionalArrayBodyFixture<!0>.Identity<!0[,]>(values)[row, column] = value;"],
+            Assert.Single(
+                fixture.Methods,
+                method => method.Name == "SetTypeMatrixAfterIdentity").Body);
+        Assert.False(Assert.Single(
+            fixture.Methods,
+            method => method.Name == "AddressTypeMatrix").BodyReconstructed);
+        Assert.Equal(
+            ["return values[row, column];"],
+            Assert.Single(fixture.Methods, method => method.Name == "GetMethodMatrix").Body);
+        Assert.Equal(
+            ["values[row, column] = value;"],
+            Assert.Single(fixture.Methods, method => method.Name == "SetMethodMatrix").Body);
+        Assert.Equal(
+            ["return new !!0[rows, columns];"],
+            Assert.Single(fixture.Methods, method => method.Name == "CreateMethodMatrix").Body);
+        Assert.Equal(
+            ["return ExeBlueprint.Core.Tests.MultiDimensionalArrayBodyFixture<!0>.Identity<!!0[,]>(values)[row, column];"],
+            Assert.Single(
+                fixture.Methods,
+                method => method.Name == "GetMethodMatrixAfterIdentity").Body);
+        Assert.Equal(
+            ["ExeBlueprint.Core.Tests.MultiDimensionalArrayBodyFixture<!0>.Identity<!!0[,]>(values)[row, column] = value;"],
+            Assert.Single(
+                fixture.Methods,
+                method => method.Name == "SetMethodMatrixAfterIdentity").Body);
+        Assert.False(Assert.Single(
+            fixture.Methods,
+            method => method.Name == "AddressMethodMatrix").BodyReconstructed);
+
+        var filteredArtifact = artifact with
+        {
+            ManagedReferences = [],
+            Code = artifact.Code with
+            {
+                NamespaceCount = 1,
+                TypeCount = 1,
+                MethodCount = fixture.Methods.Count,
+                Types = [fixture]
+            }
+        };
+        var generated = CSharpSkeletonGenerator.Generate(
+            analyzed with { Files = [filteredArtifact] });
+        var source = Assert.Single(
+            generated,
+            file => file.RelativePath.EndsWith(
+                "ExeBlueprint.Core.Tests.cs",
+                StringComparison.Ordinal)).Content;
+        Assert.Contains("return new T[rows, columns];", source, StringComparison.Ordinal);
+        Assert.Contains("return new TMethod[rows, columns];", source, StringComparison.Ordinal);
+        Assert.Contains(
+            "Identity<T[,]>(values)[row, column]",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "Identity<TMethod[,]>(values)[row, column]",
+            source,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(".Get(", source, StringComparison.Ordinal);
+        Assert.DoesNotContain(".Set(", source, StringComparison.Ordinal);
+
+        await AssertGeneratedSolutionBuildsAsync(generated);
+    }
+
+    [Fact]
     public async Task PreservesMetadataDeclaringTypeForInstanceDispatch()
     {
         var assemblyPath = typeof(InterfaceDispatchFixture).Assembly.Location;
