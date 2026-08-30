@@ -116,6 +116,72 @@ public sealed class ConstructorMetadataSafetyTests
     }
 
     [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public void AcceptsOwnerBoundGenericTypeParameterSubstitution(
+        bool nestedOwner,
+        bool useInheritedSlot)
+    {
+        using var fixture = CreateGenericOwnerFixture(
+            nestedOwner,
+            useInheritedSlot: useInheritedSlot);
+
+        var result = Reconstruct(fixture);
+
+        Assert.NotNull(result);
+        Assert.Equal("base", result.Initializer.Kind);
+        Assert.Equal(["arg0"], result.Initializer.Arguments);
+        Assert.NotNull(result.Body);
+        Assert.Empty(result.Body);
+    }
+
+    [Theory]
+    [InlineData(GenericOwnerMutation.GappedOwnerDomain)]
+    [InlineData(GenericOwnerMutation.OutOfRangeBaseSlot)]
+    public void RejectsUnprovenGenericOwnerDomain(GenericOwnerMutation mutation)
+    {
+        using var fixture = CreateGenericOwnerFixture(nestedOwner: false, mutation);
+
+        Assert.Null(Reconstruct(fixture));
+    }
+
+    [Theory]
+    [InlineData(GenericOwnerMutation.MismatchedInheritedDeclaration)]
+    [InlineData(GenericOwnerMutation.MismatchedNestedArity)]
+    public void RejectsMismatchedNestedOwnerDomain(GenericOwnerMutation mutation)
+    {
+        using var fixture = CreateGenericOwnerFixture(
+            nestedOwner: true,
+            mutation);
+
+        Assert.Null(Reconstruct(fixture));
+    }
+
+    [Fact]
+    public void RejectsSameGenericSlotIndexFromDifferentOwners()
+    {
+        var firstOwner = MetadataTokens.TypeDefinitionHandle(1);
+        var secondOwner = MetadataTokens.TypeDefinitionHandle(2);
+
+        Assert.True(ManagedSymbolReader.ConstructorTypeParameterSlotsMatchForTest(
+            firstOwner,
+            sourceIndex: 0,
+            firstOwner,
+            targetIndex: 0));
+        Assert.False(ManagedSymbolReader.ConstructorTypeParameterSlotsMatchForTest(
+            firstOwner,
+            sourceIndex: 0,
+            secondOwner,
+            targetIndex: 0));
+        Assert.False(ManagedSymbolReader.ConstructorTypeParameterSlotsMatchForTest(
+            firstOwner,
+            sourceIndex: 0,
+            firstOwner,
+            targetIndex: 1));
+    }
+
+    [Theory]
     [InlineData(ConstructorMethodRole.Caller, ConstructorDefinitionFlagMutation.Static)]
     [InlineData(ConstructorMethodRole.Caller, ConstructorDefinitionFlagMutation.Abstract)]
     [InlineData(ConstructorMethodRole.Caller, ConstructorDefinitionFlagMutation.MissingSpecialName)]
@@ -755,6 +821,167 @@ public sealed class ConstructorMetadataSafetyTests
                 : BuildConstructorIl(MetadataTokens.GetToken(target), parameterCount: 1));
     }
 
+    private static MetadataFixture CreateGenericOwnerFixture(
+        bool nestedOwner,
+        GenericOwnerMutation mutation = GenericOwnerMutation.None,
+        bool useInheritedSlot = false)
+    {
+        var metadata = new MetadataBuilder();
+        metadata.AddModule(
+            generation: 0,
+            moduleName: metadata.GetOrAddString("GenericOwnerConstructorTests.dll"),
+            mvid: metadata.GetOrAddGuid(new Guid("af9cbf2b-ef79-4b86-91da-54bde23e8fef")),
+            encId: default,
+            encBaseId: default);
+        metadata.AddAssembly(
+            metadata.GetOrAddString("GenericOwnerConstructorTests"),
+            new Version(1, 0, 0, 0),
+            culture: default,
+            publicKey: default,
+            flags: (AssemblyFlags)0,
+            hashAlgorithm: AssemblyHashAlgorithm.None);
+
+        var systemRuntime = metadata.AddAssemblyReference(
+            metadata.GetOrAddString("System.Runtime"),
+            new Version(10, 0, 0, 0),
+            culture: default,
+            publicKeyOrToken: default,
+            flags: (AssemblyFlags)0,
+            hashValue: default);
+        var objectType = metadata.AddTypeReference(
+            systemRuntime,
+            metadata.GetOrAddString("System"),
+            metadata.GetOrAddString("Object"));
+
+        metadata.AddTypeDefinition(
+            TypeAttributes.NotPublic,
+            @namespace: default,
+            metadata.GetOrAddString("<Module>"),
+            baseType: default,
+            MetadataTokens.FieldDefinitionHandle(1),
+            MetadataTokens.MethodDefinitionHandle(1));
+        var baseArity = nestedOwner ? 2 : 1;
+        var genericBaseType = metadata.AddTypeDefinition(
+            TypeAttributes.Public,
+            metadata.GetOrAddString("Tests"),
+            metadata.GetOrAddString($"GenericBase`{baseArity}"),
+            objectType,
+            MetadataTokens.FieldDefinitionHandle(1),
+            MetadataTokens.MethodDefinitionHandle(1));
+        for (var index = 0; index < baseArity; index++)
+        {
+            metadata.AddGenericParameter(
+                genericBaseType,
+                GenericParameterAttributes.None,
+                metadata.GetOrAddString($"TBase{index}"),
+                index);
+        }
+
+        TypeDefinitionHandle outerType = default;
+        if (nestedOwner)
+        {
+            outerType = metadata.AddTypeDefinition(
+                TypeAttributes.Public,
+                metadata.GetOrAddString("Tests"),
+                metadata.GetOrAddString("Outer`1"),
+                objectType,
+                MetadataTokens.FieldDefinitionHandle(1),
+                MetadataTokens.MethodDefinitionHandle(1));
+            metadata.AddGenericParameter(
+                outerType,
+                GenericParameterAttributes.None,
+                metadata.GetOrAddString("TOuter"),
+                index: 0);
+        }
+
+        var baseSignature = new BlobBuilder();
+        baseSignature.WriteByte(0x15); // GENERICINST
+        WriteNamedType(baseSignature, 0x12, genericBaseType); // CLASS
+        baseSignature.WriteCompressedInteger(baseArity);
+        for (var index = 0; index < baseArity; index++)
+        {
+            baseSignature.WriteByte(0x13); // VAR
+            baseSignature.WriteCompressedInteger(
+                mutation == GenericOwnerMutation.OutOfRangeBaseSlot && index == baseArity - 1
+                    ? baseArity
+                    : index);
+        }
+
+        var derivedBaseType = metadata.AddTypeSpecification(metadata.GetOrAddBlob(baseSignature));
+        var derivedType = metadata.AddTypeDefinition(
+            TypeAttributes.Public,
+            nestedOwner ? default : metadata.GetOrAddString("Tests"),
+            metadata.GetOrAddString(
+                mutation == GenericOwnerMutation.MismatchedNestedArity
+                    ? "Derived`2"
+                    : "Derived`1"),
+            derivedBaseType,
+            MetadataTokens.FieldDefinitionHandle(1),
+            MetadataTokens.MethodDefinitionHandle(1));
+        if (nestedOwner)
+        {
+            metadata.AddNestedType(derivedType, outerType);
+            metadata.AddGenericParameter(
+                derivedType,
+                GenericParameterAttributes.None,
+                metadata.GetOrAddString(
+                    mutation == GenericOwnerMutation.MismatchedInheritedDeclaration
+                        ? "WrongOuter"
+                        : "TOuter"),
+                index: 0);
+            metadata.AddGenericParameter(
+                derivedType,
+                GenericParameterAttributes.None,
+                metadata.GetOrAddString("TInner"),
+                index: 1);
+        }
+        else
+        {
+            metadata.AddGenericParameter(
+                derivedType,
+                GenericParameterAttributes.None,
+                metadata.GetOrAddString("T"),
+                mutation == GenericOwnerMutation.GappedOwnerDomain ? 1 : 0);
+        }
+
+        var selectedSlot = nestedOwner && !useInheritedSlot ? 1 : 0;
+        var targetSignature = new BlobBuilder();
+        targetSignature.WriteByte(0x20); // HASTHIS | DEFAULT
+        targetSignature.WriteCompressedInteger(1);
+        targetSignature.WriteByte(0x01); // VOID
+        targetSignature.WriteByte(0x13); // VAR
+        targetSignature.WriteCompressedInteger(selectedSlot);
+        var target = metadata.AddMemberReference(
+            derivedBaseType,
+            metadata.GetOrAddString(".ctor"),
+            metadata.GetOrAddBlob(targetSignature));
+
+        var currentSignature = new BlobBuilder();
+        currentSignature.WriteByte(0x20); // HASTHIS | DEFAULT
+        currentSignature.WriteCompressedInteger(1);
+        currentSignature.WriteByte(0x01); // VOID
+        currentSignature.WriteByte(0x13); // VAR
+        currentSignature.WriteCompressedInteger(selectedSlot);
+        var currentConstructor = metadata.AddMethodDefinition(
+            CanonicalConstructorAttributes,
+            MethodImplAttributes.IL | MethodImplAttributes.Managed,
+            metadata.GetOrAddString(".ctor"),
+            metadata.GetOrAddBlob(currentSignature),
+            bodyOffset: 0,
+            parameterList: MetadataTokens.ParameterHandle(1));
+
+        var metadataImage = new BlobBuilder();
+        new MetadataRootBuilder(metadata).Serialize(
+            metadataImage,
+            methodBodyStreamRva: 0,
+            mappedFieldDataStreamRva: 0);
+        var provider = MetadataReaderProvider.FromMetadataImage(metadataImage.ToImmutableArray());
+        return new MetadataFixture(
+            provider,
+            currentConstructor,
+            BuildConstructorIl(MetadataTokens.GetToken(target), parameterCount: 1));
+    }
+
     private static BlobHandle AddConstructorSignature(
         MetadataBuilder metadata,
         SignatureShape shape,
@@ -920,6 +1147,15 @@ public sealed class ConstructorMetadataSafetyTests
         LocalDefinitionArityMismatch,
         PrimitiveAliasGenericDefinition,
         InvalidLocalParameterDefinition
+    }
+
+    public enum GenericOwnerMutation
+    {
+        None,
+        GappedOwnerDomain,
+        OutOfRangeBaseSlot,
+        MismatchedInheritedDeclaration,
+        MismatchedNestedArity
     }
 
     private enum SignatureShape
