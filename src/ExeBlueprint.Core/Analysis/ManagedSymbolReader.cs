@@ -133,14 +133,18 @@ internal static class ManagedSymbolReader
                 var methodName = metadata.GetString(method.Name);
                 var hasBody = method.RelativeVirtualAddress != 0;
                 var declaringName = fullName;
-                var il = hasBody ? TryReadIl(peReader, method) : null;
+                var methodBody = hasBody ? TryReadMethodBody(peReader, method) : null;
+                var il = methodBody is null ? null : TryReadIl(methodBody);
+                var localVariablesInitialized = methodBody?.LocalVariablesInitialized ?? false;
                 StandaloneSignatureHandle localSignature = default;
-                var localTypes = hasBody
-                    ? TryReadLocalTypes(peReader, method, enumTypes, out localSignature)
+                var localTypes = methodBody is not null
+                    ? TryReadLocalTypes(metadata, methodBody, enumTypes, out localSignature)
                     : [];
-                IReadOnlyList<ExceptionRegionInfo>? exceptionRegionResult = hasBody
-                    ? TryReadExceptionRegions(peReader, metadata, method)
-                    : [];
+                IReadOnlyList<ExceptionRegionInfo>? exceptionRegionResult = !hasBody
+                    ? []
+                    : methodBody is null
+                        ? null
+                        : TryReadExceptionRegions(metadata, methodBody);
                 var exceptionRegions = exceptionRegionResult ?? [];
 
                 var model = BuildMethod(
@@ -192,6 +196,7 @@ internal static class ManagedSymbolReader
                             reconstructionSignature.ParameterTypes,
                             reconstructionSignature.ReturnType,
                             localTypes,
+                            localVariablesInitialized,
                             exceptionRegions,
                             enumTypes,
                             userStrings,
@@ -226,6 +231,7 @@ internal static class ManagedSymbolReader
                             reconstructionSignature,
                             genericParameterResult,
                             localTypes,
+                            localVariablesInitialized,
                             localSignature,
                             exceptionRegions,
                             enumTypes,
@@ -732,11 +738,25 @@ internal static class ManagedSymbolReader
         return (handle, $"{fullName}.{metadata.GetString(method.Name)}");
     }
 
-    private static byte[]? TryReadIl(PEReader peReader, MethodDefinition method)
+    private static MethodBodyBlock? TryReadMethodBody(
+        PEReader peReader,
+        MethodDefinition method)
     {
         try
         {
-            return peReader.GetMethodBody(method.RelativeVirtualAddress).GetILBytes();
+            return peReader.GetMethodBody(method.RelativeVirtualAddress);
+        }
+        catch (Exception exception) when (exception is BadImageFormatException or InvalidOperationException)
+        {
+            return null;
+        }
+    }
+
+    private static byte[]? TryReadIl(MethodBodyBlock body)
+    {
+        try
+        {
+            return body.GetILBytes();
         }
         catch (Exception exception) when (exception is BadImageFormatException or InvalidOperationException)
         {
@@ -745,22 +765,20 @@ internal static class ManagedSymbolReader
     }
 
     private static IReadOnlyList<CliType> TryReadLocalTypes(
-        PEReader peReader,
-        MethodDefinition method,
+        MetadataReader metadata,
+        MethodBodyBlock body,
         EnumTypeCatalog enumTypes,
         out StandaloneSignatureHandle localSignature)
     {
         localSignature = default;
         try
         {
-            var body = peReader.GetMethodBody(method.RelativeVirtualAddress);
             if (body.LocalSignature.IsNil)
             {
                 return [];
             }
 
             localSignature = body.LocalSignature;
-            var metadata = peReader.GetMetadataReader();
             var signature = metadata.GetStandaloneSignature(body.LocalSignature);
             return signature
                 .DecodeLocalSignature(SignatureTypeNameProvider.Instance, null)
@@ -849,6 +867,7 @@ internal static class ManagedSymbolReader
         MethodReconstructionSignature signature,
         TypeGenericParameterReadResult genericParameterResult,
         IReadOnlyList<CliType> localTypes,
+        bool localVariablesInitialized,
         StandaloneSignatureHandle localSignature,
         IReadOnlyList<ExceptionRegionInfo> exceptionRegions,
         EnumTypeCatalog enumTypes,
@@ -1135,6 +1154,7 @@ internal static class ManagedSymbolReader
                 signature.ParameterTypes,
                 signature.ReturnType,
                 localTypes,
+                localVariablesInitialized,
                 exceptionRegions,
                 enumTypes,
                 userStrings,
@@ -3548,14 +3568,12 @@ internal static class ManagedSymbolReader
     }
 
     private static IReadOnlyList<ExceptionRegionInfo>? TryReadExceptionRegions(
-        PEReader peReader,
         MetadataReader metadata,
-        MethodDefinition method)
+        MethodBodyBlock body)
     {
         try
         {
-            return peReader
-                .GetMethodBody(method.RelativeVirtualAddress)
+            return body
                 .ExceptionRegions
                 .Select(region => new ExceptionRegionInfo(
                     region.Kind,
@@ -4382,7 +4400,8 @@ internal static class ManagedSymbolReader
         IReadOnlyList<string>? localTypes = null,
         IReadOnlyList<ExceptionRegionInfo>? exceptionRegions = null,
         IReadOnlyList<string>? parameterTypes = null,
-        PEReader? peReader = null)
+        PEReader? peReader = null,
+        bool localVariablesInitialized = true)
     {
         var enumTypes = ReadEnumTypeCatalog(metadata);
         var userStrings = peReader is null
@@ -4403,6 +4422,7 @@ internal static class ManagedSymbolReader
             (parameterTypes ?? []).Select(type => CreateTestCliType(type, enumTypes)).ToArray(),
             CreateTestCliType(returnType, enumTypes),
             (localTypes ?? []).Select(type => CreateTestCliType(type, enumTypes)).ToArray(),
+            localVariablesInitialized,
             exceptionRegions ?? [],
             enumTypes,
             userStrings,
@@ -4414,7 +4434,8 @@ internal static class ManagedSymbolReader
         MetadataReader metadata,
         byte[] il,
         MethodDefinitionHandle methodHandle,
-        PEReader? peReader = null)
+        PEReader? peReader = null,
+        bool localVariablesInitialized = true)
     {
         try
         {
@@ -4442,6 +4463,7 @@ internal static class ManagedSymbolReader
                 signature.ParameterTypes.Select(type => CreateCliType(type, enumTypes)).ToArray(),
                 CreateCliType(signature.ReturnType, enumTypes),
                 localTypes: [],
+                localVariablesInitialized,
                 exceptionRegions: [],
                 enumTypes,
                 userStrings,
@@ -4513,7 +4535,8 @@ internal static class ManagedSymbolReader
         IReadOnlyList<ExceptionRegionInfo>? exceptionRegions = null,
         StandaloneSignatureHandle localSignature = default,
         bool requireBaseInitializer = true,
-        PEReader? peReader = null)
+        PEReader? peReader = null,
+        bool localVariablesInitialized = true)
     {
         try
         {
@@ -4548,6 +4571,7 @@ internal static class ManagedSymbolReader
                     signature.ParameterTypes.Select(type => CreateCliType(type, enumTypes)).ToArray()),
                 genericParameterResult,
                 [],
+                localVariablesInitialized,
                 localSignature,
                 exceptionRegions ?? [],
                 enumTypes,
@@ -4625,6 +4649,7 @@ internal static class ManagedSymbolReader
         IReadOnlyList<CliType> parameterTypes,
         CliType returnType,
         IReadOnlyList<CliType> localTypes,
+        bool localVariablesInitialized,
         IReadOnlyList<ExceptionRegionInfo> exceptionRegions,
         EnumTypeCatalog enumTypes,
         UserStringCatalog userStrings,
@@ -4634,6 +4659,7 @@ internal static class ManagedSymbolReader
     {
         requiresUnsafeContext = false;
         if (localTypes.Any(type => type.HasPinnedQualifier) ||
+            (!localVariablesInitialized && localTypes.Count > 0) ||
             decoded.Status != IlDecodeStatus.Complete ||
             decoded.Instructions.Count == 0 ||
             !HasSupportedMethodTermination(
