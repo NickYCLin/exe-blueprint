@@ -824,6 +824,7 @@ internal static class ManagedSymbolReader
                 out var ownerContext) ||
             !TryCreateConstructorBaseTypeContext(
                 metadata,
+                declaringType,
                 baseType,
                 ownerContext,
                 out var baseTypeContext))
@@ -1028,10 +1029,12 @@ internal static class ManagedSymbolReader
         {
             var argument = arguments[argumentIndex];
             if (!TryRenderConstructorArgument(
+                    metadata,
                     argument.Expression,
                     argument.Type,
                     argument.Signature,
                     target.Parameters[argumentIndex],
+                    allowLocalDirectBaseUpcast: kind == "base",
                     out renderedArguments[argumentIndex]))
             {
                 return null;
@@ -1346,11 +1349,17 @@ internal static class ManagedSymbolReader
 
     private static bool TryCreateConstructorBaseTypeContext(
         MetadataReader metadata,
+        TypeDefinitionHandle declaringType,
         EntityHandle baseType,
         SignatureGenericContext? ownerContext,
         out ConstructorTypeSpecificationContext? context)
     {
         context = null;
+        if (baseType == declaringType)
+        {
+            return false;
+        }
+
         if (baseType.Kind != HandleKind.TypeSpecification)
         {
             return true;
@@ -1366,6 +1375,7 @@ internal static class ManagedSymbolReader
                 rawTypeKind: 0);
             if (!signature.IsCanonicalGenericInstantiation ||
                 !AreSameConstructorSignature(signature, signature) ||
+                signature.GenericDefinitionHandle == declaringType ||
                 signature.GenericDefinitionRawTypeKind != (byte)SignatureTypeKind.Class ||
                 signature.GenericDefinitionSignatureKind != SignatureTypeKind.Class ||
                 !HasCanonicalLocalGenericDefinitions(metadata, signature))
@@ -2426,10 +2436,12 @@ internal static class ManagedSymbolReader
     }
 
     private static bool TryRenderConstructorArgument(
+        MetadataReader metadata,
         string expression,
         CliType sourceType,
         SignatureTypeName? sourceSignature,
         ConstructorParameter target,
+        bool allowLocalDirectBaseUpcast,
         out string rendered)
     {
         var targetType = target.Type;
@@ -2456,6 +2468,16 @@ internal static class ManagedSymbolReader
                 rendered += "!";
             }
 
+            return true;
+        }
+
+        if (allowLocalDirectBaseUpcast &&
+            sourceSignature is not null &&
+            IsVerifiedConstructorLocalDirectBaseUpcast(
+                metadata,
+                sourceSignature,
+                target.Signature))
+        {
             return true;
         }
 
@@ -2491,6 +2513,94 @@ internal static class ManagedSymbolReader
 
         rendered = $"unchecked(({targetType.Text}){expression})";
         return true;
+    }
+
+    private static bool IsVerifiedConstructorLocalDirectBaseUpcast(
+        MetadataReader metadata,
+        SignatureTypeName source,
+        SignatureTypeName target)
+    {
+        if (!source.IsCanonicalGenericInstantiation ||
+            source.GenericArguments.IsDefaultOrEmpty ||
+            source.GenericArguments.Length > MaxGenericParametersPerOwner ||
+            source.GenericDefinitionHandle.Kind != HandleKind.TypeDefinition ||
+            source.GenericDefinitionRawTypeKind != (byte)SignatureTypeKind.Class ||
+            source.GenericDefinitionSignatureKind != SignatureTypeKind.Class ||
+            !target.IsExactNamedType ||
+            target.NominalHandle.Kind != HandleKind.TypeDefinition ||
+            target.RawTypeKind != (byte)SignatureTypeKind.Class ||
+            target.SignatureKind != SignatureTypeKind.Class ||
+            !AreSameConstructorSignature(source, source) ||
+            !AreSameConstructorSignature(target, target) ||
+            !HasCanonicalLocalGenericDefinitions(metadata, source))
+        {
+            return false;
+        }
+
+        try
+        {
+            var sourceHandle = (TypeDefinitionHandle)source.GenericDefinitionHandle;
+            var targetHandle = (TypeDefinitionHandle)target.NominalHandle;
+            var sourceDefinition = metadata.GetTypeDefinition(sourceHandle);
+            var targetDefinition = metadata.GetTypeDefinition(targetHandle);
+            var sourceParameters = sourceDefinition.GetGenericParameters();
+            var sourceAttributes = sourceDefinition.Attributes;
+            var targetAttributes = targetDefinition.Attributes;
+            if (sourceHandle == targetHandle ||
+                !sourceDefinition.GetDeclaringType().IsNil ||
+                !targetDefinition.GetDeclaringType().IsNil ||
+                sourceDefinition.BaseType != targetHandle ||
+                sourceParameters.Count != source.GenericArguments.Length ||
+                targetDefinition.GetGenericParameters().Count != 0 ||
+                (sourceAttributes & TypeAttributes.ClassSemanticsMask) == TypeAttributes.Interface ||
+                sourceAttributes.HasFlag(TypeAttributes.Import) ||
+                sourceAttributes.HasFlag(TypeAttributes.WindowsRuntime) ||
+                (targetAttributes & TypeAttributes.ClassSemanticsMask) == TypeAttributes.Interface ||
+                targetAttributes.HasFlag(TypeAttributes.Sealed) ||
+                targetAttributes.HasFlag(TypeAttributes.Import) ||
+                targetAttributes.HasFlag(TypeAttributes.WindowsRuntime) ||
+                !TryReadBoundedGenericAttributeName(
+                    metadata,
+                    sourceDefinition.Name,
+                    out var sourceName) ||
+                !TryReadBoundedGenericAttributeName(
+                    metadata,
+                    sourceDefinition.Namespace,
+                    out _) ||
+                !TryReadBoundedGenericAttributeName(
+                    metadata,
+                    targetDefinition.Name,
+                    out var targetName) ||
+                !TryReadBoundedGenericAttributeName(
+                    metadata,
+                    targetDefinition.Namespace,
+                    out _) ||
+                sourceName.Length == 0 ||
+                targetName.Length == 0 ||
+                targetName.Contains('`') ||
+                IsPrimitiveAliasName(targetName))
+            {
+                return false;
+            }
+
+            foreach (var parameterHandle in sourceParameters)
+            {
+                var parameter = metadata.GetGenericParameter(parameterHandle);
+                if (parameter.Parent != sourceHandle ||
+                    parameter.Attributes != GenericParameterAttributes.None ||
+                    parameter.GetConstraints().Count != 0)
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+        catch (Exception exception) when (
+            exception is BadImageFormatException or ArgumentException or InvalidOperationException)
+        {
+            return false;
+        }
     }
 
     private static bool IsExactConstructorAssignment(
