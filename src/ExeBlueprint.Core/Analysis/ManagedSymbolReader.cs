@@ -869,6 +869,7 @@ internal static class ManagedSymbolReader
         index++;
         var arguments = new List<ConstructorArgument>();
         var foldedLocalSlots = new HashSet<int>();
+        var hasFoldedTypeOfArgument = false;
         var currentParameterSignatures = currentConstructor.Parameters
             .Select(parameter => parameter.Signature)
             .ToArray();
@@ -904,6 +905,27 @@ internal static class ManagedSymbolReader
 
                 arguments[^1] = nullableArgument;
                 index++;
+                continue;
+            }
+
+            if (name == "ldtoken")
+            {
+                if (arguments.Count >= MaxConstructorInitializerArguments ||
+                    !TryFoldTypeOfConstructorArgument(
+                        metadata,
+                        enumTypes,
+                        il,
+                        rawInstructions,
+                        index,
+                        ownerContext,
+                        out var typeOfArgument))
+                {
+                    return null;
+                }
+
+                arguments.Add(typeOfArgument);
+                hasFoldedTypeOfArgument = true;
+                index += 2;
                 continue;
             }
 
@@ -996,7 +1018,7 @@ internal static class ManagedSymbolReader
             return null;
         }
 
-        if (foldedLocalSlots.Count > 0 && kind != "base")
+        if ((foldedLocalSlots.Count > 0 || hasFoldedTypeOfArgument) && kind != "base")
         {
             return null;
         }
@@ -1716,6 +1738,191 @@ internal static class ManagedSymbolReader
         }
     }
 
+    private static bool TryFoldTypeOfConstructorArgument(
+        MetadataReader metadata,
+        EnumTypeCatalog enumTypes,
+        byte[] il,
+        IReadOnlyList<IlInstruction> instructions,
+        int index,
+        SignatureGenericContext? ownerContext,
+        out ConstructorArgument argument)
+    {
+        argument = default;
+        if (ownerContext is not { } genericContext ||
+            !genericContext.TypeArguments.IsDefault ||
+            genericContext.TypeParameterOwner.IsNil ||
+            genericContext.TypeParameterCount <= 0 ||
+            index + 1 >= instructions.Count ||
+            instructions[index].OperandSize != 4 ||
+            !TryGetInstructionName(instructions[index + 1], out var callName) ||
+            callName != "call" ||
+            instructions[index + 1].OperandSize != 4)
+        {
+            return false;
+        }
+
+        try
+        {
+            var typeToken = BinaryPrimitives.ReadInt32LittleEndian(
+                il.AsSpan(instructions[index].OperandOffset, 4));
+            var typeHandle = MetadataTokens.EntityHandle(typeToken);
+            var callToken = BinaryPrimitives.ReadInt32LittleEndian(
+                il.AsSpan(instructions[index + 1].OperandOffset, 4));
+            var callHandle = MetadataTokens.EntityHandle(callToken);
+            if (typeHandle.Kind != HandleKind.TypeSpecification ||
+                callHandle.Kind != HandleKind.MemberReference ||
+                !TryReadCanonicalConstructorTypeParameter(
+                    metadata,
+                    (TypeSpecificationHandle)typeHandle,
+                    genericContext,
+                    out var typeParameter) ||
+                !TryReadTrustedGetTypeFromHandle(
+                    metadata,
+                    (MemberReferenceHandle)callHandle,
+                    out var systemType))
+            {
+                return false;
+            }
+
+            argument = new ConstructorArgument(
+                $"typeof({typeParameter.Text})",
+                CreateCliType(systemType, enumTypes),
+                systemType,
+                IsFoldedExpression: true);
+            return true;
+        }
+        catch (Exception exception) when (
+            exception is BadImageFormatException or ArgumentException or InvalidOperationException)
+        {
+            argument = default;
+            return false;
+        }
+    }
+
+    private static bool TryReadCanonicalConstructorTypeParameter(
+        MetadataReader metadata,
+        TypeSpecificationHandle handle,
+        SignatureGenericContext ownerContext,
+        out SignatureTypeName typeParameter)
+    {
+        typeParameter = new SignatureTypeName(string.Empty);
+        var specification = metadata.GetTypeSpecification(handle);
+        var reader = metadata.GetBlobReader(specification.Signature);
+        if (reader.Length is < 2 or > MaxConstructorTypeSignatureBytes ||
+            reader.ReadByte() != 0x13 || // VAR
+            !TryReadCanonicalCompressedInteger(ref reader, out var slot) ||
+            reader.RemainingBytes != 0 ||
+            slot < 0 ||
+            slot >= ownerContext.TypeParameterCount)
+        {
+            return false;
+        }
+
+        typeParameter = specification.DecodeSignature(
+            SignatureTypeNameProvider.Instance,
+            ownerContext);
+        return typeParameter.Text == $"!{slot}" &&
+               typeParameter.TypeParameterSlot is { } resolvedSlot &&
+               resolvedSlot.Owner == ownerContext.TypeParameterOwner &&
+               resolvedSlot.Index == slot &&
+               AreSameConstructorSignature(typeParameter, typeParameter);
+    }
+
+    private static bool TryReadTrustedGetTypeFromHandle(
+        MetadataReader metadata,
+        MemberReferenceHandle handle,
+        out SignatureTypeName systemType)
+    {
+        systemType = new SignatureTypeName(string.Empty);
+        var member = metadata.GetMemberReference(handle);
+        if (member.GetKind() != MemberReferenceKind.Method ||
+            !TryReadBoundedGenericAttributeName(metadata, member.Name, out var methodName) ||
+            methodName != "GetTypeFromHandle" ||
+            member.Parent.Kind != HandleKind.TypeReference)
+        {
+            return false;
+        }
+
+        var reader = metadata.GetBlobReader(member.Signature);
+        if (reader.Length is < 6 or > MaxConstructorTypeSignatureBytes ||
+            reader.ReadByte() != 0x00 || // static DEFAULT
+            reader.ReadByte() != 0x01 || // exactly one parameter, canonical encoding
+            reader.ReadByte() != 0x12 || // CLASS return
+            !TryReadCanonicalTypeHandle(ref reader, out var returnHandle) ||
+            returnHandle != member.Parent ||
+            reader.RemainingBytes == 0 ||
+            reader.ReadByte() != 0x11 || // VALUETYPE parameter
+            !TryReadCanonicalTypeHandle(ref reader, out var parameterHandle) ||
+            reader.RemainingBytes != 0 ||
+            returnHandle.Kind != HandleKind.TypeReference ||
+            parameterHandle.Kind != HandleKind.TypeReference ||
+            !TryReadTrustedSystemRuntimeTypeReference(
+                metadata,
+                (TypeReferenceHandle)returnHandle,
+                "Type",
+                out var returnAssembly) ||
+            !TryReadTrustedSystemRuntimeTypeReference(
+                metadata,
+                (TypeReferenceHandle)parameterHandle,
+                "RuntimeTypeHandle",
+                out var parameterAssembly) ||
+            returnAssembly != parameterAssembly)
+        {
+            return false;
+        }
+
+        systemType = SignatureTypeNameProvider.Instance.GetTypeFromReference(
+            metadata,
+            (TypeReferenceHandle)returnHandle,
+            rawTypeKind: (byte)SignatureTypeKind.Class);
+        var runtimeTypeHandle = SignatureTypeNameProvider.Instance.GetTypeFromReference(
+            metadata,
+            (TypeReferenceHandle)parameterHandle,
+            rawTypeKind: (byte)SignatureTypeKind.ValueType);
+        return systemType.IsExactNamedType &&
+               systemType.NominalHandle == returnHandle &&
+               systemType.RawTypeKind == (byte)SignatureTypeKind.Class &&
+               systemType.SignatureKind == SignatureTypeKind.Class &&
+               runtimeTypeHandle.IsExactNamedType &&
+               runtimeTypeHandle.NominalHandle == parameterHandle &&
+               runtimeTypeHandle.RawTypeKind == (byte)SignatureTypeKind.ValueType &&
+               runtimeTypeHandle.SignatureKind == SignatureTypeKind.ValueType;
+    }
+
+    private static bool TryReadTrustedSystemRuntimeTypeReference(
+        MetadataReader metadata,
+        TypeReferenceHandle handle,
+        string expectedName,
+        out AssemblyReferenceHandle assemblyHandle)
+    {
+        assemblyHandle = default;
+        var reference = metadata.GetTypeReference(handle);
+        if (!TryReadBoundedGenericAttributeName(metadata, reference.Namespace, out var @namespace) ||
+            @namespace != "System" ||
+            !TryReadBoundedGenericAttributeName(metadata, reference.Name, out var name) ||
+            name != expectedName ||
+            reference.ResolutionScope.Kind != HandleKind.AssemblyReference)
+        {
+            return false;
+        }
+
+        assemblyHandle = (AssemblyReferenceHandle)reference.ResolutionScope;
+        var assembly = metadata.GetAssemblyReference(assemblyHandle);
+        if (!TryReadBoundedGenericAttributeName(metadata, assembly.Name, out var assemblyName) ||
+            assemblyName != "System.Runtime")
+        {
+            assemblyHandle = default;
+            return false;
+        }
+
+        return IsTrustedFrameworkAssembly(
+            metadata,
+            assemblyName,
+            assembly.PublicKeyOrToken,
+            assembly.Culture,
+            assembly.Flags);
+    }
+
     private static bool TryFoldDefaultNullableLocalArgument(
         MetadataReader metadata,
         EnumTypeCatalog enumTypes,
@@ -2137,6 +2344,25 @@ internal static class ManagedSymbolReader
         handle = reader.ReadTypeHandle();
         var codedIndex = CodedIndex.TypeDefOrRefOrSpec(handle);
         var expectedBytes = codedIndex switch
+        {
+            < 0x80 => 1,
+            < 0x4000 => 2,
+            _ => 4
+        };
+        return reader.Offset - start == expectedBytes;
+    }
+
+    private static bool TryReadCanonicalCompressedInteger(
+        ref BlobReader reader,
+        out int value)
+    {
+        var start = reader.Offset;
+        if (!reader.TryReadCompressedInteger(out value) || value < 0)
+        {
+            return false;
+        }
+
+        var expectedBytes = value switch
         {
             < 0x80 => 1,
             < 0x4000 => 2,
