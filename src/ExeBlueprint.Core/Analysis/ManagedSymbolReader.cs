@@ -747,6 +747,10 @@ internal static class ManagedSymbolReader
         CliType Type,
         SignatureTypeName? Signature);
 
+    private sealed record ConstructorTypeSpecificationContext(
+        TypeSpecificationHandle Handle,
+        SignatureGenericContext SignatureContext);
+
     private sealed record ConstructorCallTarget(
         EntityHandle DeclaringType,
         MethodDefinitionHandle Definition,
@@ -803,6 +807,14 @@ internal static class ManagedSymbolReader
         IReadOnlyList<ExceptionRegionInfo> exceptionRegions,
         EnumTypeCatalog enumTypes)
     {
+        if (!TryCreateConstructorBaseTypeContext(
+                metadata,
+                baseType,
+                out var baseTypeContext))
+        {
+            return null;
+        }
+
         var currentConstructor = TryResolveConstructorCall(
             metadata,
             enumTypes,
@@ -812,7 +824,6 @@ internal static class ManagedSymbolReader
             currentConstructor.DeclaringType != declaringType ||
             currentConstructor.Parameters.Count != signature.ParameterTypes.Count ||
             signature.ReturnType.PrimitiveType != PrimitiveTypeCode.Void ||
-            baseType.Kind == HandleKind.TypeSpecification ||
             !HasNonGenericDefinitionChain(metadata, declaringType))
         {
             return null;
@@ -894,7 +905,8 @@ internal static class ManagedSymbolReader
         var target = TryResolveConstructorCall(
             metadata,
             enumTypes,
-            BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(callInstruction.OperandOffset, 4)));
+            BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(callInstruction.OperandOffset, 4)),
+            baseTypeContext);
         if (target is null || target.Parameters.Count != arguments.Count)
         {
             return null;
@@ -1149,10 +1161,135 @@ internal static class ManagedSymbolReader
         };
     }
 
+    private static bool TryCreateConstructorBaseTypeContext(
+        MetadataReader metadata,
+        EntityHandle baseType,
+        out ConstructorTypeSpecificationContext? context)
+    {
+        context = null;
+        if (baseType.Kind != HandleKind.TypeSpecification)
+        {
+            return true;
+        }
+
+        try
+        {
+            var handle = (TypeSpecificationHandle)baseType;
+            var signature = SignatureTypeNameProvider.Instance.GetTypeFromSpecification(
+                metadata,
+                genericContext: null,
+                handle,
+                rawTypeKind: 0);
+            if (!AreSameClosedConstructedSignature(signature, signature) ||
+                signature.GenericDefinitionRawTypeKind != (byte)SignatureTypeKind.Class ||
+                signature.GenericDefinitionSignatureKind != SignatureTypeKind.Class ||
+                !HasCanonicalLocalGenericDefinitions(metadata, signature))
+            {
+                return false;
+            }
+
+            context = new ConstructorTypeSpecificationContext(
+                handle,
+                new SignatureGenericContext(signature.GenericArguments));
+            return true;
+        }
+        catch (Exception exception) when (
+            exception is BadImageFormatException or ArgumentException or InvalidOperationException)
+        {
+            return false;
+        }
+    }
+
+    private static bool HasCanonicalLocalGenericDefinitions(
+        MetadataReader metadata,
+        SignatureTypeName signature)
+    {
+        var remainingNodes = 512;
+        return HasCanonicalLocalGenericDefinitions(
+            metadata,
+            signature,
+            depth: 0,
+            ref remainingNodes);
+    }
+
+    private static bool HasCanonicalLocalGenericDefinitions(
+        MetadataReader metadata,
+        SignatureTypeName signature,
+        int depth,
+        ref int remainingNodes)
+    {
+        if (depth > MaxStructureDepth || remainingNodes-- <= 0)
+        {
+            return false;
+        }
+
+        if (!signature.IsCanonicalGenericInstantiation)
+        {
+            return true;
+        }
+
+        if (signature.GenericArguments.IsDefaultOrEmpty ||
+            signature.GenericArguments.Length > MaxGenericParametersPerOwner)
+        {
+            return false;
+        }
+
+        if (signature.GenericDefinitionHandle.Kind == HandleKind.TypeDefinition)
+        {
+            var definitionHandle = (TypeDefinitionHandle)signature.GenericDefinitionHandle;
+            var definition = metadata.GetTypeDefinition(definitionHandle);
+            if (!definition.GetDeclaringType().IsNil)
+            {
+                return false;
+            }
+
+            var handles = definition.GetGenericParameters();
+            if (handles.Count != signature.GenericArguments.Length ||
+                handles.Count > MaxGenericParametersPerOwner)
+            {
+                return false;
+            }
+
+            var positions = new bool[handles.Count];
+            foreach (var parameterHandle in handles)
+            {
+                var parameter = metadata.GetGenericParameter(parameterHandle);
+                if (parameter.Parent != definitionHandle ||
+                    parameter.Index < 0 ||
+                    parameter.Index >= positions.Length ||
+                    positions[parameter.Index])
+                {
+                    return false;
+                }
+
+                positions[parameter.Index] = true;
+            }
+        }
+        else if (signature.GenericDefinitionHandle.Kind != HandleKind.TypeReference)
+        {
+            return false;
+        }
+
+        foreach (var argument in signature.GenericArguments)
+        {
+            if (!HasCanonicalLocalGenericDefinitions(
+                    metadata,
+                    argument,
+                    depth + 1,
+                    ref remainingNodes))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     private static ConstructorCallTarget? TryResolveConstructorCall(
         MetadataReader metadata,
         EnumTypeCatalog enumTypes,
-        int token)
+        int token,
+        ConstructorTypeSpecificationContext? typeSpecificationContext = null)
     {
         try
         {
@@ -1174,7 +1311,10 @@ internal static class ManagedSymbolReader
                     }
 
                     var methodSignature = method.DecodeSignature(SignatureTypeNameProvider.Instance, null);
-                    var methodParameters = TryReadConstructorParameters(methodSignature, enumTypes);
+                    var methodParameters = TryReadConstructorParameters(
+                        metadata,
+                        methodSignature,
+                        enumTypes);
                     return methodParameters is null
                         ? null
                         : new ConstructorCallTarget(
@@ -1194,8 +1334,25 @@ internal static class ManagedSymbolReader
                         return null;
                     }
 
-                    var memberSignature = member.DecodeMethodSignature(SignatureTypeNameProvider.Instance, null);
-                    var memberParameters = TryReadConstructorParameters(memberSignature, enumTypes);
+                    object? genericContext = null;
+                    if (member.Parent.Kind == HandleKind.TypeSpecification)
+                    {
+                        if (typeSpecificationContext is null ||
+                            member.Parent != typeSpecificationContext.Handle)
+                        {
+                            return null;
+                        }
+
+                        genericContext = typeSpecificationContext.SignatureContext;
+                    }
+
+                    var memberSignature = member.DecodeMethodSignature(
+                        SignatureTypeNameProvider.Instance,
+                        genericContext);
+                    var memberParameters = TryReadConstructorParameters(
+                        metadata,
+                        memberSignature,
+                        enumTypes);
                     return memberParameters is null
                         ? null
                         : new ConstructorCallTarget(member.Parent, default, memberParameters);
@@ -1212,6 +1369,7 @@ internal static class ManagedSymbolReader
     }
 
     private static IReadOnlyList<ConstructorParameter>? TryReadConstructorParameters(
+        MetadataReader metadata,
         MethodSignature<SignatureTypeName> signature,
         EnumTypeCatalog enumTypes)
     {
@@ -1232,7 +1390,9 @@ internal static class ManagedSymbolReader
                 type.HasNestedCustomModifiers ||
                 type.IsRestrictedGenericArgument ||
                 type.PrimitiveType == PrimitiveTypeCode.Void ||
-                (type.IsExactNamedType && IsPrimitiveAliasName(type.Text))))
+                !HasCanonicalLocalGenericDefinitions(metadata, type) ||
+                (type.IsExactNamedType &&
+                 (IsPrimitiveAliasName(type.Text) || type.Text.Contains('`')))))
         {
             return null;
         }
@@ -1397,7 +1557,7 @@ internal static class ManagedSymbolReader
         rendered = expression;
         if (expression == "null")
         {
-            if (!IsConstructorReferenceType(targetType))
+            if (!IsConstructorReferenceType(targetType, target.Signature))
             {
                 return false;
             }
@@ -1507,6 +1667,8 @@ internal static class ManagedSymbolReader
         if (source.PrimitiveType is not null || target.PrimitiveType is not null)
         {
             return source.PrimitiveType is not null &&
+                   source.PrimitiveType is not (
+                       PrimitiveTypeCode.Void or PrimitiveTypeCode.TypedReference) &&
                    source.PrimitiveType == target.PrimitiveType;
         }
 
@@ -1514,6 +1676,8 @@ internal static class ManagedSymbolReader
         {
             return source.IsExactNamedType &&
                    target.IsExactNamedType &&
+                   !source.Text.Contains('`', StringComparison.Ordinal) &&
+                   !target.Text.Contains('`', StringComparison.Ordinal) &&
                    IsExactSignatureIdentity(
                        source.NominalHandle,
                        source.RawTypeKind,
@@ -1528,6 +1692,10 @@ internal static class ManagedSymbolReader
             source.GenericArguments.IsDefaultOrEmpty ||
             target.GenericArguments.IsDefaultOrEmpty ||
             source.GenericArguments.Length != target.GenericArguments.Length ||
+            string.IsNullOrEmpty(source.GenericDefinitionText) ||
+            string.IsNullOrEmpty(target.GenericDefinitionText) ||
+            HasPrimitiveAliasGenericDefinitionSegment(source.GenericDefinitionText) ||
+            HasPrimitiveAliasGenericDefinitionSegment(target.GenericDefinitionText) ||
             !IsExactSignatureIdentity(
                 source.GenericDefinitionHandle,
                 source.GenericDefinitionRawTypeKind,
@@ -1554,6 +1722,13 @@ internal static class ManagedSymbolReader
         return true;
     }
 
+    private static bool HasPrimitiveAliasGenericDefinitionSegment(string name) =>
+        name.Split('.').Any(segment =>
+        {
+            var backtick = segment.LastIndexOf('`');
+            return backtick > 0 && IsPrimitiveAliasName(segment[..backtick]);
+        });
+
     private static bool IsExactSignatureIdentity(
         EntityHandle sourceHandle,
         byte sourceRawTypeKind,
@@ -1570,13 +1745,18 @@ internal static class ManagedSymbolReader
         sourceSignatureKind == targetSignatureKind &&
         sourceSignatureKind == (SignatureTypeKind)sourceRawTypeKind;
 
-    private static bool IsConstructorReferenceType(CliType type)
+    private static bool IsConstructorReferenceType(
+        CliType type,
+        SignatureTypeName signature)
     {
         return type.PrimitiveType is PrimitiveTypeCode.String or PrimitiveTypeCode.Object ||
                (type.IsExactNamedType &&
                 !IsPrimitiveAliasName(type.Text) &&
                 type.RawTypeKind == (byte)SignatureTypeKind.Class &&
-                type.SignatureKind == SignatureTypeKind.Class);
+                type.SignatureKind == SignatureTypeKind.Class) ||
+               (signature.GenericDefinitionRawTypeKind == (byte)SignatureTypeKind.Class &&
+                signature.GenericDefinitionSignatureKind == SignatureTypeKind.Class &&
+                AreSameClosedConstructedSignature(signature, signature));
     }
 
     private static bool IsPrimitiveAliasName(string type) => type.TrimEnd('?') is
@@ -9283,7 +9463,8 @@ internal sealed record SignatureTypeName(
     bool IsCanonicalGenericInstantiation = false,
     EntityHandle GenericDefinitionHandle = default,
     byte GenericDefinitionRawTypeKind = 0,
-    SignatureTypeKind GenericDefinitionSignatureKind = SignatureTypeKind.Unknown)
+    SignatureTypeKind GenericDefinitionSignatureKind = SignatureTypeKind.Unknown,
+    string? GenericDefinitionText = null)
 {
     public SignatureTypeName(string text)
         : this(text, [], false, false)
@@ -9598,7 +9779,8 @@ internal sealed class SignatureTypeNameProvider : ISignatureTypeProvider<Signatu
             GenericDefinitionRawTypeKind: hasExactDefinition ? genericType.RawTypeKind : (byte)0,
             GenericDefinitionSignatureKind: hasExactDefinition
                 ? genericType.SignatureKind
-                : SignatureTypeKind.Unknown);
+                : SignatureTypeKind.Unknown,
+            GenericDefinitionText: hasExactDefinition ? genericType.Text : null);
     }
 
     private static SignatureTypeName Wrap(

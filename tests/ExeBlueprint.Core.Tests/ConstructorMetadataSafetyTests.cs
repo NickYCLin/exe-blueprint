@@ -45,10 +45,72 @@ public sealed class ConstructorMetadataSafetyTests
     [InlineData(ClosedGenericArgumentMutation.OpenGenericArgument)]
     [InlineData(ClosedGenericArgumentMutation.NonCanonicalGenericDefinitionName)]
     [InlineData(ClosedGenericArgumentMutation.ExcessiveNesting)]
+    [InlineData(ClosedGenericArgumentMutation.OpenNamedGenericDefinition)]
     public void RejectsUnprovenClosedGenericConstructorArgumentIdentity(
         ClosedGenericArgumentMutation mutation)
     {
         using var fixture = CreateClosedGenericArgumentFixture(mutation);
+
+        Assert.Null(Reconstruct(fixture));
+    }
+
+    [Fact]
+    public void AcceptsClosedTypeSpecificationBaseArgumentSubstitution()
+    {
+        using var fixture = CreateClosedTypeSpecificationBaseFixture(useNestedNullArgument: false);
+
+        var result = Reconstruct(fixture);
+
+        Assert.NotNull(result);
+        Assert.Equal("base", result.Initializer.Kind);
+        Assert.Equal(["arg0"], result.Initializer.Arguments);
+        Assert.NotNull(result.Body);
+        Assert.Empty(result.Body);
+    }
+
+    [Fact]
+    public void AcceptsNestedClosedReferenceTypeNullAfterBaseSubstitution()
+    {
+        using var fixture = CreateClosedTypeSpecificationBaseFixture(useNestedNullArgument: true);
+
+        var result = Reconstruct(fixture);
+
+        Assert.NotNull(result);
+        Assert.Equal("base", result.Initializer.Kind);
+        Assert.Equal(
+            ["((System.Collections.Generic.IEnumerable<System.Action<int>>)null!)"],
+            result.Initializer.Arguments);
+        Assert.NotNull(result.Body);
+        Assert.Empty(result.Body);
+    }
+
+    [Theory]
+    [InlineData(ClosedTypeSpecificationBaseMutation.DuplicateTargetParent)]
+    [InlineData(ClosedTypeSpecificationBaseMutation.OpenBaseArgument)]
+    [InlineData(ClosedTypeSpecificationBaseMutation.ValueTypeBase)]
+    [InlineData(ClosedTypeSpecificationBaseMutation.OutOfRangeTargetSlot)]
+    [InlineData(ClosedTypeSpecificationBaseMutation.NonCanonicalBaseArity)]
+    [InlineData(ClosedTypeSpecificationBaseMutation.GenericDeclaringOwner)]
+    [InlineData(ClosedTypeSpecificationBaseMutation.OpenGenericDefinitionLeaf)]
+    [InlineData(ClosedTypeSpecificationBaseMutation.VoidBaseArgument)]
+    [InlineData(ClosedTypeSpecificationBaseMutation.LocalDefinitionArityMismatch)]
+    [InlineData(ClosedTypeSpecificationBaseMutation.PrimitiveAliasGenericDefinition)]
+    public void RejectsUnprovenTypeSpecificationBaseContext(
+        ClosedTypeSpecificationBaseMutation mutation)
+    {
+        using var fixture = CreateClosedTypeSpecificationBaseFixture(
+            useNestedNullArgument: false,
+            mutation);
+
+        Assert.Null(Reconstruct(fixture));
+    }
+
+    [Fact]
+    public void RejectsSubstitutedParameterWithInvalidLocalGenericDefinition()
+    {
+        using var fixture = CreateClosedTypeSpecificationBaseFixture(
+            useNestedNullArgument: true,
+            ClosedTypeSpecificationBaseMutation.InvalidLocalParameterDefinition);
 
         Assert.Null(Reconstruct(fixture));
     }
@@ -408,6 +470,7 @@ public sealed class ConstructorMetadataSafetyTests
             ? (byte)0x12 // CLASS
             : targetArgumentKind;
         var useOpenArgument = mutation == ClosedGenericArgumentMutation.OpenGenericArgument;
+        var useOpenNamedDefinition = mutation == ClosedGenericArgumentMutation.OpenNamedGenericDefinition;
         var nestingDepth = mutation == ClosedGenericArgumentMutation.ExcessiveNesting ? 34 : 1;
 
         var baseConstructor = metadata.AddMethodDefinition(
@@ -420,6 +483,7 @@ public sealed class ConstructorMetadataSafetyTests
                 targetGenericKind,
                 targetArgumentKind,
                 useOpenArgument,
+                useOpenNamedDefinition,
                 nestingDepth),
             bodyOffset: 0,
             parameterList: MetadataTokens.ParameterHandle(1));
@@ -433,6 +497,7 @@ public sealed class ConstructorMetadataSafetyTests
                 sourceGenericKind,
                 sourceArgumentKind,
                 useOpenArgument,
+                useOpenNamedDefinition,
                 nestingDepth),
             bodyOffset: 0,
             parameterList: MetadataTokens.ParameterHandle(1));
@@ -463,13 +528,21 @@ public sealed class ConstructorMetadataSafetyTests
             byte genericKind,
             byte argumentKind,
             bool openArgument,
+            bool openNamedDefinition,
             int depth)
         {
             var signature = new BlobBuilder();
             signature.WriteByte(0x20); // HASTHIS | DEFAULT
             signature.WriteCompressedInteger(1);
             signature.WriteByte(0x01); // VOID
-            WriteConstructedType(signature, depth);
+            if (openNamedDefinition)
+            {
+                WriteNamedType(signature, genericKind, genericType);
+            }
+            else
+            {
+                WriteConstructedType(signature, depth);
+            }
             return metadata.GetOrAddBlob(signature);
 
             void WriteConstructedType(BlobBuilder builder, int remainingDepth)
@@ -492,6 +565,194 @@ public sealed class ConstructorMetadataSafetyTests
                 }
             }
         }
+    }
+
+    private static MetadataFixture CreateClosedTypeSpecificationBaseFixture(
+        bool useNestedNullArgument,
+        ClosedTypeSpecificationBaseMutation mutation = ClosedTypeSpecificationBaseMutation.None)
+    {
+        var metadata = new MetadataBuilder();
+        metadata.AddModule(
+            generation: 0,
+            moduleName: metadata.GetOrAddString("ClosedTypeSpecificationBaseTests.dll"),
+            mvid: metadata.GetOrAddGuid(new Guid("f41b93bb-649e-4ff3-93a6-cd4f50290196")),
+            encId: default,
+            encBaseId: default);
+        metadata.AddAssembly(
+            metadata.GetOrAddString("ClosedTypeSpecificationBaseTests"),
+            new Version(1, 0, 0, 0),
+            culture: default,
+            publicKey: default,
+            flags: (AssemblyFlags)0,
+            hashAlgorithm: AssemblyHashAlgorithm.None);
+
+        var systemRuntime = metadata.AddAssemblyReference(
+            metadata.GetOrAddString("System.Runtime"),
+            new Version(10, 0, 0, 0),
+            culture: default,
+            publicKeyOrToken: default,
+            flags: (AssemblyFlags)0,
+            hashValue: default);
+        var objectType = metadata.AddTypeReference(
+            systemRuntime,
+            metadata.GetOrAddString("System"),
+            metadata.GetOrAddString("Object"));
+        var actionType = metadata.AddTypeReference(
+            systemRuntime,
+            metadata.GetOrAddString("System"),
+            metadata.GetOrAddString("Action`1"));
+        var enumerableType = metadata.AddTypeReference(
+            systemRuntime,
+            metadata.GetOrAddString("System.Collections.Generic"),
+            metadata.GetOrAddString("IEnumerable`1"));
+
+        metadata.AddTypeDefinition(
+            TypeAttributes.NotPublic,
+            @namespace: default,
+            metadata.GetOrAddString("<Module>"),
+            baseType: default,
+            MetadataTokens.FieldDefinitionHandle(1),
+            MetadataTokens.MethodDefinitionHandle(1));
+        var genericBaseType = metadata.AddTypeDefinition(
+            TypeAttributes.Public,
+            metadata.GetOrAddString("Tests"),
+            metadata.GetOrAddString(mutation switch
+            {
+                ClosedTypeSpecificationBaseMutation.NonCanonicalBaseArity => "GenericBase`2",
+                ClosedTypeSpecificationBaseMutation.PrimitiveAliasGenericDefinition => "int`1",
+                _ => "GenericBase`1"
+            }),
+            objectType,
+            MetadataTokens.FieldDefinitionHandle(1),
+            MetadataTokens.MethodDefinitionHandle(1));
+        if (mutation != ClosedTypeSpecificationBaseMutation.LocalDefinitionArityMismatch)
+        {
+            metadata.AddGenericParameter(
+                genericBaseType,
+                GenericParameterAttributes.None,
+                metadata.GetOrAddString("TBase"),
+                index: 0);
+        }
+
+
+        var invalidParameterType = metadata.AddTypeDefinition(
+            TypeAttributes.Public,
+            metadata.GetOrAddString("Tests"),
+            metadata.GetOrAddString("LocalFake`1"),
+            objectType,
+            MetadataTokens.FieldDefinitionHandle(1),
+            MetadataTokens.MethodDefinitionHandle(1));
+
+        var baseSignature = new BlobBuilder();
+        baseSignature.WriteByte(0x15); // GENERICINST
+        WriteNamedType(
+            baseSignature,
+            mutation == ClosedTypeSpecificationBaseMutation.ValueTypeBase
+                ? (byte)0x11 // VALUETYPE
+                : (byte)0x12, // CLASS
+            genericBaseType);
+        baseSignature.WriteCompressedInteger(1);
+        if (mutation == ClosedTypeSpecificationBaseMutation.OpenBaseArgument)
+        {
+            baseSignature.WriteByte(0x13); // VAR
+            baseSignature.WriteCompressedInteger(0);
+        }
+        else if (mutation == ClosedTypeSpecificationBaseMutation.OpenGenericDefinitionLeaf)
+        {
+            WriteNamedType(baseSignature, 0x12, actionType); // CLASS System.Action`1
+        }
+        else if (mutation == ClosedTypeSpecificationBaseMutation.VoidBaseArgument)
+        {
+            baseSignature.WriteByte(0x01); // VOID
+        }
+        else if (useNestedNullArgument)
+        {
+            baseSignature.WriteByte(0x15); // GENERICINST
+            WriteNamedType(baseSignature, 0x12, actionType); // CLASS
+            baseSignature.WriteCompressedInteger(1);
+            baseSignature.WriteByte(0x08); // I4
+        }
+        else
+        {
+            baseSignature.WriteByte(0x08); // I4
+        }
+
+        var baseSignatureBlob = metadata.GetOrAddBlob(baseSignature);
+        var derivedBaseType = metadata.AddTypeSpecification(baseSignatureBlob);
+        var duplicateBaseType = metadata.AddTypeSpecification(baseSignatureBlob);
+
+        var derivedType = metadata.AddTypeDefinition(
+            TypeAttributes.Public,
+            metadata.GetOrAddString("Tests"),
+            metadata.GetOrAddString("Derived"),
+            derivedBaseType,
+            MetadataTokens.FieldDefinitionHandle(1),
+            MetadataTokens.MethodDefinitionHandle(1));
+
+        var targetSignature = new BlobBuilder();
+        targetSignature.WriteByte(0x20); // HASTHIS | DEFAULT
+        targetSignature.WriteCompressedInteger(1);
+        targetSignature.WriteByte(0x01); // VOID
+        if (mutation == ClosedTypeSpecificationBaseMutation.InvalidLocalParameterDefinition)
+        {
+            targetSignature.WriteByte(0x15); // GENERICINST
+            WriteNamedType(targetSignature, 0x12, invalidParameterType); // CLASS
+            targetSignature.WriteCompressedInteger(1);
+        }
+        else if (useNestedNullArgument)
+        {
+            targetSignature.WriteByte(0x15); // GENERICINST
+            WriteNamedType(targetSignature, 0x12, enumerableType); // CLASS
+            targetSignature.WriteCompressedInteger(1);
+        }
+
+        targetSignature.WriteByte(0x13); // VAR
+        targetSignature.WriteCompressedInteger(
+            mutation == ClosedTypeSpecificationBaseMutation.OutOfRangeTargetSlot ? 1 : 0);
+        var target = metadata.AddMemberReference(
+            mutation == ClosedTypeSpecificationBaseMutation.DuplicateTargetParent
+                ? duplicateBaseType
+                : derivedBaseType,
+            metadata.GetOrAddString(".ctor"),
+            metadata.GetOrAddBlob(targetSignature));
+
+        var currentSignature = new BlobBuilder();
+        currentSignature.WriteByte(0x20); // HASTHIS | DEFAULT
+        currentSignature.WriteCompressedInteger(useNestedNullArgument ? 0 : 1);
+        currentSignature.WriteByte(0x01); // VOID
+        if (!useNestedNullArgument)
+        {
+            currentSignature.WriteByte(0x08); // I4
+        }
+
+        var currentConstructor = metadata.AddMethodDefinition(
+            CanonicalConstructorAttributes,
+            MethodImplAttributes.IL | MethodImplAttributes.Managed,
+            metadata.GetOrAddString(".ctor"),
+            metadata.GetOrAddBlob(currentSignature),
+            bodyOffset: 0,
+            parameterList: MetadataTokens.ParameterHandle(1));
+        if (mutation == ClosedTypeSpecificationBaseMutation.GenericDeclaringOwner)
+        {
+            metadata.AddGenericParameter(
+                derivedType,
+                GenericParameterAttributes.None,
+                metadata.GetOrAddString("T"),
+                index: 0);
+        }
+
+        var metadataImage = new BlobBuilder();
+        new MetadataRootBuilder(metadata).Serialize(
+            metadataImage,
+            methodBodyStreamRva: 0,
+            mappedFieldDataStreamRva: 0);
+        var provider = MetadataReaderProvider.FromMetadataImage(metadataImage.ToImmutableArray());
+        return new MetadataFixture(
+            provider,
+            currentConstructor,
+            useNestedNullArgument
+                ? BuildConstructorNullIl(MetadataTokens.GetToken(target))
+                : BuildConstructorIl(MetadataTokens.GetToken(target), parameterCount: 1));
     }
 
     private static BlobHandle AddConstructorSignature(
@@ -557,6 +818,17 @@ public sealed class ConstructorMetadataSafetyTests
         BinaryPrimitives.WriteInt32LittleEndian(il.AsSpan(index, 4), constructorToken);
         index += 4;
         il[index] = 0x2A; // ret
+        return il;
+    }
+
+    private static byte[] BuildConstructorNullIl(int constructorToken)
+    {
+        var il = new byte[8];
+        il[0] = 0x02; // ldarg.0
+        il[1] = 0x14; // ldnull
+        il[2] = 0x28; // call
+        BinaryPrimitives.WriteInt32LittleEndian(il.AsSpan(3, 4), constructorToken);
+        il[7] = 0x2A; // ret
         return il;
     }
 
@@ -630,7 +902,24 @@ public sealed class ConstructorMetadataSafetyTests
         DifferentArgumentKind,
         OpenGenericArgument,
         NonCanonicalGenericDefinitionName,
-        ExcessiveNesting
+        ExcessiveNesting,
+        OpenNamedGenericDefinition
+    }
+
+    public enum ClosedTypeSpecificationBaseMutation
+    {
+        None,
+        DuplicateTargetParent,
+        OpenBaseArgument,
+        ValueTypeBase,
+        OutOfRangeTargetSlot,
+        NonCanonicalBaseArity,
+        GenericDeclaringOwner,
+        OpenGenericDefinitionLeaf,
+        VoidBaseArgument,
+        LocalDefinitionArityMismatch,
+        PrimitiveAliasGenericDefinition,
+        InvalidLocalParameterDefinition
     }
 
     private enum SignatureShape
