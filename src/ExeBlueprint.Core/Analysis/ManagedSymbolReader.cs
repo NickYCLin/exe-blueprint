@@ -1034,7 +1034,7 @@ internal static class ManagedSymbolReader
                     argument.Type,
                     argument.Signature,
                     target.Parameters[argumentIndex],
-                    allowLocalDirectBaseUpcast: kind == "base",
+                    allowVerifiedDirectBaseConversion: kind == "base",
                     out renderedArguments[argumentIndex]))
             {
                 return null;
@@ -2441,7 +2441,7 @@ internal static class ManagedSymbolReader
         CliType sourceType,
         SignatureTypeName? sourceSignature,
         ConstructorParameter target,
-        bool allowLocalDirectBaseUpcast,
+        bool allowVerifiedDirectBaseConversion,
         out string rendered)
     {
         var targetType = target.Type;
@@ -2471,13 +2471,24 @@ internal static class ManagedSymbolReader
             return true;
         }
 
-        if (allowLocalDirectBaseUpcast &&
+        if (allowVerifiedDirectBaseConversion &&
             sourceSignature is not null &&
             IsVerifiedConstructorLocalDirectBaseUpcast(
                 metadata,
                 sourceSignature,
                 target.Signature))
         {
+            return true;
+        }
+
+        if (allowVerifiedDirectBaseConversion &&
+            sourceSignature is not null &&
+            IsVerifiedConstructorTrustedIListToIEnumerableUpcast(
+                metadata,
+                sourceSignature,
+                target.Signature))
+        {
+            rendered = $"({targetType.Text}){expression}";
             return true;
         }
 
@@ -2601,6 +2612,130 @@ internal static class ManagedSymbolReader
         {
             return false;
         }
+    }
+
+    private static bool IsVerifiedConstructorTrustedIListToIEnumerableUpcast(
+        MetadataReader metadata,
+        SignatureTypeName source,
+        SignatureTypeName target)
+    {
+        if (!source.IsCanonicalGenericInstantiation ||
+            source.GenericArguments.Length != 1 ||
+            source.GenericDefinitionHandle.Kind != HandleKind.TypeReference ||
+            source.GenericDefinitionRawTypeKind != (byte)SignatureTypeKind.Class ||
+            source.GenericDefinitionSignatureKind != SignatureTypeKind.Class ||
+            !target.IsCanonicalGenericInstantiation ||
+            target.GenericArguments.Length != 1 ||
+            target.GenericDefinitionHandle.Kind != HandleKind.TypeReference ||
+            target.GenericDefinitionRawTypeKind != (byte)SignatureTypeKind.Class ||
+            target.GenericDefinitionSignatureKind != SignatureTypeKind.Class ||
+            !AreSameConstructorSignature(source, source) ||
+            !AreSameConstructorSignature(target, target) ||
+            !AreSameConstructorSignature(source.GenericArguments[0], target.GenericArguments[0]) ||
+            !HasCanonicalLocalGenericDefinitions(metadata, source) ||
+            !HasCanonicalLocalGenericDefinitions(metadata, target))
+        {
+            return false;
+        }
+
+        try
+        {
+            if (!TryReadTrustedSystemCollectionsGenericTypeReference(
+                    metadata,
+                    (TypeReferenceHandle)source.GenericDefinitionHandle,
+                    "IList`1",
+                    out var sourceAssembly) ||
+                !TryReadTrustedSystemCollectionsGenericTypeReference(
+                    metadata,
+                    (TypeReferenceHandle)target.GenericDefinitionHandle,
+                    "IEnumerable`1",
+                    out var targetAssembly) ||
+                sourceAssembly != targetAssembly ||
+                HasLocalSystemCollectionsGenericTypeShadow(metadata))
+            {
+                return false;
+            }
+
+            return true;
+        }
+        catch (Exception exception) when (
+            exception is BadImageFormatException or ArgumentException or InvalidOperationException)
+        {
+            return false;
+        }
+    }
+
+    private static bool TryReadTrustedSystemCollectionsGenericTypeReference(
+        MetadataReader metadata,
+        TypeReferenceHandle handle,
+        string expectedName,
+        out AssemblyReferenceHandle assemblyHandle)
+    {
+        assemblyHandle = default;
+        var reference = metadata.GetTypeReference(handle);
+        if (!TryReadBoundedGenericAttributeName(
+                metadata,
+                reference.Namespace,
+                out var @namespace) ||
+            @namespace != "System.Collections.Generic" ||
+            !TryReadBoundedGenericAttributeName(metadata, reference.Name, out var name) ||
+            name != expectedName ||
+            reference.ResolutionScope.Kind != HandleKind.AssemblyReference)
+        {
+            return false;
+        }
+
+        assemblyHandle = (AssemblyReferenceHandle)reference.ResolutionScope;
+        var assembly = metadata.GetAssemblyReference(assemblyHandle);
+        if (!TryReadBoundedGenericAttributeName(metadata, assembly.Name, out var assemblyName) ||
+            assemblyName != "System.Runtime" ||
+            !IsTrustedFrameworkAssembly(
+                metadata,
+                assemblyName,
+                assembly.PublicKeyOrToken,
+                assembly.Culture,
+                assembly.Flags))
+        {
+            assemblyHandle = default;
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool HasLocalSystemCollectionsGenericTypeShadow(MetadataReader metadata)
+    {
+        if (metadata.GetTableRowCount(TableIndex.TypeDef) > MaxTypes)
+        {
+            return true;
+        }
+
+        foreach (var handle in metadata.TypeDefinitions)
+        {
+            var definition = metadata.GetTypeDefinition(handle);
+            if (!TryReadBoundedGenericAttributeName(metadata, definition.Name, out var name))
+            {
+                return true;
+            }
+
+            if (name is not ("IList`1" or "IEnumerable`1"))
+            {
+                continue;
+            }
+
+            if (!TryGetBoundedGenericAttributeTypeDefinitionName(
+                    metadata,
+                    handle,
+                    out var fullName,
+                    out _) ||
+                fullName is "System.Collections.Generic.IList`1" or
+                    "System.Collections.Generic.IEnumerable`1")
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static bool IsExactConstructorAssignment(
