@@ -227,6 +227,7 @@ internal static class ManagedSymbolReader
             ValidateConstructorChains(methods, constructorCandidates);
             types.Add(new TypeModel
             {
+                TypeDefinitionToken = MetadataTokens.GetToken(typeHandle),
                 FullName = fullName,
                 Namespace = namespaceName,
                 Name = name,
@@ -241,6 +242,9 @@ internal static class ManagedSymbolReader
                     "System.Runtime.CompilerServices.IsByRefLikeAttribute"),
                 IsNested = !declaringTypeHandle.IsNil,
                 DeclaringType = declaringTypeName,
+                DeclaringTypeDefinitionToken = declaringTypeHandle.IsNil
+                    ? null
+                    : MetadataTokens.GetToken(declaringTypeHandle),
                 InheritedGenericParameterCount = declaringTypeHandle.IsNil
                     ? 0
                     : inheritedGenericParameterCount,

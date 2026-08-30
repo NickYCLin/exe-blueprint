@@ -606,15 +606,20 @@ public sealed class ManagedSymbolReaderTests
         var outer = Assert.Single(
             types,
             type => type.FullName == "ExeBlueprint.Core.Tests.NestedTypeFixture");
+        AssertValidTypeDefinitionToken(outer.TypeDefinitionToken);
         Assert.False(outer.IsNested);
         Assert.Null(outer.DeclaringType);
+        Assert.Null(outer.DeclaringTypeDefinitionToken);
         Assert.Equal(["T"], outer.GenericParameters);
 
         var child = Assert.Single(
             types,
             type => type.FullName == "ExeBlueprint.Core.Tests.NestedTypeFixture.Child");
+        AssertValidTypeDefinitionToken(child.TypeDefinitionToken);
+        Assert.NotEqual(outer.TypeDefinitionToken, child.TypeDefinitionToken);
         Assert.True(child.IsNested);
         Assert.Equal(outer.FullName, child.DeclaringType);
+        Assert.Equal(outer.TypeDefinitionToken, child.DeclaringTypeDefinitionToken);
         Assert.Equal(outer.Namespace, child.Namespace);
         Assert.Equal(["T", "U"], child.GenericParameters);
         Assert.Equal(1, child.InheritedGenericParameterCount);
@@ -622,9 +627,28 @@ public sealed class ManagedSymbolReaderTests
         var state = Assert.Single(
             types,
             type => type.FullName == "ExeBlueprint.Core.Tests.NestedTypeFixture.Child.State");
+        AssertValidTypeDefinitionToken(state.TypeDefinitionToken);
         Assert.Equal(child.FullName, state.DeclaringType);
+        Assert.Equal(child.TypeDefinitionToken, state.DeclaringTypeDefinitionToken);
         Assert.Equal(["T", "U"], state.GenericParameters);
         Assert.Equal(2, state.InheritedGenericParameterCount);
+
+        await using var temp = new TemporaryDirectory();
+        var outputPath = Path.Combine(temp.Path, "nested-blueprint.json");
+        await BlueprintJsonWriter.WriteAsync(document, outputPath);
+        using var json = JsonDocument.Parse(await File.ReadAllTextAsync(outputPath));
+        var childJson = json.RootElement
+            .GetProperty("files")[0]
+            .GetProperty("code")
+            .GetProperty("types")
+            .EnumerateArray()
+            .Single(type =>
+                type.GetProperty("fullName").GetString() ==
+                "ExeBlueprint.Core.Tests.NestedTypeFixture.Child");
+        Assert.Equal(child.TypeDefinitionToken, childJson.GetProperty("typeDefinitionToken").GetInt32());
+        Assert.Equal(
+            outer.TypeDefinitionToken,
+            childJson.GetProperty("declaringTypeDefinitionToken").GetInt32());
     }
 
     [Fact]
@@ -773,7 +797,7 @@ public sealed class ManagedSymbolReaderTests
         var outputPath = Path.Combine(temp.Path, "blueprint.json");
         await BlueprintJsonWriter.WriteAsync(document, outputPath);
         using var json = JsonDocument.Parse(await File.ReadAllTextAsync(outputPath));
-        Assert.Equal("0.9", json.RootElement.GetProperty("schemaVersion").GetString());
+        Assert.Equal("0.10", json.RootElement.GetProperty("schemaVersion").GetString());
         var constraintTypeJson = json.RootElement
             .GetProperty("files")[0]
             .GetProperty("code")
@@ -1988,7 +2012,7 @@ public sealed class ManagedSymbolReaderTests
         var assemblyPath = typeof(BlueprintAnalyzer).Assembly.Location;
         var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
 
-        Assert.Equal("0.9", document.SchemaVersion);
+        Assert.Equal("0.10", document.SchemaVersion);
         Assert.True(document.Summary.TypeCount > 0);
         Assert.True(document.Summary.MethodCount > 0);
         Assert.Equal(document.Files[0].Code!.TypeCount, document.Summary.TypeCount);
@@ -2004,6 +2028,13 @@ public sealed class ManagedSymbolReaderTests
         var document = await new BlueprintAnalyzer().AnalyzeAsync(path);
 
         Assert.Null(Assert.Single(document.Files).Code);
+    }
+
+    private static void AssertValidTypeDefinitionToken(int? token)
+    {
+        Assert.NotNull(token);
+        Assert.Equal(0x02000000, token.Value & unchecked((int)0xFF000000));
+        Assert.NotEqual(0, token.Value & 0x00FFFFFF);
     }
 
     private sealed class TemporaryDirectory : IAsyncDisposable

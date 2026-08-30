@@ -331,6 +331,10 @@ public sealed record BamlStaticResourceModel
 
 public sealed record TypeModel
 {
+    // TypeDef token 只在同一個 managed artifact 內當作穩定 identity；舊 schema 可以沒有此欄位。
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public int? TypeDefinitionToken { get; init; }
+
     public required string FullName { get; init; }
 
     public required string Namespace { get; init; }
@@ -352,6 +356,9 @@ public sealed record TypeModel
     public bool IsNested { get; init; }
 
     public string? DeclaringType { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public int? DeclaringTypeDefinitionToken { get; init; }
 
     public int InheritedGenericParameterCount { get; init; }
 

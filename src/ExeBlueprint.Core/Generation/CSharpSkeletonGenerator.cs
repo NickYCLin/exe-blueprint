@@ -10,6 +10,11 @@ public static class CSharpSkeletonGenerator
 {
     private const int MaxIlLinesInBody = 40;
     private const int MaxGenericConstraintDependencyDepth = 64;
+    private static readonly IEqualityComparer<TypeModel> TypeModelIdentityComparer =
+        ReferenceEqualityComparer.Instance;
+
+    private sealed record NestedTypeIndex(
+        IReadOnlyDictionary<TypeModel, TypeModel[]> ChildrenByOwner);
     private static readonly HashSet<string> CSharpReservedKeywords = new(StringComparer.Ordinal)
     {
         "abstract", "as", "base", "bool", "break", "byte", "case", "catch", "char", "checked",
@@ -61,13 +66,9 @@ public static class CSharpSkeletonGenerator
             var emittableTypes = artifact.Code!.Types
                 .Where(type => !IsCompilerGenerated(type.Name))
                 .ToArray();
-            var nestedTypesByDeclaringType = emittableTypes
-                .Where(type => type.IsNested && !string.IsNullOrEmpty(type.DeclaringType))
-                .GroupBy(type => type.DeclaringType!, StringComparer.Ordinal)
-                .ToDictionary(
-                    group => group.Key,
-                    group => group.OrderBy(type => type.Name, StringComparer.Ordinal).ToArray(),
-                    StringComparer.Ordinal);
+            var nestedTypeIndex = CreateNestedTypeIndex(
+                artifact.Code.Types,
+                artifact.Code.Truncated);
             var topLevelTypes = emittableTypes
                 .Where(type => !type.IsNested)
                 .ToArray();
@@ -77,8 +78,8 @@ public static class CSharpSkeletonGenerator
                 .ToHashSet(StringComparer.Ordinal);
             var requiresUnsafeBlocks = topLevelTypes.Any(type => RequiresUnsafeContextInTree(
                 type,
-                nestedTypesByDeclaringType,
-                new HashSet<string>(StringComparer.Ordinal)));
+                nestedTypeIndex,
+                new HashSet<TypeModel>(TypeModelIdentityComparer)));
 
             foreach (var namespaceGroup in topLevelTypes.GroupBy(type => type.Namespace).OrderBy(group => group.Key, StringComparer.Ordinal))
             {
@@ -89,7 +90,7 @@ public static class CSharpSkeletonGenerator
                     Content = BuildNamespaceFile(
                         namespaceGroup.Key,
                         namespaceGroup,
-                        nestedTypesByDeclaringType,
+                        nestedTypeIndex,
                         refLikeTypes)
                 });
             }
@@ -130,7 +131,7 @@ public static class CSharpSkeletonGenerator
     private static string BuildNamespaceFile(
         string namespaceName,
         IEnumerable<TypeModel> types,
-        IReadOnlyDictionary<string, TypeModel[]> nestedTypesByDeclaringType,
+        NestedTypeIndex nestedTypeIndex,
         IReadOnlySet<string> refLikeTypes)
     {
         var builder = new StringBuilder();
@@ -147,7 +148,7 @@ public static class CSharpSkeletonGenerator
         var ordered = types.OrderBy(type => type.Name, StringComparer.Ordinal).ToArray();
         for (var index = 0; index < ordered.Length; index++)
         {
-            AppendType(builder, ordered[index], indent, nestedTypesByDeclaringType, refLikeTypes);
+            AppendType(builder, ordered[index], indent, nestedTypeIndex, refLikeTypes);
             if (index < ordered.Length - 1)
             {
                 builder.AppendLine();
@@ -161,7 +162,7 @@ public static class CSharpSkeletonGenerator
         StringBuilder builder,
         TypeModel type,
         string indent,
-        IReadOnlyDictionary<string, TypeModel[]> nestedTypesByDeclaringType,
+        NestedTypeIndex nestedTypeIndex,
         IReadOnlySet<string> refLikeTypes)
     {
         if (type.Kind == "delegate")
@@ -354,7 +355,7 @@ public static class CSharpSkeletonGenerator
             }
         }
 
-        var nestedTypes = GetNestedTypesForOwner(type, nestedTypesByDeclaringType);
+        var nestedTypes = GetNestedTypesForOwner(type, nestedTypeIndex);
         if ((wroteMember || methods.Length > 0) && nestedTypes.Length > 0)
         {
             builder.AppendLine();
@@ -362,7 +363,7 @@ public static class CSharpSkeletonGenerator
 
         for (var index = 0; index < nestedTypes.Length; index++)
         {
-            AppendType(builder, nestedTypes[index], body, nestedTypesByDeclaringType, refLikeTypes);
+            AppendType(builder, nestedTypes[index], body, nestedTypeIndex, refLikeTypes);
             if (index < nestedTypes.Length - 1)
             {
                 builder.AppendLine();
@@ -765,10 +766,10 @@ public static class CSharpSkeletonGenerator
 
     private static bool RequiresUnsafeContextInTree(
         TypeModel type,
-        IReadOnlyDictionary<string, TypeModel[]> nestedTypesByDeclaringType,
-        HashSet<string> activeTypes)
+        NestedTypeIndex nestedTypeIndex,
+        HashSet<TypeModel> activeTypes)
     {
-        if (!activeTypes.Add(type.FullName))
+        if (!activeTypes.Add(type))
         {
             return false;
         }
@@ -785,15 +786,15 @@ public static class CSharpSkeletonGenerator
                 return false;
             }
 
-            return GetNestedTypesForOwner(type, nestedTypesByDeclaringType)
+            return GetNestedTypesForOwner(type, nestedTypeIndex)
                 .Any(child => RequiresUnsafeContextInTree(
                     child,
-                    nestedTypesByDeclaringType,
+                    nestedTypeIndex,
                     activeTypes));
         }
         finally
         {
-            activeTypes.Remove(type.FullName);
+            activeTypes.Remove(type);
         }
     }
 
@@ -804,25 +805,152 @@ public static class CSharpSkeletonGenerator
 
     private static bool RequiresUnsafeContext(string typeName) => typeName.Contains('*');
 
-    private static TypeModel[] GetNestedTypesForOwner(
-        TypeModel owner,
-        IReadOnlyDictionary<string, TypeModel[]> nestedTypesByDeclaringType)
+    private static NestedTypeIndex CreateNestedTypeIndex(
+        IReadOnlyList<TypeModel> types,
+        bool truncated)
     {
-        if (!nestedTypesByDeclaringType.TryGetValue(owner.FullName, out var candidates))
+        var emittableTypes = types
+            .Where(type => !IsCompilerGenerated(type.Name))
+            .ToHashSet(TypeModelIdentityComparer);
+        var typesByToken = types
+            .Where(type => type.TypeDefinitionToken is int token && IsTypeDefinitionToken(token))
+            .GroupBy(type => type.TypeDefinitionToken!.Value)
+            .ToDictionary(group => group.Key, group => group.ToArray());
+        var typesByLegacyScope = types
+            .GroupBy(type => (type.FullName, type.GenericParameters.Count))
+            .ToDictionary(group => group.Key, group => group.ToArray());
+        var ownerByChild = new Dictionary<TypeModel, TypeModel>(TypeModelIdentityComparer);
+
+        foreach (var child in types.Where(type => type.IsNested && emittableTypes.Contains(type)))
         {
-            return [];
+            var owner = ResolveNestedOwner(
+                child,
+                typesByToken,
+                typesByLegacyScope,
+                emittableTypes,
+                truncated);
+            if (owner is not null)
+            {
+                ownerByChild.Add(child, owner);
+            }
         }
 
-        return candidates
-            .Where(candidate =>
-                candidate.InheritedGenericParameterCount == owner.GenericParameters.Count &&
-                candidate.InheritedGenericParameterCount >= 0 &&
-                candidate.GenericParameters.Count >= candidate.InheritedGenericParameterCount &&
-                candidate.GenericParameters
-                    .Take(candidate.InheritedGenericParameterCount)
-                    .SequenceEqual(owner.GenericParameters, StringComparer.Ordinal))
-            .ToArray();
+        var childrenByOwner = new Dictionary<TypeModel, List<TypeModel>>(TypeModelIdentityComparer);
+        foreach (var (child, owner) in ownerByChild)
+        {
+            if (!HasCompleteOwnerChain(child, ownerByChild, emittableTypes))
+            {
+                continue;
+            }
+
+            if (!childrenByOwner.TryGetValue(owner, out var children))
+            {
+                children = [];
+                childrenByOwner.Add(owner, children);
+            }
+
+            children.Add(child);
+        }
+
+        return new NestedTypeIndex(childrenByOwner.ToDictionary(
+            pair => pair.Key,
+            pair => pair.Value.OrderBy(type => type.Name, StringComparer.Ordinal).ToArray(),
+            TypeModelIdentityComparer));
     }
+
+    private static TypeModel[] GetNestedTypesForOwner(
+        TypeModel owner,
+        NestedTypeIndex nestedTypeIndex)
+    {
+        return nestedTypeIndex.ChildrenByOwner.TryGetValue(owner, out var candidates)
+            ? candidates
+            : [];
+    }
+
+    private static TypeModel? ResolveNestedOwner(
+        TypeModel child,
+        IReadOnlyDictionary<int, TypeModel[]> typesByToken,
+        IReadOnlyDictionary<(string FullName, int GenericParameterCount), TypeModel[]> typesByLegacyScope,
+        IReadOnlySet<TypeModel> emittableTypes,
+        bool truncated)
+    {
+        if (child.TypeDefinitionToken is not null || child.DeclaringTypeDefinitionToken is not null)
+        {
+            if (child.TypeDefinitionToken is not int childToken ||
+                child.DeclaringTypeDefinitionToken is not int ownerToken ||
+                !IsTypeDefinitionToken(childToken) ||
+                !IsTypeDefinitionToken(ownerToken) ||
+                !typesByToken.TryGetValue(childToken, out var childMatches) ||
+                childMatches.Length != 1 ||
+                !ReferenceEquals(childMatches[0], child) ||
+                !typesByToken.TryGetValue(ownerToken, out var ownerMatches) ||
+                ownerMatches.Length != 1)
+            {
+                return null;
+            }
+
+            var exactOwner = ownerMatches[0];
+            return !ReferenceEquals(exactOwner, child) &&
+                   emittableTypes.Contains(exactOwner) &&
+                   HasCompatibleGenericScope(child, exactOwner)
+                ? exactOwner
+                : null;
+        }
+
+        if (truncated ||
+            string.IsNullOrEmpty(child.DeclaringType) ||
+            !typesByLegacyScope.TryGetValue(
+                (child.FullName, child.GenericParameters.Count),
+                out var childIdentityMatches) ||
+            childIdentityMatches.Length != 1 ||
+            !typesByLegacyScope.TryGetValue(
+                (child.DeclaringType, child.InheritedGenericParameterCount),
+                out var legacyScopeCandidates))
+        {
+            return null;
+        }
+
+        var legacyOwners = legacyScopeCandidates
+            .Where(candidate =>
+                !ReferenceEquals(candidate, child) &&
+                HasCompatibleGenericScope(child, candidate))
+            .ToArray();
+        return legacyOwners.Length == 1 && emittableTypes.Contains(legacyOwners[0])
+            ? legacyOwners[0]
+            : null;
+    }
+
+    private static bool HasCompatibleGenericScope(TypeModel child, TypeModel owner) =>
+        child.InheritedGenericParameterCount >= 0 &&
+        child.InheritedGenericParameterCount == owner.GenericParameters.Count &&
+        child.InheritedGenericParameterCount <= child.GenericParameters.Count &&
+        child.GenericParameters
+            .Take(child.InheritedGenericParameterCount)
+            .SequenceEqual(owner.GenericParameters, StringComparer.Ordinal);
+
+    private static bool HasCompleteOwnerChain(
+        TypeModel child,
+        IReadOnlyDictionary<TypeModel, TypeModel> ownerByChild,
+        IReadOnlySet<TypeModel> emittableTypes)
+    {
+        var visited = new HashSet<TypeModel>(TypeModelIdentityComparer);
+        var current = child;
+        while (current.IsNested)
+        {
+            if (!visited.Add(current) || !ownerByChild.TryGetValue(current, out var owner))
+            {
+                return false;
+            }
+
+            current = owner;
+        }
+
+        return emittableTypes.Contains(current);
+    }
+
+    private static bool IsTypeDefinitionToken(int token) =>
+        (token & unchecked((int)0xFF000000)) == 0x02000000 &&
+        (token & 0x00FFFFFF) != 0;
 
     private static void AppendConstrainedDeclaration(
         StringBuilder builder,

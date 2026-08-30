@@ -172,8 +172,10 @@ public sealed class CSharpSkeletonGeneratorTests
         await AssertGeneratedSolutionBuildsAsync(generated);
     }
 
-    [Fact]
-    public async Task AttachesNestedTypeOnlyToExactGenericOwnerScope()
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task AttachesNestedTypeOnlyToExactGenericOwnerScope(bool useTypeDefinitionTokens)
     {
         var artifact = CreateManagedArtifact("NestedOwnerScope", []) with
         {
@@ -186,6 +188,7 @@ public sealed class CSharpSkeletonGeneratorTests
                 [
                     new TypeModel
                     {
+                        TypeDefinitionToken = useTypeDefinitionTokens ? 0x02000001 : null,
                         FullName = "NestedOwnerScope.Owner",
                         Namespace = "NestedOwnerScope",
                         Name = "Owner",
@@ -194,15 +197,17 @@ public sealed class CSharpSkeletonGeneratorTests
                     },
                     new TypeModel
                     {
+                        TypeDefinitionToken = useTypeDefinitionTokens ? 0x02000002 : null,
                         FullName = "NestedOwnerScope.Owner",
                         Namespace = "NestedOwnerScope",
-                        Name = "Owner`1",
+                        Name = "Owner",
                         Kind = "class",
                         Accessibility = "public",
                         GenericParameters = ["T"]
                     },
                     new TypeModel
                     {
+                        TypeDefinitionToken = useTypeDefinitionTokens ? 0x02000003 : null,
                         FullName = "NestedOwnerScope.Owner.Child",
                         Namespace = "NestedOwnerScope",
                         Name = "Child",
@@ -210,6 +215,7 @@ public sealed class CSharpSkeletonGeneratorTests
                         Accessibility = "public",
                         IsNested = true,
                         DeclaringType = "NestedOwnerScope.Owner",
+                        DeclaringTypeDefinitionToken = useTypeDefinitionTokens ? 0x02000002 : null,
                         InheritedGenericParameterCount = 1,
                         GenericParameters = ["T"],
                         Fields =
@@ -250,6 +256,340 @@ public sealed class CSharpSkeletonGeneratorTests
             source.ReplaceLineEndings("\n"),
             StringComparison.Ordinal);
         await AssertGeneratedSolutionBuildsAsync(generated);
+    }
+
+    [Fact]
+    public void PrefersTypeDefinitionTokenOverAmbiguousDisplayOwner()
+    {
+        var artifact = CreateManagedArtifact("TokenOwner", []) with
+        {
+            Code = new CodeModel
+            {
+                Kind = "managed",
+                NamespaceCount = 1,
+                TypeCount = 3,
+                Types =
+                [
+                    new TypeModel
+                    {
+                        TypeDefinitionToken = 0x02000001,
+                        FullName = "TokenOwner.Wrong",
+                        Namespace = "TokenOwner",
+                        Name = "Wrong",
+                        Kind = "class",
+                        Accessibility = "public",
+                        GenericParameters = ["T"]
+                    },
+                    new TypeModel
+                    {
+                        TypeDefinitionToken = 0x02000002,
+                        FullName = "TokenOwner.Right",
+                        Namespace = "TokenOwner",
+                        Name = "Right",
+                        Kind = "class",
+                        Accessibility = "public",
+                        GenericParameters = ["T"]
+                    },
+                    new TypeModel
+                    {
+                        TypeDefinitionToken = 0x02000003,
+                        FullName = "TokenOwner.Right.Child",
+                        Namespace = "TokenOwner",
+                        Name = "Child",
+                        Kind = "class",
+                        Accessibility = "public",
+                        IsNested = true,
+                        DeclaringType = "TokenOwner.Wrong",
+                        DeclaringTypeDefinitionToken = 0x02000002,
+                        InheritedGenericParameterCount = 1,
+                        GenericParameters = ["T"]
+                    }
+                ]
+            }
+        };
+        var generated = CSharpSkeletonGenerator.Generate(CreateDocument(artifact));
+        var source = Assert.Single(
+            generated,
+            file => file.RelativePath == "TokenOwner/TokenOwner.cs").Content.ReplaceLineEndings("\n");
+
+        Assert.DoesNotContain("class Wrong<T>\n{\n    public class Child", source, StringComparison.Ordinal);
+        Assert.Contains("class Right<T>\n{\n    public class Child", source, StringComparison.Ordinal);
+        Assert.Equal(1, source.Split("class Child", StringSplitOptions.None).Length - 1);
+    }
+
+    [Fact]
+    public void OmitsAmbiguousLegacyNestedOwner()
+    {
+        var artifact = CreateManagedArtifact("LegacyOwner", []) with
+        {
+            Code = new CodeModel
+            {
+                Kind = "managed",
+                NamespaceCount = 1,
+                TypeCount = 3,
+                Types =
+                [
+                    new TypeModel
+                    {
+                        FullName = "LegacyOwner.Owner",
+                        Namespace = "LegacyOwner",
+                        Name = "OwnerA",
+                        Kind = "class",
+                        Accessibility = "public",
+                        GenericParameters = ["T"]
+                    },
+                    new TypeModel
+                    {
+                        FullName = "LegacyOwner.Owner",
+                        Namespace = "LegacyOwner",
+                        Name = "OwnerB",
+                        Kind = "class",
+                        Accessibility = "public",
+                        GenericParameters = ["T"]
+                    },
+                    new TypeModel
+                    {
+                        FullName = "LegacyOwner.Owner.Child",
+                        Namespace = "LegacyOwner",
+                        Name = "Child",
+                        Kind = "class",
+                        Accessibility = "public",
+                        IsNested = true,
+                        DeclaringType = "LegacyOwner.Owner",
+                        InheritedGenericParameterCount = 1,
+                        GenericParameters = ["T"]
+                    }
+                ]
+            }
+        };
+        var source = Assert.Single(
+            CSharpSkeletonGenerator.Generate(CreateDocument(artifact)),
+            file => file.RelativePath == "LegacyOwner/LegacyOwner.cs").Content;
+
+        Assert.DoesNotContain("class Child", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void OmitsPartialInvalidAndDuplicateTypeDefinitionTokenLinks()
+    {
+        var artifact = CreateManagedArtifact("InvalidTokenOwner", []) with
+        {
+            Code = new CodeModel
+            {
+                Kind = "managed",
+                NamespaceCount = 1,
+                TypeCount = 5,
+                Types =
+                [
+                    new TypeModel
+                    {
+                        TypeDefinitionToken = 0x02000001,
+                        FullName = "InvalidTokenOwner.Owner",
+                        Namespace = "InvalidTokenOwner",
+                        Name = "Owner",
+                        Kind = "class",
+                        Accessibility = "public"
+                    },
+                    CreateInvalidNestedType("Partial", 0x02000002, null),
+                    CreateInvalidNestedType("WrongTable", 0x02000003, 0x06000001),
+                    CreateInvalidNestedType("DuplicateA", 0x02000004, 0x02000001),
+                    CreateInvalidNestedType("DuplicateB", 0x02000004, 0x02000001)
+                ]
+            }
+        };
+        var source = Assert.Single(
+            CSharpSkeletonGenerator.Generate(CreateDocument(artifact)),
+            file => file.RelativePath == "InvalidTokenOwner/InvalidTokenOwner.cs").Content;
+
+        Assert.DoesNotContain("class Partial", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("class WrongTable", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("class DuplicateA", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("class DuplicateB", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AllowsExactNestedLinksButNotLegacyFallbackWhenModelIsTruncated()
+    {
+        var artifact = CreateManagedArtifact("TruncatedOwner", []) with
+        {
+            Code = new CodeModel
+            {
+                Kind = "managed",
+                NamespaceCount = 1,
+                TypeCount = 3,
+                Truncated = true,
+                Types =
+                [
+                    new TypeModel
+                    {
+                        TypeDefinitionToken = 0x02000001,
+                        FullName = "TruncatedOwner.Owner",
+                        Namespace = "TruncatedOwner",
+                        Name = "Owner",
+                        Kind = "class",
+                        Accessibility = "public"
+                    },
+                    new TypeModel
+                    {
+                        TypeDefinitionToken = 0x02000002,
+                        FullName = "TruncatedOwner.Owner.ExactChild",
+                        Namespace = "TruncatedOwner",
+                        Name = "ExactChild",
+                        Kind = "class",
+                        Accessibility = "public",
+                        IsNested = true,
+                        DeclaringType = "TruncatedOwner.Owner",
+                        DeclaringTypeDefinitionToken = 0x02000001
+                    },
+                    new TypeModel
+                    {
+                        FullName = "TruncatedOwner.Owner.LegacyChild",
+                        Namespace = "TruncatedOwner",
+                        Name = "LegacyChild",
+                        Kind = "class",
+                        Accessibility = "public",
+                        IsNested = true,
+                        DeclaringType = "TruncatedOwner.Owner"
+                    }
+                ]
+            }
+        };
+        var source = Assert.Single(
+            CSharpSkeletonGenerator.Generate(CreateDocument(artifact)),
+            file => file.RelativePath == "TruncatedOwner/TruncatedOwner.cs").Content;
+
+        Assert.Contains("class ExactChild", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("class LegacyChild", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void OmitsNestedOwnerCycles()
+    {
+        var artifact = CreateManagedArtifact("CyclicOwner", []) with
+        {
+            Code = new CodeModel
+            {
+                Kind = "managed",
+                NamespaceCount = 1,
+                TypeCount = 3,
+                Types =
+                [
+                    new TypeModel
+                    {
+                        TypeDefinitionToken = 0x02000001,
+                        FullName = "CyclicOwner.Root",
+                        Namespace = "CyclicOwner",
+                        Name = "Root",
+                        Kind = "class",
+                        Accessibility = "public"
+                    },
+                    new TypeModel
+                    {
+                        TypeDefinitionToken = 0x02000002,
+                        FullName = "CyclicOwner.A",
+                        Namespace = "CyclicOwner",
+                        Name = "A",
+                        Kind = "class",
+                        Accessibility = "public",
+                        IsNested = true,
+                        DeclaringType = "CyclicOwner.B",
+                        DeclaringTypeDefinitionToken = 0x02000003
+                    },
+                    new TypeModel
+                    {
+                        TypeDefinitionToken = 0x02000003,
+                        FullName = "CyclicOwner.B",
+                        Namespace = "CyclicOwner",
+                        Name = "B",
+                        Kind = "class",
+                        Accessibility = "public",
+                        IsNested = true,
+                        DeclaringType = "CyclicOwner.A",
+                        DeclaringTypeDefinitionToken = 0x02000002
+                    }
+                ]
+            }
+        };
+        var source = Assert.Single(
+            CSharpSkeletonGenerator.Generate(CreateDocument(artifact)),
+            file => file.RelativePath == "CyclicOwner/CyclicOwner.cs").Content;
+
+        Assert.Contains("class Root", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("class A", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("class B", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DoesNotResolveNestedOwnerTokensAcrossArtifacts()
+    {
+        var first = CreateManagedArtifact("FirstArtifact", []) with
+        {
+            Code = new CodeModel
+            {
+                Kind = "managed",
+                NamespaceCount = 1,
+                TypeCount = 2,
+                Types =
+                [
+                    new TypeModel
+                    {
+                        TypeDefinitionToken = 0x02000001,
+                        FullName = "FirstArtifact.Root",
+                        Namespace = "FirstArtifact",
+                        Name = "Root",
+                        Kind = "class",
+                        Accessibility = "public"
+                    },
+                    new TypeModel
+                    {
+                        TypeDefinitionToken = 0x02000003,
+                        FullName = "FirstArtifact.MissingOwner.Child",
+                        Namespace = "FirstArtifact",
+                        Name = "Child",
+                        Kind = "class",
+                        Accessibility = "public",
+                        IsNested = true,
+                        DeclaringType = "FirstArtifact.MissingOwner",
+                        DeclaringTypeDefinitionToken = 0x02000002
+                    }
+                ]
+            }
+        };
+        var second = CreateManagedArtifact("SecondArtifact", []) with
+        {
+            Code = new CodeModel
+            {
+                Kind = "managed",
+                NamespaceCount = 1,
+                TypeCount = 1,
+                Types =
+                [
+                    new TypeModel
+                    {
+                        TypeDefinitionToken = 0x02000002,
+                        FullName = "SecondArtifact.Owner",
+                        Namespace = "SecondArtifact",
+                        Name = "Owner",
+                        Kind = "class",
+                        Accessibility = "public"
+                    }
+                ]
+            }
+        };
+        var document = CreateDocument(first) with
+        {
+            Files = [first, second]
+        };
+        var generated = CSharpSkeletonGenerator.Generate(document);
+        var firstSource = Assert.Single(
+            generated,
+            file => file.RelativePath == "FirstArtifact/FirstArtifact.cs").Content;
+        var secondSource = Assert.Single(
+            generated,
+            file => file.RelativePath == "SecondArtifact/SecondArtifact.cs").Content;
+
+        Assert.DoesNotContain("class Child", firstSource, StringComparison.Ordinal);
+        Assert.DoesNotContain("class Child", secondSource, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1673,6 +2013,38 @@ public sealed class CSharpSkeletonGeneratorTests
                     Type = "int"
                 }
             ]
+        };
+
+    private static BlueprintDocument CreateDocument(FileArtifact artifact) =>
+        new()
+        {
+            Input = new InputDescriptor
+            {
+                Name = artifact.FileName,
+                Kind = "file",
+                SourcePath = artifact.RelativePath,
+                FileCount = 1,
+                TotalBytes = artifact.Size
+            },
+            Summary = new BlueprintSummary(),
+            Files = [artifact]
+        };
+
+    private static TypeModel CreateInvalidNestedType(
+        string name,
+        int? typeDefinitionToken,
+        int? declaringTypeDefinitionToken) =>
+        new()
+        {
+            TypeDefinitionToken = typeDefinitionToken,
+            FullName = $"InvalidTokenOwner.Owner.{name}",
+            Namespace = "InvalidTokenOwner",
+            Name = name,
+            Kind = "class",
+            Accessibility = "public",
+            IsNested = true,
+            DeclaringType = "InvalidTokenOwner.Owner",
+            DeclaringTypeDefinitionToken = declaringTypeDefinitionToken
         };
 
     private static FileArtifact CreateManagedArtifact(string assemblyName, IReadOnlyList<string> references) =>
