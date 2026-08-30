@@ -3121,10 +3121,11 @@ internal static class ManagedSymbolReader
             case "and":
             case "or":
             case "xor":
+                return TryBinary(context, stack, BinaryOperator(name));
             case "shl":
             case "shr":
             case "shr.un":
-                return TryBinary(context, stack, BinaryOperator(name));
+                return TryShift(context, stack, name);
             case "div.un":
             case "rem.un":
                 return TryUnsignedIntegralBinary(
@@ -3294,6 +3295,103 @@ internal static class ManagedSymbolReader
         }
 
         PushExpression(context, stack, $"({left} {op} {right})", resultType);
+        return true;
+    }
+
+    private static bool TryShift(
+        ReconContext context,
+        Stack<string> stack,
+        string operation)
+    {
+        if (stack.Count < 2)
+        {
+            return false;
+        }
+
+        var right = stack.Pop();
+        var left = stack.Pop();
+        if (context.AmbiguousExpressionTypes.Contains(left) ||
+            context.AmbiguousExpressionTypes.Contains(right) ||
+            !context.ExpressionTypes.TryGetValue(left, out var leftType) ||
+            !context.ExpressionTypes.TryGetValue(right, out var rightType) ||
+            !TryGetShiftCarrier(leftType, out var carrierType) ||
+            !TryRenderShiftCount(right, rightType, out right))
+        {
+            return false;
+        }
+
+        var op = operation switch
+        {
+            "shl" => "<<",
+            "shr" => ">>",
+            "shr.un" => ">>>",
+            _ => string.Empty
+        };
+        if (op.Length == 0)
+        {
+            return false;
+        }
+
+        if (TryGetKnownEnumUnderlyingType(leftType, out _) || leftType.Text != carrierType)
+        {
+            left = $"unchecked(({carrierType}){left})";
+        }
+
+        PushExpression(context, stack, $"({left} {op} {right})", carrierType);
+        return true;
+    }
+
+    private static bool TryGetShiftCarrier(CliType type, out string carrierType)
+    {
+        carrierType = string.Empty;
+        var stackType = type.Text;
+        if (TryGetKnownEnumUnderlyingType(type, out var underlyingType))
+        {
+            stackType = underlyingType;
+        }
+        else if (type.IsExactNamedType)
+        {
+            return false;
+        }
+
+        carrierType = IntegralStackFamily(stackType) switch
+        {
+            0 => "int",
+            1 => "long",
+            2 => "nint",
+            _ => string.Empty
+        };
+        return carrierType.Length > 0;
+    }
+
+    private static bool TryRenderShiftCount(
+        string expression,
+        CliType type,
+        out string rendered)
+    {
+        rendered = expression;
+        var stackType = type.Text;
+        var isEnum = TryGetKnownEnumUnderlyingType(type, out var underlyingType);
+        if (isEnum)
+        {
+            stackType = underlyingType;
+        }
+        else if (type.IsExactNamedType)
+        {
+            return false;
+        }
+
+        var stackFamily = IntegralStackFamily(stackType);
+        if (stackFamily is not (0 or 2))
+        {
+            return false;
+        }
+
+        if (isEnum || type.Text != "int")
+        {
+            rendered = $"unchecked((int){expression})";
+        }
+
         return true;
     }
 
@@ -4646,9 +4744,6 @@ internal static class ManagedSymbolReader
         "and" => "&",
         "or" => "|",
         "xor" => "^",
-        "shl" => "<<",
-        "shr" => ">>",
-        "shr.un" => ">>>",
         _ => "?"
     };
 

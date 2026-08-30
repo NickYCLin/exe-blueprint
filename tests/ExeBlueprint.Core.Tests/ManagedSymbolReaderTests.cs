@@ -217,6 +217,11 @@ public sealed class ManagedSymbolReaderTests
             Assert.Single(
                 fixture.Methods,
                 method => method.Name == nameof(CliStackCoercionFixture.FromInt32)).Body);
+        Assert.Equal(
+            ["return (unchecked((int)value) << (count & 31));"],
+            Assert.Single(
+                fixture.Methods,
+                method => method.Name == nameof(CliStackCoercionFixture.ShiftLeft)).Body);
     }
 
     [Fact]

@@ -579,6 +579,201 @@ public sealed class IlBodyReconstructionTests
     }
 
     [Fact]
+    public void NormalizesCliShiftOperandsAndEnumResults()
+    {
+        byte[] shiftLeft = [0x02, 0x17, 0x62, 0x2A];
+        byte[] shiftRight = [0x02, 0x17, 0x63, 0x2A];
+        byte[] shiftRightUnsigned = [0x02, 0x17, 0x64, 0x2A];
+        byte[] variableShift = [0x02, 0x03, 0x62, 0x2A];
+        var intEnum = typeof(Int32StackCoercionEnum).FullName!;
+        var byteEnum = typeof(ByteStackCoercionEnum).FullName!;
+        var longEnum = typeof(Int64StackCoercionEnum).FullName!;
+        var ulongEnum = typeof(UInt64StackCoercionEnum).FullName!;
+
+        Assert.Equal(
+            ["return (unchecked((int)arg0) << 1);"],
+            Reconstruct(
+                shiftLeft,
+                isInstance: false,
+                returnType: "int",
+                parameterTypes: [intEnum]));
+        Assert.Equal(
+            ["return (unchecked((int)arg0) >> 1);"],
+            Reconstruct(
+                shiftRight,
+                isInstance: false,
+                returnType: "int",
+                parameterTypes: [byteEnum]));
+        Assert.Equal(
+            ["return (unchecked((long)arg0) >> 1);"],
+            Reconstruct(
+                shiftRight,
+                isInstance: false,
+                returnType: "long",
+                parameterTypes: [longEnum]));
+        Assert.Equal(
+            ["return (unchecked((long)arg0) >>> 1);"],
+            Reconstruct(
+                shiftRightUnsigned,
+                isInstance: false,
+                returnType: "long",
+                parameterTypes: [ulongEnum]));
+        Assert.Equal(
+            [$"return unchecked(({byteEnum})(unchecked((int)arg0) << 1));"],
+            Reconstruct(
+                shiftLeft,
+                isInstance: false,
+                returnType: byteEnum,
+                parameterTypes: [byteEnum]));
+
+        Assert.Equal(
+            ["return unchecked((uint)(unchecked((int)arg0) >> 1));"],
+            Reconstruct(
+                shiftRight,
+                isInstance: false,
+                returnType: "uint",
+                parameterTypes: ["uint"]));
+        Assert.Equal(
+            ["return unchecked((uint)(unchecked((int)arg0) >>> 1));"],
+            Reconstruct(
+                shiftRightUnsigned,
+                isInstance: false,
+                returnType: "uint",
+                parameterTypes: ["uint"]));
+        Assert.Equal(
+            ["return unchecked((ulong)(unchecked((long)arg0) >> 1));"],
+            Reconstruct(
+                shiftRight,
+                isInstance: false,
+                returnType: "ulong",
+                parameterTypes: ["ulong"]));
+        Assert.Equal(
+            ["return unchecked((ulong)(unchecked((long)arg0) >>> 1));"],
+            Reconstruct(
+                shiftRightUnsigned,
+                isInstance: false,
+                returnType: "ulong",
+                parameterTypes: ["ulong"]));
+        Assert.Equal(
+            ["return unchecked((nuint)(unchecked((nint)arg0) >> 1));"],
+            Reconstruct(
+                shiftRight,
+                isInstance: false,
+                returnType: "nuint",
+                parameterTypes: ["nuint"]));
+        Assert.Equal(
+            ["return unchecked((nuint)(unchecked((nint)arg0) >>> 1));"],
+            Reconstruct(
+                shiftRightUnsigned,
+                isInstance: false,
+                returnType: "nuint",
+                parameterTypes: ["nuint"]));
+
+        Assert.Equal(
+            ["return (arg0 << unchecked((int)arg1));"],
+            Reconstruct(
+                variableShift,
+                isInstance: false,
+                returnType: "int",
+                parameterTypes: ["int", "uint"]));
+        Assert.Equal(
+            ["return (arg0 << unchecked((int)arg1));"],
+            Reconstruct(
+                variableShift,
+                isInstance: false,
+                returnType: "int",
+                parameterTypes: ["int", "byte"]));
+        Assert.Equal(
+            ["return (arg0 << unchecked((int)arg1));"],
+            Reconstruct(
+                variableShift,
+                isInstance: false,
+                returnType: "int",
+                parameterTypes: ["int", "nint"]));
+        Assert.Equal(
+            ["return (arg0 << unchecked((int)arg1));"],
+            Reconstruct(
+                variableShift,
+                isInstance: false,
+                returnType: "int",
+                parameterTypes: ["int", "nuint"]));
+        Assert.Equal(
+            ["return (arg0 << unchecked((int)arg1));"],
+            Reconstruct(
+                variableShift,
+                isInstance: false,
+                returnType: "int",
+                parameterTypes: ["int", intEnum]));
+    }
+
+    [Fact]
+    public void RejectsUnsafeCliShiftOperandsAndCounts()
+    {
+        byte[] shift = [0x02, 0x03, 0x62, 0x2A];
+        var intEnum = typeof(Int32StackCoercionEnum).FullName!;
+        var longEnum = typeof(Int64StackCoercionEnum).FullName!;
+
+        Assert.Null(Reconstruct(
+            shift,
+            isInstance: false,
+            returnType: "int",
+            parameterTypes: ["int"]));
+        Assert.Null(Reconstruct(
+            [0x02, 0x17, 0x62, 0x2A],
+            isInstance: false,
+            returnType: "int"));
+        Assert.Null(Reconstruct(
+            shift,
+            isInstance: false,
+            returnType: "int",
+            parameterTypes: ["System.DayOfWeek", "int"]));
+        Assert.Null(Reconstruct(
+            shift,
+            isInstance: false,
+            returnType: "int",
+            parameterTypes: ["float", "int"]));
+        Assert.Null(Reconstruct(
+            shift,
+            isInstance: false,
+            returnType: "int",
+            parameterTypes: ["bool", "int"]));
+        Assert.Null(Reconstruct(
+            shift,
+            isInstance: false,
+            returnType: "int",
+            parameterTypes: [typeof(StackCoercionClass).FullName!, "int"]));
+        Assert.Null(Reconstruct(
+            [0x02, 0x17, 0x62, 0x2A],
+            isInstance: false,
+            returnType: "int",
+            parameterTypes: ["long"]));
+
+        foreach (var countType in new[]
+                 {
+                     "long",
+                     "ulong",
+                     "float",
+                     "bool",
+                     "object",
+                     "System.DayOfWeek",
+                     longEnum
+                 })
+        {
+            Assert.Null(Reconstruct(
+                shift,
+                isInstance: false,
+                returnType: "int",
+                parameterTypes: ["int", countType]));
+        }
+
+        Assert.NotNull(Reconstruct(
+            shift,
+            isInstance: false,
+            returnType: "int",
+            parameterTypes: [intEnum, "int"]));
+    }
+
+    [Fact]
     public void NormalizesCliBooleanAndEnumAssignmentsAtTypedTargets()
     {
         byte[] storeLocalAndReturn = [0x02, 0x0A, 0x06, 0x2A];
@@ -1295,7 +1490,17 @@ internal enum Int32StackCoercionEnum
     Zero
 }
 
+internal enum ByteStackCoercionEnum : byte
+{
+    Zero
+}
+
 internal enum Int64StackCoercionEnum : long
+{
+    Zero
+}
+
+internal enum UInt64StackCoercionEnum : ulong
 {
     Zero
 }
@@ -1332,6 +1537,8 @@ internal sealed class CliStackCoercionFixture
     public static int ToInt32(Int32StackCoercionEnum value) => (int)value;
 
     public static Int32StackCoercionEnum FromInt32(int value) => (Int32StackCoercionEnum)value;
+
+    public static int ShiftLeft(Int32StackCoercionEnum value, int count) => (int)value << count;
 }
 
 internal static class SwitchFixture
