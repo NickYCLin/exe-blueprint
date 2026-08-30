@@ -5370,6 +5370,7 @@ internal static class ManagedSymbolReader
             }
 
             if (info.DefinitionAttributes is null ||
+                info.DefinitionAttributes.Value.HasFlag(MethodAttributes.Abstract) ||
                 (info.DefinitionAttributes.Value.HasFlag(MethodAttributes.Virtual) &&
                  !info.DefinitionAttributes.Value.HasFlag(MethodAttributes.Final)))
             {

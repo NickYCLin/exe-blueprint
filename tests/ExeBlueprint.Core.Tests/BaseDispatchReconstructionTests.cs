@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Collections.Immutable;
 using System.Reflection;
 using System.Reflection.Metadata;
 using System.Reflection.Metadata.Ecma335;
@@ -145,6 +146,88 @@ public sealed class BaseDispatchReconstructionTests
     }
 
     [Fact]
+    public void RejectsDirectCallToAbstractFinalSameTypeMethodDefinition()
+    {
+        var metadata = new MetadataBuilder();
+        metadata.AddModule(
+            generation: 0,
+            moduleName: metadata.GetOrAddString("AbstractFinalDispatch.dll"),
+            mvid: metadata.GetOrAddGuid(new Guid("c05af610-83a5-429a-89f2-c7c7a1e2f87f")),
+            encId: default,
+            encBaseId: default);
+        metadata.AddAssembly(
+            metadata.GetOrAddString("AbstractFinalDispatch"),
+            new Version(1, 0, 0, 0),
+            culture: default,
+            publicKey: default,
+            flags: (AssemblyFlags)0,
+            hashAlgorithm: AssemblyHashAlgorithm.None);
+
+        var systemRuntime = metadata.AddAssemblyReference(
+            metadata.GetOrAddString("System.Runtime"),
+            new Version(10, 0, 0, 0),
+            culture: default,
+            publicKeyOrToken: default,
+            flags: (AssemblyFlags)0,
+            hashValue: default);
+        var objectType = metadata.AddTypeReference(
+            systemRuntime,
+            metadata.GetOrAddString("System"),
+            metadata.GetOrAddString("Object"));
+        metadata.AddTypeDefinition(
+            TypeAttributes.NotPublic,
+            @namespace: default,
+            metadata.GetOrAddString("<Module>"),
+            baseType: default,
+            MetadataTokens.FieldDefinitionHandle(1),
+            MetadataTokens.MethodDefinitionHandle(1));
+        metadata.AddTypeDefinition(
+            TypeAttributes.Public,
+            metadata.GetOrAddString("Tests"),
+            metadata.GetOrAddString("Current"),
+            objectType,
+            MetadataTokens.FieldDefinitionHandle(1),
+            MetadataTokens.MethodDefinitionHandle(1));
+
+        var signature = AddInstanceInt32Signature(metadata);
+        var caller = metadata.AddMethodDefinition(
+            MethodAttributes.Public | MethodAttributes.HideBySig,
+            MethodImplAttributes.IL | MethodImplAttributes.Managed,
+            metadata.GetOrAddString("Caller"),
+            signature,
+            bodyOffset: 0,
+            parameterList: MetadataTokens.ParameterHandle(1));
+        var target = metadata.AddMethodDefinition(
+            MethodAttributes.Public |
+            MethodAttributes.HideBySig |
+            MethodAttributes.Abstract |
+            MethodAttributes.Virtual |
+            MethodAttributes.Final,
+            MethodImplAttributes.IL | MethodImplAttributes.Managed,
+            metadata.GetOrAddString("Target"),
+            signature,
+            bodyOffset: 0,
+            parameterList: MetadataTokens.ParameterHandle(1));
+
+        var metadataImage = new BlobBuilder();
+        new MetadataRootBuilder(metadata).Serialize(
+            metadataImage,
+            methodBodyStreamRva: 0,
+            mappedFieldDataStreamRva: 0);
+        using var provider = MetadataReaderProvider.FromMetadataImage(metadataImage.ToImmutableArray());
+        var il = BuildInstanceCall(
+            receiverOpcode: 0x02, // ldarg.0 (this)
+            argumentOpcode: 0x03, // ldarg.1 (value)
+            callOpcode: 0x28,     // call
+            MetadataTokens.GetToken(target));
+
+        Assert.Null(ManagedSymbolReader.ReconstructMethodForTest(
+            provider.GetMetadataReader(),
+            il,
+            caller));
+    }
+
+    [Fact]
     public async Task ReconstructsSystemConsoleUnixBaseDispatchWithoutSelfRecursion()
     {
         var document = await new BlueprintAnalyzer().AnalyzeAsync(typeof(Console).Assembly.Location);
@@ -211,6 +294,16 @@ public sealed class BaseDispatchReconstructionTests
         ];
         BinaryPrimitives.WriteInt32LittleEndian(il.AsSpan(3, sizeof(int)), targetToken);
         return il;
+    }
+
+    private static BlobHandle AddInstanceInt32Signature(MetadataBuilder metadata)
+    {
+        var signature = new BlobBuilder();
+        signature.WriteByte(0x20); // HASTHIS | DEFAULT
+        signature.WriteCompressedInteger(1);
+        signature.WriteByte(0x08); // I4 return
+        signature.WriteByte(0x08); // I4 parameter
+        return metadata.GetOrAddBlob(signature);
     }
 }
 
