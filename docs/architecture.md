@@ -93,6 +93,7 @@ Ghidra 安裝目錄來自 `--ghidra` 或環境變數 `GHIDRA_INSTALL_DIR`。找�
 先把 IL 解碼成指令陣列，用區間遞迴結構化把條件分支還原成 if／if-else，比對 Roslyn 的
 while／for 形狀（先跳條件、主體、條件、往回跳）還原成 while，並把底測式（往回跳收尾）還原成 do-while（皆可巢狀）；
 區塊內以堆疊模擬還原載入、算式、欄位、屬性、方法呼叫、`new`、運算子、`return`、`throw`；
+區間內的 terminal `void ret` 會保留為明確 `return;`，避免 if／switch／exception 分支誤穿透到 join 後繼續產生副作用；只有方法最外層的最後一個 `return;` 會略去。ECMA-335 禁止出現在 try／filter／handler 保護範圍內的 `ret` 會整體 fail closed，不會被誤轉成無法編譯的 C# `return`。
 auto-property 的隱藏欄位會還原成屬性名稱，運算子方法還原成運算子語法。
 一般 property accessor 會輸出成成員存取，帶索引參數的 instance accessor 則會還原成 `target[index]` getter 或 setter，避免顯式呼叫 C# 禁止的 `get_*`／`set_*` 方法。
 instance call 會保留 IL 的 dispatch 種類：`callvirt` 維持一般 receiver／interface dispatch；`call` 只有在 receiver 可證實為 `ldarg.0`，且 owner 是精確等於目前 TypeDef direct `BaseType` 的同模組 TypeDef／MethodDef 時才輸出 `base`。同型別 direct call 僅接受已知 nonabstract nonvirtual 或 nonabstract virtual-final MethodDef；非 `this` receiver、TypeRef／TypeSpec base、未知 MemberRef、非直接祖先、同名不同 handle 與 generic MethodSpec 都 fail closed，避免把 nonvirtual call 誤寫成遞迴或虛擬 dispatch。

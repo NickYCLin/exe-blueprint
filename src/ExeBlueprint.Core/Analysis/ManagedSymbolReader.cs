@@ -2231,6 +2231,15 @@ internal static class ManagedSymbolReader
             return null;
         }
 
+        if (instructions.Any(instruction =>
+                instruction.Name == "ret" &&
+                exceptionRegions.Any(region => IsInsideExceptionRegion(instruction.Offset, region))))
+        {
+            // ECMA-335 不允許 ret 離開 try/filter/handler；畸形 metadata/IL 若直接輸出
+            // C# return，會變成無法編譯或改變 finally 語意，因此整體 fail closed。
+            return null;
+        }
+
         var state = new ReconstructionState
         {
             RequiresUnsafeContext = localTypes.Any(type => RequiresUnsafeType(type.Text))
@@ -2262,6 +2271,15 @@ internal static class ManagedSymbolReader
             instructions.Count,
             new HashSet<int>(),
             0);
+        if (body is { Count: > 0 } &&
+            returnType.PrimitiveType == PrimitiveTypeCode.Void &&
+            body[^1] == "return;")
+        {
+            // 方法最外層的最後一個 void ret 可以由 C# 區塊結尾隱含；內層
+            // if/switch/exception 分支中的 ret 則必須保留，否則會繼續執行 join 後的副作用。
+            body.RemoveAt(body.Count - 1);
+        }
+
         if (context.AmbiguousExpressionTypes.Count > 0)
         {
             body = null;
@@ -2270,6 +2288,18 @@ internal static class ManagedSymbolReader
         requiresUnsafeContext = body is not null && state.RequiresUnsafeContext;
         return body;
     }
+
+    private static bool IsInsideExceptionRegion(int offset, ExceptionRegionInfo region) =>
+        IsInsideOffsetRange(offset, region.TryOffset, region.TryLength) ||
+        IsInsideOffsetRange(offset, region.HandlerOffset, region.HandlerLength) ||
+        (region.Kind == ExceptionRegionKind.Filter &&
+         region.FilterOffset >= 0 &&
+         region.HandlerOffset >= region.FilterOffset &&
+         offset >= region.FilterOffset &&
+         offset < region.HandlerOffset);
+
+    private static bool IsInsideOffsetRange(int offset, int start, int length) =>
+        start >= 0 && length > 0 && offset >= start && offset - start < length;
 
     private static List<string>? TryStructure(
         ReconContext context,
@@ -4325,6 +4355,8 @@ internal static class ManagedSymbolReader
                     {
                         return false;
                     }
+
+                    statements.Add("return;");
                 }
                 else
                 {

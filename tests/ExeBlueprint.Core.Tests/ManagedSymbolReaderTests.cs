@@ -89,6 +89,31 @@ public sealed class ManagedSymbolReaderTests
     }
 
     [Fact]
+    public async Task PreservesTerminalVoidReturnsInSystemConsoleFormatOverloads()
+    {
+        var document = await new BlueprintAnalyzer().AnalyzeAsync(typeof(Console).Assembly.Location);
+        var console = Assert.Single(
+            document.Files[0].Code!.Types,
+            type => type.FullName == "System.Console");
+
+        foreach (var methodName in new[] { "Write", "WriteLine" })
+        {
+            var method = Assert.Single(
+                console.Methods,
+                candidate => candidate.Name == methodName &&
+                             candidate.Parameters.Select(parameter => parameter.Type)
+                                 .SequenceEqual(["string", "object[]?"]));
+            Assert.True(method.BodyReconstructed);
+            Assert.Contains(method.Body, statement => statement.Trim() == "return;");
+            Assert.Equal(
+                1,
+                method.Body.Count(statement => statement.Contains(
+                    $"System.Console.Out.{methodName}(format, arg);",
+                    StringComparison.Ordinal)));
+        }
+    }
+
+    [Fact]
     public async Task ReconstructsCompilerGeneratedUnsignedArithmetic()
     {
         var assemblyPath = typeof(UnsignedArithmeticFixture).Assembly.Location;

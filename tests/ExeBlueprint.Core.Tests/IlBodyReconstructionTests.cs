@@ -120,6 +120,61 @@ public sealed class IlBodyReconstructionTests
             body);
     }
 
+    [Fact]
+    public void PreservesEarlyVoidReturnInsideIfAndOmitsOnlyFinalReturn()
+    {
+        // static void M(bool stop, int value) { if (stop) return; value = 1; }
+        byte[] il =
+        [
+            0x02,       // IL_0000 ldarg.0
+            0x2C, 0x01, // IL_0001 brfalse.s IL_0004
+            0x2A,       // IL_0003 ret
+            0x17,       // IL_0004 ldc.i4.1
+            0x10, 0x01, // IL_0005 starg.s 1
+            0x2A        // IL_0007 ret
+        ];
+
+        var body = Reconstruct(
+            il,
+            isInstance: false,
+            returnType: "void",
+            parameterTypes: ["bool", "int"]);
+
+        Assert.Equal(
+            ["if (arg0)", "{", "    return;", "}", "arg1 = 1;"],
+            body);
+    }
+
+    [Fact]
+    public void RejectsRetInsideExceptionProtectedRegion()
+    {
+        byte[] il =
+        [
+            0xDE, 0x05, // IL_0000 leave.s IL_0007
+            0x02,       // IL_0002 ldarg.0 (finally handler)
+            0x2C, 0x01, // IL_0003 brfalse.s IL_0006
+            0x2A,       // IL_0005 ret (invalid inside handler)
+            0xDC,       // IL_0006 endfinally
+            0x2A        // IL_0007 ret
+        ];
+        var regions = new[]
+        {
+            new ManagedSymbolReader.ExceptionRegionInfo(
+                ExceptionRegionKind.Finally,
+                TryOffset: 0,
+                TryLength: 2,
+                HandlerOffset: 2,
+                HandlerLength: 5)
+        };
+
+        Assert.Null(Reconstruct(
+            il,
+            isInstance: false,
+            returnType: "void",
+            exceptionRegions: regions,
+            parameterTypes: ["bool"]));
+    }
+
     [Theory]
     [InlineData("int", "uint", 0x34, 0x41, ">=", "<")]
     [InlineData("int", "uint", 0x35, 0x42, ">", "<=")]
