@@ -182,6 +182,78 @@ public sealed class ConstructorMetadataSafetyTests
     }
 
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void AcceptsTrustedNullableNewobjConstructorArgument(bool insertNop)
+    {
+        using var fixture = CreateNullableNewobjFixture(
+            NullableNewobjMutation.None,
+            insertNop);
+
+        var result = Reconstruct(fixture);
+
+        Assert.NotNull(result);
+        Assert.Equal("base", result.Initializer.Kind);
+        Assert.Equal(
+            ["new System.Nullable<Tests.Option>(arg0)"],
+            result.Initializer.Arguments);
+        Assert.NotNull(result.Body);
+        Assert.Empty(result.Body);
+    }
+
+    [Fact]
+    public void AcceptsTrustedPrimitiveNullableNewobjConstructorArgument()
+    {
+        using var fixture = CreateNullableNewobjFixture(
+            NullableNewobjMutation.None,
+            usePrimitiveElement: true);
+
+        var result = Reconstruct(fixture);
+
+        Assert.NotNull(result);
+        Assert.Equal(
+            ["new System.Nullable<int>(arg0)"],
+            result.Initializer.Arguments);
+    }
+
+    [Theory]
+    [InlineData(NullableNewobjMutation.WrongAssemblyToken)]
+    [InlineData(NullableNewobjMutation.ShadowAssemblyName)]
+    [InlineData(NullableNewobjMutation.WrongNamespace)]
+    [InlineData(NullableNewobjMutation.NonCanonicalDefinitionName)]
+    [InlineData(NullableNewobjMutation.LocalGenericDefinition)]
+    [InlineData(NullableNewobjMutation.ClassGenericDefinition)]
+    [InlineData(NullableNewobjMutation.ReferenceTypeArgument)]
+    [InlineData(NullableNewobjMutation.OpenTypeArgument)]
+    [InlineData(NullableNewobjMutation.GenericValueTypeArgument)]
+    [InlineData(NullableNewobjMutation.ClassTypeDefinitionArgument)]
+    [InlineData(NullableNewobjMutation.SpoofedValueTypeBase)]
+    [InlineData(NullableNewobjMutation.InterfaceValueTypeArgument)]
+    [InlineData(NullableNewobjMutation.AbstractValueTypeArgument)]
+    [InlineData(NullableNewobjMutation.UnsealedValueTypeArgument)]
+    [InlineData(NullableNewobjMutation.EnumValueTypeArgument)]
+    [InlineData(NullableNewobjMutation.ExternalValueTypeArgument)]
+    [InlineData(NullableNewobjMutation.OverlongDefinitionHandle)]
+    [InlineData(NullableNewobjMutation.OverlongArityEncoding)]
+    [InlineData(NullableNewobjMutation.TrailingTypeSignatureData)]
+    [InlineData(NullableNewobjMutation.OverlongElementName)]
+    [InlineData(NullableNewobjMutation.OverlongElementNamespace)]
+    [InlineData(NullableNewobjMutation.TypeReferenceParent)]
+    [InlineData(NullableNewobjMutation.MissingHasThis)]
+    [InlineData(NullableNewobjMutation.ConcreteConstructorParameter)]
+    [InlineData(NullableNewobjMutation.MismatchedSourceArgument)]
+    [InlineData(NullableNewobjMutation.MissingSourceArgument)]
+    [InlineData(NullableNewobjMutation.NonMemberReferenceToken)]
+    [InlineData(NullableNewobjMutation.NestedNewobj)]
+    public void RejectsUntrustedNullableNewobjConstructorArgument(
+        NullableNewobjMutation mutation)
+    {
+        using var fixture = CreateNullableNewobjFixture(mutation);
+
+        Assert.Null(Reconstruct(fixture));
+    }
+
+    [Theory]
     [InlineData(ConstructorMethodRole.Caller, ConstructorDefinitionFlagMutation.Static)]
     [InlineData(ConstructorMethodRole.Caller, ConstructorDefinitionFlagMutation.Abstract)]
     [InlineData(ConstructorMethodRole.Caller, ConstructorDefinitionFlagMutation.MissingSpecialName)]
@@ -982,6 +1054,387 @@ public sealed class ConstructorMetadataSafetyTests
             BuildConstructorIl(MetadataTokens.GetToken(target), parameterCount: 1));
     }
 
+    private static MetadataFixture CreateNullableNewobjFixture(
+        NullableNewobjMutation mutation,
+        bool insertNop = false,
+        bool usePrimitiveElement = false)
+    {
+        var metadata = new MetadataBuilder();
+        metadata.AddModule(
+            generation: 0,
+            moduleName: metadata.GetOrAddString("NullableNewobjConstructorTests.dll"),
+            mvid: metadata.GetOrAddGuid(new Guid("cd06096c-a447-47c7-9d5b-3287c3734271")),
+            encId: default,
+            encBaseId: default);
+        metadata.AddAssembly(
+            metadata.GetOrAddString("NullableNewobjConstructorTests"),
+            new Version(1, 0, 0, 0),
+            culture: default,
+            publicKey: default,
+            flags: (AssemblyFlags)0,
+            hashAlgorithm: AssemblyHashAlgorithm.None);
+
+        var publicKeyToken = mutation == NullableNewobjMutation.WrongAssemblyToken
+            ? ImmutableArray.Create<byte>(0, 0, 0, 0, 0, 0, 0, 0)
+            : ImmutableArray.Create<byte>(
+                0xB0,
+                0x3F,
+                0x5F,
+                0x7F,
+                0x11,
+                0xD5,
+                0x0A,
+                0x3A);
+        var systemRuntime = metadata.AddAssemblyReference(
+            metadata.GetOrAddString(
+                mutation == NullableNewobjMutation.ShadowAssemblyName
+                    ? "Shadow.Runtime"
+                    : "System.Runtime"),
+            new Version(10, 0, 0, 0),
+            culture: default,
+            publicKeyOrToken: metadata.GetOrAddBlob(publicKeyToken),
+            flags: (AssemblyFlags)0,
+            hashValue: default);
+        var spoofedRuntime = metadata.AddAssemblyReference(
+            metadata.GetOrAddString("Spoofed.Runtime"),
+            new Version(10, 0, 0, 0),
+            culture: default,
+            publicKeyOrToken: metadata.GetOrAddBlob(
+                ImmutableArray.Create<byte>(
+                    0xB0,
+                    0x3F,
+                    0x5F,
+                    0x7F,
+                    0x11,
+                    0xD5,
+                    0x0A,
+                    0x3A)),
+            flags: (AssemblyFlags)0,
+            hashValue: default);
+        var objectType = metadata.AddTypeReference(
+            systemRuntime,
+            metadata.GetOrAddString("System"),
+            metadata.GetOrAddString("Object"));
+        var valueType = metadata.AddTypeReference(
+            systemRuntime,
+            metadata.GetOrAddString("System"),
+            metadata.GetOrAddString("ValueType"));
+        var enumType = metadata.AddTypeReference(
+            systemRuntime,
+            metadata.GetOrAddString("System"),
+            metadata.GetOrAddString("Enum"));
+        var spoofedValueType = metadata.AddTypeReference(
+            spoofedRuntime,
+            metadata.GetOrAddString("System"),
+            metadata.GetOrAddString("ValueType"));
+        var nullableType = metadata.AddTypeReference(
+            systemRuntime,
+            metadata.GetOrAddString(
+                mutation == NullableNewobjMutation.WrongNamespace
+                    ? "Shadow.System"
+                    : "System"),
+            metadata.GetOrAddString(
+                mutation == NullableNewobjMutation.NonCanonicalDefinitionName
+                    ? "Nullable"
+                    : "Nullable`1"));
+        var externalOptionType = metadata.AddTypeReference(
+            systemRuntime,
+            metadata.GetOrAddString("Tests"),
+            metadata.GetOrAddString("ExternalOption"));
+
+        metadata.AddTypeDefinition(
+            TypeAttributes.NotPublic,
+            @namespace: default,
+            metadata.GetOrAddString("<Module>"),
+            baseType: default,
+            MetadataTokens.FieldDefinitionHandle(1),
+            MetadataTokens.MethodDefinitionHandle(1));
+        var optionType = metadata.AddTypeDefinition(
+            TypeAttributes.Public | TypeAttributes.Sealed | TypeAttributes.SequentialLayout,
+            metadata.GetOrAddString(
+                mutation == NullableNewobjMutation.OverlongElementNamespace
+                    ? new string('N', 1_025)
+                    : "Tests"),
+            metadata.GetOrAddString(
+                mutation == NullableNewobjMutation.OverlongElementName
+                    ? new string('O', 1_025)
+                    : "Option"),
+            valueType,
+            MetadataTokens.FieldDefinitionHandle(1),
+            MetadataTokens.MethodDefinitionHandle(1));
+        var otherOptionType = metadata.AddTypeDefinition(
+            TypeAttributes.Public | TypeAttributes.Sealed | TypeAttributes.SequentialLayout,
+            metadata.GetOrAddString("Tests"),
+            metadata.GetOrAddString("OtherOption"),
+            valueType,
+            MetadataTokens.FieldDefinitionHandle(1),
+            MetadataTokens.MethodDefinitionHandle(1));
+        var classOptionType = metadata.AddTypeDefinition(
+            TypeAttributes.Public | TypeAttributes.Sealed,
+            metadata.GetOrAddString("Tests"),
+            metadata.GetOrAddString("ClassOption"),
+            objectType,
+            MetadataTokens.FieldDefinitionHandle(1),
+            MetadataTokens.MethodDefinitionHandle(1));
+        var spoofedOptionType = metadata.AddTypeDefinition(
+            TypeAttributes.Public | TypeAttributes.Sealed | TypeAttributes.SequentialLayout,
+            metadata.GetOrAddString("Tests"),
+            metadata.GetOrAddString("SpoofedOption"),
+            spoofedValueType,
+            MetadataTokens.FieldDefinitionHandle(1),
+            MetadataTokens.MethodDefinitionHandle(1));
+        var interfaceOptionType = metadata.AddTypeDefinition(
+            TypeAttributes.Public | TypeAttributes.Interface | TypeAttributes.Abstract,
+            metadata.GetOrAddString("Tests"),
+            metadata.GetOrAddString("InterfaceOption"),
+            valueType,
+            MetadataTokens.FieldDefinitionHandle(1),
+            MetadataTokens.MethodDefinitionHandle(1));
+        var abstractOptionType = metadata.AddTypeDefinition(
+            TypeAttributes.Public |
+            TypeAttributes.Abstract |
+            TypeAttributes.Sealed |
+            TypeAttributes.SequentialLayout,
+            metadata.GetOrAddString("Tests"),
+            metadata.GetOrAddString("AbstractOption"),
+            valueType,
+            MetadataTokens.FieldDefinitionHandle(1),
+            MetadataTokens.MethodDefinitionHandle(1));
+        var unsealedOptionType = metadata.AddTypeDefinition(
+            TypeAttributes.Public | TypeAttributes.SequentialLayout,
+            metadata.GetOrAddString("Tests"),
+            metadata.GetOrAddString("UnsealedOption"),
+            valueType,
+            MetadataTokens.FieldDefinitionHandle(1),
+            MetadataTokens.MethodDefinitionHandle(1));
+        var enumOptionType = metadata.AddTypeDefinition(
+            TypeAttributes.Public | TypeAttributes.Sealed,
+            metadata.GetOrAddString("Tests"),
+            metadata.GetOrAddString("EnumOption"),
+            enumType,
+            MetadataTokens.FieldDefinitionHandle(1),
+            MetadataTokens.MethodDefinitionHandle(1));
+        var genericOptionType = metadata.AddTypeDefinition(
+            TypeAttributes.Public | TypeAttributes.Sealed | TypeAttributes.SequentialLayout,
+            metadata.GetOrAddString("Tests"),
+            metadata.GetOrAddString("GenericOption`1"),
+            valueType,
+            MetadataTokens.FieldDefinitionHandle(1),
+            MetadataTokens.MethodDefinitionHandle(1));
+        metadata.AddGenericParameter(
+            genericOptionType,
+            GenericParameterAttributes.None,
+            metadata.GetOrAddString("T"),
+            index: 0);
+        var fakeNullableType = metadata.AddTypeDefinition(
+            TypeAttributes.Public | TypeAttributes.Sealed | TypeAttributes.SequentialLayout,
+            metadata.GetOrAddString("System"),
+            metadata.GetOrAddString("Nullable`1"),
+            valueType,
+            MetadataTokens.FieldDefinitionHandle(1),
+            MetadataTokens.MethodDefinitionHandle(1));
+        metadata.AddGenericParameter(
+            fakeNullableType,
+            GenericParameterAttributes.None,
+            metadata.GetOrAddString("T"),
+            index: 0);
+        var baseType = metadata.AddTypeDefinition(
+            TypeAttributes.Public,
+            metadata.GetOrAddString("Tests"),
+            metadata.GetOrAddString("Base"),
+            objectType,
+            MetadataTokens.FieldDefinitionHandle(1),
+            MetadataTokens.MethodDefinitionHandle(1));
+        metadata.AddTypeDefinition(
+            TypeAttributes.Public,
+            metadata.GetOrAddString("Tests"),
+            metadata.GetOrAddString("Derived"),
+            baseType,
+            MetadataTokens.FieldDefinitionHandle(1),
+            MetadataTokens.MethodDefinitionHandle(1));
+
+        EntityHandle nullableDefinition =
+            mutation == NullableNewobjMutation.LocalGenericDefinition
+                ? fakeNullableType
+                : nullableType;
+        EntityHandle nullableElement =
+            mutation switch
+            {
+                NullableNewobjMutation.GenericValueTypeArgument => genericOptionType,
+                NullableNewobjMutation.ClassTypeDefinitionArgument => classOptionType,
+                NullableNewobjMutation.SpoofedValueTypeBase => spoofedOptionType,
+                NullableNewobjMutation.InterfaceValueTypeArgument => interfaceOptionType,
+                NullableNewobjMutation.AbstractValueTypeArgument => abstractOptionType,
+                NullableNewobjMutation.UnsealedValueTypeArgument => unsealedOptionType,
+                NullableNewobjMutation.EnumValueTypeArgument => enumOptionType,
+                NullableNewobjMutation.ExternalValueTypeArgument => externalOptionType,
+                _ => optionType
+            };
+        var nullableSignature = new BlobBuilder();
+        WriteNullableTypeSignature(nullableSignature, applyShapeMutation: true);
+
+        var nullableTypeSpecification = metadata.AddTypeSpecification(
+            metadata.GetOrAddBlob(nullableSignature));
+        var baseConstructorSignature = new BlobBuilder();
+        baseConstructorSignature.WriteByte(0x20); // HASTHIS | DEFAULT
+        baseConstructorSignature.WriteCompressedInteger(1);
+        baseConstructorSignature.WriteByte(0x01); // VOID
+        WriteNullableTypeSignature(
+            baseConstructorSignature,
+            applyShapeMutation: mutation is not (
+                NullableNewobjMutation.OverlongDefinitionHandle or
+                NullableNewobjMutation.OverlongArityEncoding or
+                NullableNewobjMutation.TrailingTypeSignatureData));
+        var baseConstructor = metadata.AddMemberReference(
+            baseType,
+            metadata.GetOrAddString(".ctor"),
+            metadata.GetOrAddBlob(baseConstructorSignature));
+
+        var newobjSignature = new BlobBuilder();
+        newobjSignature.WriteByte(
+            mutation == NullableNewobjMutation.MissingHasThis
+                ? (byte)0x00
+                : (byte)0x20); // HASTHIS | DEFAULT
+        newobjSignature.WriteCompressedInteger(1);
+        newobjSignature.WriteByte(0x01); // VOID
+        if (mutation == NullableNewobjMutation.ConcreteConstructorParameter)
+        {
+            WriteNamedType(newobjSignature, 0x11, optionType);
+        }
+        else
+        {
+            newobjSignature.WriteByte(0x13); // VAR
+            newobjSignature.WriteCompressedInteger(0);
+        }
+
+        var nullableConstructor = metadata.AddMemberReference(
+            mutation == NullableNewobjMutation.TypeReferenceParent
+                ? nullableType
+                : nullableTypeSpecification,
+            metadata.GetOrAddString(".ctor"),
+            metadata.GetOrAddBlob(newobjSignature));
+
+        var currentSignature = new BlobBuilder();
+        currentSignature.WriteByte(0x20); // HASTHIS | DEFAULT
+        var hasSourceArgument = mutation != NullableNewobjMutation.MissingSourceArgument;
+        currentSignature.WriteCompressedInteger(hasSourceArgument ? 1 : 0);
+        currentSignature.WriteByte(0x01); // VOID
+        if (hasSourceArgument)
+        {
+            if (usePrimitiveElement)
+            {
+                currentSignature.WriteByte(0x08); // I4
+            }
+            else
+            {
+                WriteNamedType(
+                    currentSignature,
+                    0x11,
+                    mutation switch
+                    {
+                        NullableNewobjMutation.MismatchedSourceArgument => otherOptionType,
+                        NullableNewobjMutation.ClassTypeDefinitionArgument => classOptionType,
+                        NullableNewobjMutation.SpoofedValueTypeBase => spoofedOptionType,
+                        NullableNewobjMutation.InterfaceValueTypeArgument => interfaceOptionType,
+                        NullableNewobjMutation.AbstractValueTypeArgument => abstractOptionType,
+                        NullableNewobjMutation.UnsealedValueTypeArgument => unsealedOptionType,
+                        NullableNewobjMutation.EnumValueTypeArgument => enumOptionType,
+                        NullableNewobjMutation.ExternalValueTypeArgument => externalOptionType,
+                        _ => optionType
+                    });
+            }
+        }
+
+        var currentConstructor = metadata.AddMethodDefinition(
+            CanonicalConstructorAttributes,
+            MethodImplAttributes.IL | MethodImplAttributes.Managed,
+            metadata.GetOrAddString(".ctor"),
+            metadata.GetOrAddBlob(currentSignature),
+            bodyOffset: 0,
+            parameterList: MetadataTokens.ParameterHandle(1));
+
+        var metadataImage = new BlobBuilder();
+        new MetadataRootBuilder(metadata).Serialize(
+            metadataImage,
+            methodBodyStreamRva: 0,
+            mappedFieldDataStreamRva: 0);
+        var provider = MetadataReaderProvider.FromMetadataImage(metadataImage.ToImmutableArray());
+        var newobjToken = mutation == NullableNewobjMutation.NonMemberReferenceToken
+            ? MetadataTokens.GetToken(optionType)
+            : MetadataTokens.GetToken(nullableConstructor);
+        return new MetadataFixture(
+            provider,
+            currentConstructor,
+            BuildNullableNewobjIl(
+                newobjToken,
+                MetadataTokens.GetToken(baseConstructor),
+                hasSourceArgument,
+                insertNop,
+                mutation == NullableNewobjMutation.NestedNewobj));
+
+        void WriteNullableTypeSignature(
+            BlobBuilder signature,
+            bool applyShapeMutation)
+        {
+            signature.WriteByte(0x15); // GENERICINST
+            signature.WriteByte(
+                applyShapeMutation &&
+                mutation == NullableNewobjMutation.ClassGenericDefinition
+                    ? (byte)0x12 // CLASS
+                    : (byte)0x11); // VALUETYPE
+            var nullableCodedIndex = CodedIndex.TypeDefOrRef(nullableDefinition);
+            if (applyShapeMutation &&
+                mutation == NullableNewobjMutation.OverlongDefinitionHandle)
+            {
+                Assert.InRange(nullableCodedIndex, 0, 0x7F);
+                signature.WriteByte(0x80);
+                signature.WriteByte((byte)nullableCodedIndex);
+            }
+            else
+            {
+                signature.WriteCompressedInteger(nullableCodedIndex);
+            }
+
+            if (applyShapeMutation &&
+                mutation == NullableNewobjMutation.OverlongArityEncoding)
+            {
+                signature.WriteByte(0x80);
+                signature.WriteByte(0x01);
+            }
+            else
+            {
+                signature.WriteCompressedInteger(1);
+            }
+
+            if (usePrimitiveElement)
+            {
+                signature.WriteByte(0x08); // I4
+            }
+            else if (applyShapeMutation &&
+                     mutation == NullableNewobjMutation.OpenTypeArgument)
+            {
+                signature.WriteByte(0x13); // VAR
+                signature.WriteCompressedInteger(0);
+            }
+            else
+            {
+                WriteNamedType(
+                    signature,
+                    applyShapeMutation &&
+                    mutation == NullableNewobjMutation.ReferenceTypeArgument
+                        ? (byte)0x12 // CLASS
+                        : (byte)0x11, // VALUETYPE
+                    nullableElement);
+            }
+
+            if (applyShapeMutation &&
+                mutation == NullableNewobjMutation.TrailingTypeSignatureData)
+            {
+                signature.WriteByte(0x00);
+            }
+        }
+    }
+
     private static BlobHandle AddConstructorSignature(
         MetadataBuilder metadata,
         SignatureShape shape,
@@ -1046,6 +1499,57 @@ public sealed class ConstructorMetadataSafetyTests
         index += 4;
         il[index] = 0x2A; // ret
         return il;
+    }
+
+    private static byte[] BuildNullableNewobjIl(
+        int newobjToken,
+        int baseConstructorToken,
+        bool loadSourceArgument,
+        bool insertNop,
+        bool nestedNewobj)
+    {
+        var length = 1 +
+                     (loadSourceArgument ? 1 : 0) +
+                     (insertNop ? 1 : 0) +
+                     5 +
+                     (nestedNewobj ? 5 : 0) +
+                     5 +
+                     1;
+        var il = new byte[length];
+        var index = 0;
+        il[index++] = 0x02; // ldarg.0
+        if (loadSourceArgument)
+        {
+            il[index++] = 0x03; // ldarg.1
+        }
+
+        if (insertNop)
+        {
+            il[index++] = 0x00; // nop
+        }
+
+        WriteNewobj();
+        if (nestedNewobj)
+        {
+            WriteNewobj();
+        }
+
+        il[index++] = 0x28; // call
+        BinaryPrimitives.WriteInt32LittleEndian(
+            il.AsSpan(index, 4),
+            baseConstructorToken);
+        index += 4;
+        il[index] = 0x2A; // ret
+        return il;
+
+        void WriteNewobj()
+        {
+            il[index++] = 0x73; // newobj
+            BinaryPrimitives.WriteInt32LittleEndian(
+                il.AsSpan(index, 4),
+                newobjToken);
+            index += 4;
+        }
     }
 
     private static byte[] BuildConstructorNullIl(int constructorToken)
@@ -1156,6 +1660,39 @@ public sealed class ConstructorMetadataSafetyTests
         OutOfRangeBaseSlot,
         MismatchedInheritedDeclaration,
         MismatchedNestedArity
+    }
+
+    public enum NullableNewobjMutation
+    {
+        None,
+        WrongAssemblyToken,
+        ShadowAssemblyName,
+        WrongNamespace,
+        NonCanonicalDefinitionName,
+        LocalGenericDefinition,
+        ClassGenericDefinition,
+        ReferenceTypeArgument,
+        OpenTypeArgument,
+        GenericValueTypeArgument,
+        ClassTypeDefinitionArgument,
+        SpoofedValueTypeBase,
+        InterfaceValueTypeArgument,
+        AbstractValueTypeArgument,
+        UnsealedValueTypeArgument,
+        EnumValueTypeArgument,
+        ExternalValueTypeArgument,
+        OverlongDefinitionHandle,
+        OverlongArityEncoding,
+        TrailingTypeSignatureData,
+        OverlongElementName,
+        OverlongElementNamespace,
+        TypeReferenceParent,
+        MissingHasThis,
+        ConcreteConstructorParameter,
+        MismatchedSourceArgument,
+        MissingSourceArgument,
+        NonMemberReferenceToken,
+        NestedNewobj
     }
 
     private enum SignatureShape

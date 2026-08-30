@@ -23,6 +23,7 @@ internal static class ManagedSymbolReader
     private const int MaxEnumFieldsToInspect = 1_024;
     private const int MaxEnumFieldsToInspectAcrossAssembly = 100_000;
     private const int MaxConstructorInitializerArguments = 32;
+    private const int MaxConstructorTypeSignatureBytes = 64;
     private const int MaxAssemblyPublicKeyBytes = 4_096;
     private const int MaxGenericParametersPerOwner = 256;
     private const int MaxGenericConstraintsPerParameter = 256;
@@ -745,7 +746,8 @@ internal static class ManagedSymbolReader
     private readonly record struct ConstructorArgument(
         string Expression,
         CliType Type,
-        SignatureTypeName? Signature);
+        SignatureTypeName? Signature,
+        bool IsFoldedExpression = false);
 
     private sealed record ConstructorTypeSpecificationContext(
         TypeSpecificationHandle Handle,
@@ -873,6 +875,25 @@ internal static class ManagedSymbolReader
             {
                 callInstruction = rawInstructions[index];
                 break;
+            }
+
+            if (name == "newobj")
+            {
+                if (arguments.Count == 0 ||
+                    !TryFoldNullableConstructorArgument(
+                        metadata,
+                        enumTypes,
+                        il,
+                        rawInstructions[index],
+                        arguments[^1],
+                        out var nullableArgument))
+                {
+                    return null;
+                }
+
+                arguments[^1] = nullableArgument;
+                index++;
+                continue;
             }
 
             if (arguments.Count >= MaxConstructorInitializerArguments ||
@@ -1651,6 +1672,301 @@ internal static class ManagedSymbolReader
                 argument = default;
                 return false;
         }
+    }
+
+    private static bool TryFoldNullableConstructorArgument(
+        MetadataReader metadata,
+        EnumTypeCatalog enumTypes,
+        byte[] il,
+        IlInstruction instruction,
+        ConstructorArgument source,
+        out ConstructorArgument argument)
+    {
+        argument = default;
+        if (source.IsFoldedExpression || instruction.OperandSize != 4)
+        {
+            return false;
+        }
+
+        try
+        {
+            var token = BinaryPrimitives.ReadInt32LittleEndian(
+                il.AsSpan(instruction.OperandOffset, 4));
+            var handle = MetadataTokens.EntityHandle(token);
+            if (handle.Kind != HandleKind.MemberReference)
+            {
+                return false;
+            }
+
+            var member = metadata.GetMemberReference((MemberReferenceHandle)handle);
+            if (member.GetKind() != MemberReferenceKind.Method ||
+                metadata.GetString(member.Name) != ".ctor" ||
+                member.Parent.Kind != HandleKind.TypeSpecification ||
+                !HasExactNullableConstructorSignature(metadata, member.Signature) ||
+                !TryReadTrustedNullableType(
+                    metadata,
+                    (TypeSpecificationHandle)member.Parent,
+                    out var nullableSignature,
+                    out var elementSignature))
+            {
+                return false;
+            }
+
+            var elementType = CreateCliType(elementSignature, enumTypes);
+            if (!IsExactConstructorAssignment(
+                    source.Type,
+                    elementType,
+                    source.Signature,
+                    elementSignature))
+            {
+                return false;
+            }
+
+            argument = new ConstructorArgument(
+                $"new {nullableSignature.Text}({source.Expression})",
+                CreateCliType(nullableSignature, enumTypes),
+                nullableSignature,
+                IsFoldedExpression: true);
+            return true;
+        }
+        catch (Exception exception) when (
+            exception is BadImageFormatException or ArgumentException or InvalidOperationException)
+        {
+            return false;
+        }
+    }
+
+    private static bool HasExactNullableConstructorSignature(
+        MetadataReader metadata,
+        BlobHandle signature)
+    {
+        var reader = metadata.GetBlobReader(signature);
+        return reader.Length == 5 &&
+               reader.ReadByte() == 0x20 && // HASTHIS | DEFAULT
+               reader.ReadByte() == 0x01 && // one parameter
+               reader.ReadByte() == 0x01 && // VOID
+               reader.ReadByte() == 0x13 && // VAR
+               reader.ReadByte() == 0x00 && // !0
+               reader.RemainingBytes == 0;
+    }
+
+    private static bool TryReadTrustedNullableType(
+        MetadataReader metadata,
+        TypeSpecificationHandle typeSpecification,
+        out SignatureTypeName nullableSignature,
+        out SignatureTypeName elementSignature)
+    {
+        nullableSignature = new SignatureTypeName(string.Empty);
+        elementSignature = new SignatureTypeName(string.Empty);
+
+        var specification = metadata.GetTypeSpecification(typeSpecification);
+        var reader = metadata.GetBlobReader(specification.Signature);
+        if (reader.Length is <= 0 or > MaxConstructorTypeSignatureBytes ||
+            reader.ReadByte() != 0x15 || // GENERICINST
+            reader.ReadByte() != 0x11) // VALUETYPE
+        {
+            return false;
+        }
+
+        if (!TryReadCanonicalTypeHandle(ref reader, out var nullableHandle) ||
+            nullableHandle.Kind != HandleKind.TypeReference ||
+            reader.ReadByte() != 0x01 || // one generic argument, canonical encoding
+            !TryReadNullableElementSignature(metadata, ref reader, out elementSignature) ||
+            reader.RemainingBytes != 0 ||
+            !IsTrustedSystemNullableReference(
+                metadata,
+                (TypeReferenceHandle)nullableHandle))
+        {
+            return false;
+        }
+
+        var nullableDefinition = SignatureTypeNameProvider.Instance.GetTypeFromReference(
+            metadata,
+            (TypeReferenceHandle)nullableHandle,
+            rawTypeKind: (byte)SignatureTypeKind.ValueType);
+        if (!nullableDefinition.IsExactNamedType ||
+            nullableDefinition.NominalHandle != nullableHandle ||
+            nullableDefinition.RawTypeKind != (byte)SignatureTypeKind.ValueType ||
+            nullableDefinition.SignatureKind != SignatureTypeKind.ValueType)
+        {
+            return false;
+        }
+
+        nullableSignature = SignatureTypeNameProvider.Instance.GetGenericInstantiation(
+            nullableDefinition,
+            [elementSignature]);
+        return nullableSignature.IsCanonicalGenericInstantiation &&
+               nullableSignature.GenericDefinitionHandle == nullableHandle &&
+               nullableSignature.GenericDefinitionRawTypeKind ==
+               (byte)SignatureTypeKind.ValueType &&
+               nullableSignature.GenericDefinitionSignatureKind ==
+               SignatureTypeKind.ValueType &&
+               AreSameConstructorSignature(nullableSignature, nullableSignature) &&
+               HasCanonicalLocalGenericDefinitions(metadata, nullableSignature);
+    }
+
+    private static bool TryReadNullableElementSignature(
+        MetadataReader metadata,
+        ref BlobReader reader,
+        out SignatureTypeName signature)
+    {
+        signature = new SignatureTypeName(string.Empty);
+        if (reader.RemainingBytes == 0)
+        {
+            return false;
+        }
+
+        var elementType = reader.ReadByte();
+        var primitiveType = elementType switch
+        {
+            0x02 => PrimitiveTypeCode.Boolean,
+            0x03 => PrimitiveTypeCode.Char,
+            0x04 => PrimitiveTypeCode.SByte,
+            0x05 => PrimitiveTypeCode.Byte,
+            0x06 => PrimitiveTypeCode.Int16,
+            0x07 => PrimitiveTypeCode.UInt16,
+            0x08 => PrimitiveTypeCode.Int32,
+            0x09 => PrimitiveTypeCode.UInt32,
+            0x0A => PrimitiveTypeCode.Int64,
+            0x0B => PrimitiveTypeCode.UInt64,
+            0x0C => PrimitiveTypeCode.Single,
+            0x0D => PrimitiveTypeCode.Double,
+            0x18 => PrimitiveTypeCode.IntPtr,
+            0x19 => PrimitiveTypeCode.UIntPtr,
+            _ => (PrimitiveTypeCode?)null
+        };
+        if (primitiveType is not null)
+        {
+            signature = SignatureTypeNameProvider.Instance.GetPrimitiveType(
+                primitiveType.Value);
+            return true;
+        }
+
+        if (elementType != 0x11) // VALUETYPE
+        {
+            return false;
+        }
+
+        if (!TryReadCanonicalTypeHandle(ref reader, out var handle) ||
+            handle.Kind != HandleKind.TypeDefinition)
+        {
+            return false;
+        }
+
+        var definitionHandle = (TypeDefinitionHandle)handle;
+        var definition = metadata.GetTypeDefinition(definitionHandle);
+        var attributes = definition.GetCustomAttributes();
+        if (!TryReadBoundedGenericAttributeName(
+                metadata,
+                definition.Name,
+                out var name) ||
+            !TryReadBoundedGenericAttributeName(
+                metadata,
+                definition.Namespace,
+                out _))
+        {
+            return false;
+        }
+
+        var typeAttributes = definition.Attributes;
+        if (!definition.GetDeclaringType().IsNil ||
+            definition.GetGenericParameters().Count != 0 ||
+            !HasTrustedNullableValueTypeBase(metadata, definition) ||
+            (typeAttributes & TypeAttributes.ClassSemanticsMask) == TypeAttributes.Interface ||
+            typeAttributes.HasFlag(TypeAttributes.Abstract) ||
+            !typeAttributes.HasFlag(TypeAttributes.Sealed) ||
+            typeAttributes.HasFlag(TypeAttributes.Import) ||
+            typeAttributes.HasFlag(TypeAttributes.WindowsRuntime) ||
+            name.Length == 0 ||
+            name.Contains('`') ||
+            attributes.Count > MaxGenericCustomAttributesPerTarget ||
+            HasCustomAttribute(
+                metadata,
+                attributes,
+                "System.Runtime.CompilerServices.IsByRefLikeAttribute"))
+        {
+            return false;
+        }
+
+        signature = SignatureTypeNameProvider.Instance.GetTypeFromDefinition(
+            metadata,
+            definitionHandle,
+            rawTypeKind: (byte)SignatureTypeKind.ValueType);
+        return signature.IsExactNamedType &&
+               signature.NominalHandle == definitionHandle &&
+               signature.RawTypeKind == (byte)SignatureTypeKind.ValueType &&
+               signature.SignatureKind == SignatureTypeKind.ValueType &&
+               signature.Text.Length <= MaxGenericAttributeTypeNameCharacters;
+    }
+
+    private static bool TryReadCanonicalTypeHandle(
+        ref BlobReader reader,
+        out EntityHandle handle)
+    {
+        var start = reader.Offset;
+        handle = reader.ReadTypeHandle();
+        var codedIndex = CodedIndex.TypeDefOrRefOrSpec(handle);
+        var expectedBytes = codedIndex switch
+        {
+            < 0x80 => 1,
+            < 0x4000 => 2,
+            _ => 4
+        };
+        return reader.Offset - start == expectedBytes;
+    }
+
+    private static bool HasTrustedNullableValueTypeBase(
+        MetadataReader metadata,
+        TypeDefinition definition)
+    {
+        if (definition.BaseType.Kind != HandleKind.TypeReference)
+        {
+            return false;
+        }
+
+        var reference = metadata.GetTypeReference(
+            (TypeReferenceHandle)definition.BaseType);
+        if (metadata.GetString(reference.Namespace) != "System" ||
+            metadata.GetString(reference.Name) != "ValueType" ||
+            reference.ResolutionScope.Kind != HandleKind.AssemblyReference)
+        {
+            return false;
+        }
+
+        var assembly = metadata.GetAssemblyReference(
+            (AssemblyReferenceHandle)reference.ResolutionScope);
+        var name = metadata.GetString(assembly.Name);
+        return name == "System.Runtime" &&
+               IsTrustedFrameworkAssembly(
+                   metadata,
+                   name,
+                   assembly.PublicKeyOrToken,
+                   assembly.Culture,
+                   assembly.Flags);
+    }
+
+    private static bool IsTrustedSystemNullableReference(
+        MetadataReader metadata,
+        TypeReferenceHandle handle)
+    {
+        var reference = metadata.GetTypeReference(handle);
+        if (metadata.GetString(reference.Namespace) != "System" ||
+            metadata.GetString(reference.Name) != "Nullable`1" ||
+            reference.ResolutionScope.Kind != HandleKind.AssemblyReference)
+        {
+            return false;
+        }
+
+        var assembly = metadata.GetAssemblyReference(
+            (AssemblyReferenceHandle)reference.ResolutionScope);
+        var name = metadata.GetString(assembly.Name);
+        return name == "System.Runtime" &&
+               IsTrustedFrameworkAssembly(
+                   metadata,
+                   name,
+                   assembly.PublicKeyOrToken,
+                   assembly.Culture,
+                   assembly.Flags);
     }
 
     private static bool TryRenderConstructorArgument(
