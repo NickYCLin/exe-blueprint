@@ -74,6 +74,105 @@ public sealed class CSharpSkeletonGeneratorTests
     }
 
     [Fact]
+    public async Task EscapesKeywordParameterNamesInDelegatesAndConstructors()
+    {
+        var artifact = CreateManagedArtifact("KeywordIdentifiers", []) with
+        {
+            Code = new CodeModel
+            {
+                Kind = "managed",
+                NamespaceCount = 1,
+                TypeCount = 2,
+                MethodCount = 2,
+                Types =
+                [
+                    new TypeModel
+                    {
+                        FullName = "KeywordIdentifiers.KeywordDelegate",
+                        Namespace = "KeywordIdentifiers",
+                        Name = "KeywordDelegate`1",
+                        Kind = "delegate",
+                        Accessibility = "public",
+                        GenericParameters = ["TStruct"],
+                        Methods =
+                        [
+                            new MethodModel
+                            {
+                                Name = "Invoke",
+                                Signature = "void Invoke(ref !0 this)",
+                                ReturnType = "void",
+                                Accessibility = "public",
+                                Parameters =
+                                [
+                                    new ParameterModel
+                                    {
+                                        Name = "this",
+                                        Type = "ref !0"
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    new TypeModel
+                    {
+                        FullName = "KeywordIdentifiers.RegexLike",
+                        Namespace = "KeywordIdentifiers",
+                        Name = "RegexLike",
+                        Kind = "class",
+                        Accessibility = "public",
+                        IsSealed = true,
+                        Methods =
+                        [
+                            new MethodModel
+                            {
+                                Name = ".ctor",
+                                Signature = "void .ctor(string string)",
+                                ReturnType = "void",
+                                Accessibility = "public",
+                                IsConstructor = true,
+                                HasBody = true,
+                                Parameters =
+                                [
+                                    new ParameterModel
+                                    {
+                                        Name = "string",
+                                        Type = "string"
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+        };
+        var document = new BlueprintDocument
+        {
+            Input = new InputDescriptor
+            {
+                Name = "keyword-identifiers",
+                Kind = "file",
+                SourcePath = "KeywordIdentifiers.dll",
+                FileCount = 1,
+                TotalBytes = 0
+            },
+            Summary = new BlueprintSummary(),
+            Files = [artifact]
+        };
+
+        var generated = CSharpSkeletonGenerator.Generate(document);
+        var source = Assert.Single(
+            generated,
+            file => file.RelativePath == "KeywordIdentifiers/KeywordIdentifiers.cs").Content;
+
+        Assert.Contains(
+            "public delegate void KeywordDelegate<TStruct>(ref TStruct @this);",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains("public RegexLike(string @string)", source, StringComparison.Ordinal);
+        await AssertGeneratedSolutionBuildsAsync(generated);
+    }
+
+    [Fact]
     public void EmitsWhitelistedConstructorInitializersAndReconstructedBodies()
     {
         var artifact = CreateManagedArtifact("ConstructorCases", []) with

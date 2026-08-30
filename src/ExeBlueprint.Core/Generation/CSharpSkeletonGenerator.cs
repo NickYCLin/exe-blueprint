@@ -19,8 +19,11 @@ public static class CSharpSkeletonGenerator
         "null", "object", "operator", "out", "override", "params", "private", "protected", "public",
         "readonly", "ref", "return", "sbyte", "sealed", "short", "sizeof", "stackalloc", "static",
         "string", "struct", "switch", "this", "throw", "true", "try", "typeof", "uint", "ulong",
-        "unchecked", "unsafe", "ushort", "using", "virtual", "void", "volatile", "while",
+        "unchecked", "unsafe", "ushort", "using", "virtual", "void", "volatile", "while"
+    };
 
+    private static readonly HashSet<string> CSharpGenericParameterKeywords = new(CSharpReservedKeywords, StringComparer.Ordinal)
+    {
         // Contextual keywords are escaped too. Several of them become grammar tokens specifically in
         // generic declarations or constraints (for example required, record, notnull and unmanaged).
         "_", "add", "alias", "allows", "and", "ascending", "assembly", "async", "await", "by", "closed",
@@ -1728,10 +1731,18 @@ public static class CSharpSkeletonGenerator
         return backtick < 0 ? name : name[..backtick];
     }
 
-    private static string SafeName(string name) => IsCompilerGenerated(name) ? $"@{name.Replace('<', '_').Replace('>', '_')}" : name;
+    private static string SafeName(string name)
+    {
+        if (IsCompilerGenerated(name))
+        {
+            return $"@{name.Replace('<', '_').Replace('>', '_')}";
+        }
+
+        return CSharpReservedKeywords.Contains(name) ? $"@{name}" : name;
+    }
 
     private static string FormatGenericParameterIdentifier(string name) =>
-        CSharpReservedKeywords.Contains(name) ? $"@{name}" : name;
+        CSharpGenericParameterKeywords.Contains(name) ? $"@{name}" : name;
 
     private static bool IsCompilerGenerated(string name) =>
         name.Contains('<', StringComparison.Ordinal) || name.Contains('>', StringComparison.Ordinal);
