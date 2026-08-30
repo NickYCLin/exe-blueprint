@@ -24,6 +24,7 @@ internal static class ManagedSymbolReader
     private const int MaxEnumFieldsToInspectAcrossAssembly = 100_000;
     private const int MaxConstructorInitializerArguments = 32;
     private const int MaxConstructorTypeSignatureBytes = 64;
+    private const int MaxConstructorLocalSignatureBytes = MaxConstructorTypeSignatureBytes + 2;
     private const int MaxAssemblyPublicKeyBytes = 4_096;
     private const int MaxGenericParametersPerOwner = 256;
     private const int MaxGenericConstraintsPerParameter = 256;
@@ -125,7 +126,10 @@ internal static class ManagedSymbolReader
                 var hasBody = method.RelativeVirtualAddress != 0;
                 var declaringName = fullName;
                 var il = hasBody ? TryReadIl(peReader, method) : null;
-                var localTypes = hasBody ? TryReadLocalTypes(peReader, method, enumTypes) : [];
+                StandaloneSignatureHandle localSignature = default;
+                var localTypes = hasBody
+                    ? TryReadLocalTypes(peReader, method, enumTypes, out localSignature)
+                    : [];
                 IReadOnlyList<ExceptionRegionInfo>? exceptionRegionResult = hasBody
                     ? TryReadExceptionRegions(peReader, metadata, method)
                     : [];
@@ -193,6 +197,7 @@ internal static class ManagedSymbolReader
                             reconstructionSignature,
                             genericParameterResult,
                             localTypes,
+                            localSignature,
                             exceptionRegions,
                             enumTypes);
                         if (constructor is not null)
@@ -712,8 +717,10 @@ internal static class ManagedSymbolReader
     private static IReadOnlyList<CliType> TryReadLocalTypes(
         PEReader peReader,
         MethodDefinition method,
-        EnumTypeCatalog enumTypes)
+        EnumTypeCatalog enumTypes,
+        out StandaloneSignatureHandle localSignature)
     {
+        localSignature = default;
         try
         {
             var body = peReader.GetMethodBody(method.RelativeVirtualAddress);
@@ -722,6 +729,7 @@ internal static class ManagedSymbolReader
                 return [];
             }
 
+            localSignature = body.LocalSignature;
             var metadata = peReader.GetMetadataReader();
             var signature = metadata.GetStandaloneSignature(body.LocalSignature);
             return signature
@@ -731,6 +739,7 @@ internal static class ManagedSymbolReader
         }
         catch (Exception exception) when (exception is BadImageFormatException or InvalidOperationException)
         {
+            localSignature = default;
             return [];
         }
     }
@@ -804,6 +813,7 @@ internal static class ManagedSymbolReader
         MethodReconstructionSignature signature,
         TypeGenericParameterReadResult genericParameterResult,
         IReadOnlyList<CliType> localTypes,
+        StandaloneSignatureHandle localSignature,
         IReadOnlyList<ExceptionRegionInfo> exceptionRegions,
         EnumTypeCatalog enumTypes)
     {
@@ -858,6 +868,7 @@ internal static class ManagedSymbolReader
 
         index++;
         var arguments = new List<ConstructorArgument>();
+        var foldedLocalSlots = new HashSet<int>();
         var currentParameterSignatures = currentConstructor.Parameters
             .Select(parameter => parameter.Signature)
             .ToArray();
@@ -896,6 +907,28 @@ internal static class ManagedSymbolReader
                 continue;
             }
 
+            if (name is "ldloca.s" or "ldloca")
+            {
+                if (arguments.Count >= MaxConstructorInitializerArguments ||
+                    !TryFoldDefaultNullableLocalArgument(
+                        metadata,
+                        enumTypes,
+                        il,
+                        rawInstructions,
+                        index,
+                        localSignature,
+                        out var nullableArgument,
+                        out var localSlot) ||
+                    !foldedLocalSlots.Add(localSlot))
+                {
+                    return null;
+                }
+
+                arguments.Add(nullableArgument);
+                index += 3;
+                continue;
+            }
+
             if (arguments.Count >= MaxConstructorInitializerArguments ||
                 !TryReadConstructorArgument(
                     metadata,
@@ -925,7 +958,11 @@ internal static class ManagedSymbolReader
                 rawInstructions,
                 callEndOffset,
                 il.Length) ||
-            ConstructorTailHasUnsafeBranches(il, rawInstructions, index + 1, callEndOffset))
+            ConstructorTailHasUnsafeBranches(il, rawInstructions, index + 1, callEndOffset) ||
+            ConstructorTailUsesFoldedLocal(
+                rawInstructions,
+                index + 1,
+                foldedLocalSlots))
         {
             return null;
         }
@@ -955,6 +992,11 @@ internal static class ManagedSymbolReader
             thisTarget = target.Definition;
         }
         else
+        {
+            return null;
+        }
+
+        if (foldedLocalSlots.Count > 0 && kind != "base")
         {
             return null;
         }
@@ -1674,6 +1716,178 @@ internal static class ManagedSymbolReader
         }
     }
 
+    private static bool TryFoldDefaultNullableLocalArgument(
+        MetadataReader metadata,
+        EnumTypeCatalog enumTypes,
+        byte[] il,
+        IReadOnlyList<IlInstruction> instructions,
+        int index,
+        StandaloneSignatureHandle localSignature,
+        out ConstructorArgument argument,
+        out int localSlot)
+    {
+        argument = default;
+        localSlot = -1;
+        if (localSignature.IsNil || index + 2 >= instructions.Count)
+        {
+            return false;
+        }
+
+        try
+        {
+            if (!TryGetInstructionName(instructions[index], out var addressName) ||
+                !TryReadConstructorLocalSlot(
+                    il,
+                    instructions[index],
+                    addressName,
+                    allowAddress: true,
+                    allowStore: false,
+                    out localSlot) ||
+                localSlot != 0 ||
+                !TryGetInstructionName(instructions[index + 1], out var initializeName) ||
+                initializeName != "initobj" ||
+                instructions[index + 1].OperandSize != 4 ||
+                !TryGetInstructionName(instructions[index + 2], out var loadName) ||
+                !TryReadConstructorLocalSlot(
+                    il,
+                    instructions[index + 2],
+                    loadName,
+                    allowAddress: false,
+                    allowStore: false,
+                    out var loadedSlot) ||
+                loadedSlot != localSlot)
+            {
+                return false;
+            }
+
+            var token = BinaryPrimitives.ReadInt32LittleEndian(
+                il.AsSpan(instructions[index + 1].OperandOffset, 4));
+            var handle = MetadataTokens.EntityHandle(token);
+            if (handle.Kind != HandleKind.TypeSpecification ||
+                !TryReadTrustedNullableType(
+                    metadata,
+                    (TypeSpecificationHandle)handle,
+                    out var initializedType,
+                    out _) ||
+                !TryReadTrustedNullableLocalSignature(
+                    metadata,
+                    localSignature,
+                    out var localType) ||
+                !AreSameConstructorSignature(localType, initializedType))
+            {
+                return false;
+            }
+
+            argument = new ConstructorArgument(
+                $"default({localType.Text})",
+                CreateCliType(localType, enumTypes),
+                localType,
+                IsFoldedExpression: true);
+            return true;
+        }
+        catch (Exception exception) when (
+            exception is BadImageFormatException or ArgumentException or InvalidOperationException)
+        {
+            argument = default;
+            localSlot = -1;
+            return false;
+        }
+    }
+
+    private static bool TryReadTrustedNullableLocalSignature(
+        MetadataReader metadata,
+        StandaloneSignatureHandle handle,
+        out SignatureTypeName nullableSignature)
+    {
+        nullableSignature = new SignatureTypeName(string.Empty);
+        var signature = metadata.GetStandaloneSignature(handle);
+        var reader = metadata.GetBlobReader(signature.Signature);
+        if (reader.Length is < 3 or > MaxConstructorLocalSignatureBytes ||
+            reader.ReadByte() != 0x07 || // LOCAL_SIG
+            reader.ReadByte() != 0x01 || // exactly one local, canonical encoding
+            reader.RemainingBytes == 0)
+        {
+            return false;
+        }
+
+        return TryReadTrustedNullableType(
+                   metadata,
+                   ref reader,
+                   out nullableSignature,
+                   out _) &&
+               reader.RemainingBytes == 0;
+    }
+
+    private static bool ConstructorTailUsesFoldedLocal(
+        IReadOnlyList<IlInstruction> instructions,
+        int startIndex,
+        IReadOnlySet<int> foldedLocalSlots)
+    {
+        if (foldedLocalSlots.Count == 0)
+        {
+            return false;
+        }
+
+        for (var index = startIndex; index < instructions.Count; index++)
+        {
+            if (!TryGetInstructionName(instructions[index], out var name))
+            {
+                return true;
+            }
+
+            if (IsConstructorLocalAccess(name))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsConstructorLocalAccess(string name) =>
+        name is
+            "ldloc.0" or "ldloc.1" or "ldloc.2" or "ldloc.3" or
+            "ldloc.s" or "ldloc" or "ldloca.s" or "ldloca" or
+            "stloc.0" or "stloc.1" or "stloc.2" or "stloc.3" or
+            "stloc.s" or "stloc";
+
+    private static bool TryReadConstructorLocalSlot(
+        byte[] il,
+        IlInstruction instruction,
+        string name,
+        bool allowAddress,
+        bool allowStore,
+        out int localSlot)
+    {
+        localSlot = name switch
+        {
+            "ldloc.0" when instruction.OperandSize == 0 => 0,
+            "ldloc.1" when instruction.OperandSize == 0 => 1,
+            "ldloc.2" when instruction.OperandSize == 0 => 2,
+            "ldloc.3" when instruction.OperandSize == 0 => 3,
+            "ldloc.s" when instruction.OperandSize == 1 => il[instruction.OperandOffset],
+            "ldloc" when instruction.OperandSize == 2 =>
+                BinaryPrimitives.ReadUInt16LittleEndian(
+                    il.AsSpan(instruction.OperandOffset, 2)),
+            "ldloca.s" when allowAddress && instruction.OperandSize == 1 =>
+                il[instruction.OperandOffset],
+            "ldloca" when allowAddress && instruction.OperandSize == 2 =>
+                BinaryPrimitives.ReadUInt16LittleEndian(
+                    il.AsSpan(instruction.OperandOffset, 2)),
+            "stloc.0" when allowStore && instruction.OperandSize == 0 => 0,
+            "stloc.1" when allowStore && instruction.OperandSize == 0 => 1,
+            "stloc.2" when allowStore && instruction.OperandSize == 0 => 2,
+            "stloc.3" when allowStore && instruction.OperandSize == 0 => 3,
+            "stloc.s" when allowStore && instruction.OperandSize == 1 =>
+                il[instruction.OperandOffset],
+            "stloc" when allowStore && instruction.OperandSize == 2 =>
+                BinaryPrimitives.ReadUInt16LittleEndian(
+                    il.AsSpan(instruction.OperandOffset, 2)),
+            _ => -1
+        };
+        return localSlot >= 0;
+    }
+
     private static bool TryFoldNullableConstructorArgument(
         MetadataReader metadata,
         EnumTypeCatalog enumTypes,
@@ -1761,7 +1975,24 @@ internal static class ManagedSymbolReader
 
         var specification = metadata.GetTypeSpecification(typeSpecification);
         var reader = metadata.GetBlobReader(specification.Signature);
-        if (reader.Length is <= 0 or > MaxConstructorTypeSignatureBytes ||
+        return reader.Length is > 0 and <= MaxConstructorTypeSignatureBytes &&
+               TryReadTrustedNullableType(
+                   metadata,
+                   ref reader,
+                   out nullableSignature,
+                   out elementSignature) &&
+               reader.RemainingBytes == 0;
+    }
+
+    private static bool TryReadTrustedNullableType(
+        MetadataReader metadata,
+        ref BlobReader reader,
+        out SignatureTypeName nullableSignature,
+        out SignatureTypeName elementSignature)
+    {
+        nullableSignature = new SignatureTypeName(string.Empty);
+        elementSignature = new SignatureTypeName(string.Empty);
+        if (reader.RemainingBytes < 2 ||
             reader.ReadByte() != 0x15 || // GENERICINST
             reader.ReadByte() != 0x11) // VALUETYPE
         {
@@ -1772,7 +2003,6 @@ internal static class ManagedSymbolReader
             nullableHandle.Kind != HandleKind.TypeReference ||
             reader.ReadByte() != 0x01 || // one generic argument, canonical encoding
             !TryReadNullableElementSignature(metadata, ref reader, out elementSignature) ||
-            reader.RemainingBytes != 0 ||
             !IsTrustedSystemNullableReference(
                 metadata,
                 (TypeReferenceHandle)nullableHandle))
@@ -2919,7 +3149,9 @@ internal static class ManagedSymbolReader
         MetadataReader metadata,
         byte[] il,
         MethodDefinitionHandle methodHandle,
-        IReadOnlyList<ExceptionRegionInfo>? exceptionRegions = null)
+        IReadOnlyList<ExceptionRegionInfo>? exceptionRegions = null,
+        StandaloneSignatureHandle localSignature = default,
+        bool requireBaseInitializer = true)
     {
         try
         {
@@ -2944,9 +3176,11 @@ internal static class ManagedSymbolReader
                     signature.ParameterTypes.Select(type => CreateCliType(type, enumTypes)).ToArray()),
                 genericParameterResult,
                 [],
+                localSignature,
                 exceptionRegions ?? [],
                 enumTypes);
-            return reconstruction is null || reconstruction.Initializer.Kind != "base"
+            return reconstruction is null ||
+                   (requireBaseInitializer && reconstruction.Initializer.Kind != "base")
                 ? null
                 : new ConstructorReconstructionTestResult(
                     reconstruction.Initializer,
