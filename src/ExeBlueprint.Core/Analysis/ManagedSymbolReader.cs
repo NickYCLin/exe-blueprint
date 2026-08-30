@@ -1928,13 +1928,16 @@ internal static class ManagedSymbolReader
     private sealed record CallInfo(
         string DeclaringType,
         CliType DeclaringCliType,
+        EntityHandle DeclaringHandle,
         string Name,
         int ParamCount,
         bool HasThis,
         CliType ReturnType,
         bool ReturnsVoid,
         IReadOnlyList<CliType> ParameterTypes,
-        IReadOnlyList<string> GenericArguments);
+        IReadOnlyList<string> GenericArguments,
+        int GenericParameterCount,
+        MethodAttributes? DefinitionAttributes);
 
     private const int MaxStructureDepth = 32;
 
@@ -2060,6 +2063,39 @@ internal static class ManagedSymbolReader
             enumTypes,
             isInstance ? new CliType("<test-instance>") : null,
             out _);
+    }
+
+    internal static IReadOnlyList<string>? ReconstructMethodForTest(
+        MetadataReader metadata,
+        byte[] il,
+        MethodDefinitionHandle methodHandle)
+    {
+        try
+        {
+            var enumTypes = ReadEnumTypeCatalog(metadata);
+            var method = metadata.GetMethodDefinition(methodHandle);
+            var signature = method.DecodeSignature(SignatureTypeNameProvider.Instance, null);
+            var isInstance = signature.Header.IsInstance &&
+                             !method.Attributes.HasFlag(MethodAttributes.Static);
+            var declaringType = method.GetDeclaringType();
+            return TryReconstructLinearBody(
+                metadata,
+                il,
+                isInstance,
+                ReadParameterNames(metadata, method),
+                signature.ParameterTypes.Select(type => CreateCliType(type, enumTypes)).ToArray(),
+                CreateCliType(signature.ReturnType, enumTypes),
+                localTypes: [],
+                exceptionRegions: [],
+                enumTypes,
+                isInstance ? CreateNominalCliType(metadata, enumTypes, declaringType) : null,
+                out _);
+        }
+        catch (Exception exception) when (
+            exception is BadImageFormatException or ArgumentException or InvalidOperationException)
+        {
+            return null;
+        }
     }
 
     internal sealed record ConstructorReconstructionTestResult(
@@ -4247,7 +4283,12 @@ internal static class ManagedSymbolReader
 
             case "call":
             case "callvirt":
-                return TryEmitCall(context, BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)), stack, statements);
+                return TryEmitCall(
+                    context,
+                    BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)),
+                    usesVirtualDispatch: name == "callvirt",
+                    stack,
+                    statements);
             case "newobj":
                 return TryEmitNewObject(context, BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)), stack);
 
@@ -5161,11 +5202,26 @@ internal static class ManagedSymbolReader
     private static bool IsGeneratedName(string name) =>
         name.StartsWith('<') || name.Contains(".<", StringComparison.Ordinal) || name.Contains("<>", StringComparison.Ordinal);
 
-    private static bool TryEmitCall(ReconContext context, int token, Stack<string> stack, List<string> statements)
+    private static bool TryEmitCall(
+        ReconContext context,
+        int token,
+        bool usesVirtualDispatch,
+        Stack<string> stack,
+        List<string> statements)
     {
         var metadata = context.Metadata;
         var info = ResolveCall(metadata, context.EnumTypes, token);
         if (info is null || info.Name is ".ctor" or ".cctor" || IsGeneratedName(info.Name))
+        {
+            return false;
+        }
+
+        if (usesVirtualDispatch && !info.HasThis)
+        {
+            return false;
+        }
+
+        if (info.GenericParameterCount != info.GenericArguments.Count)
         {
             return false;
         }
@@ -5203,12 +5259,25 @@ internal static class ManagedSymbolReader
 
         if (info.Name.StartsWith("op_", StringComparison.Ordinal))
         {
+            if (info.HasThis)
+            {
+                return false;
+            }
+
             return TryEmitOperator(context, info, args, stack);
         }
 
-        var target = info.HasThis
-            ? RenderInstanceCallTarget(context, receiver!, info.DeclaringType)
-            : info.DeclaringType;
+        var target = info.DeclaringType;
+        if (info.HasThis &&
+            !TryRenderInstanceCallTarget(
+                context,
+                receiver!,
+                info,
+                usesVirtualDispatch,
+                out target))
+        {
+            return false;
+        }
 
         if (info.Name.StartsWith("get_", StringComparison.Ordinal))
         {
@@ -5265,23 +5334,115 @@ internal static class ManagedSymbolReader
         return true;
     }
 
-    private static string RenderInstanceCallTarget(
+    private static bool TryRenderInstanceCallTarget(
         ReconContext context,
         string receiver,
-        string declaringType)
+        CallInfo info,
+        bool usesVirtualDispatch,
+        out string target)
     {
-        if (string.IsNullOrEmpty(declaringType) ||
-            IsGeneratedName(declaringType) ||
-            !IsPotentialInterfaceType(context.Metadata, declaringType) ||
-            !context.ExpressionTypes.TryGetValue(receiver, out var receiverType) ||
-            receiverType == declaringType)
+        target = receiver;
+        if (!usesVirtualDispatch && receiver == "this")
         {
-            return receiver;
+            if (!IsExactCurrentInstanceReceiver(context, receiver) ||
+                !TryClassifyThisCallOwner(
+                    context.Metadata,
+                    context.InstanceType,
+                    info.DeclaringHandle,
+                    out var isBaseCall))
+            {
+                return false;
+            }
+
+            if (isBaseCall)
+            {
+                if (info.DefinitionAttributes is null ||
+                    info.DefinitionAttributes.Value.HasFlag(MethodAttributes.Static) ||
+                    info.DefinitionAttributes.Value.HasFlag(MethodAttributes.Abstract) ||
+                    info.GenericParameterCount != 0 ||
+                    info.GenericArguments.Count != 0)
+                {
+                    return false;
+                }
+
+                target = "base";
+                return true;
+            }
+
+            if (info.DefinitionAttributes is null ||
+                (info.DefinitionAttributes.Value.HasFlag(MethodAttributes.Virtual) &&
+                 !info.DefinitionAttributes.Value.HasFlag(MethodAttributes.Final)))
+            {
+                return false;
+            }
+
+            return true;
+        }
+
+        if (!usesVirtualDispatch)
+        {
+            return false;
+        }
+
+        if (receiver == "this" && !IsExactCurrentInstanceReceiver(context, receiver))
+        {
+            return false;
+        }
+
+        if (string.IsNullOrEmpty(info.DeclaringType) ||
+            IsGeneratedName(info.DeclaringType) ||
+            !IsPotentialInterfaceType(context.Metadata, info.DeclaringType) ||
+            !context.ExpressionTypes.TryGetValue(receiver, out var receiverType) ||
+            receiverType.Text == info.DeclaringType)
+        {
+            return true;
         }
 
         // IL callvirt 會保留宣告 slot；C# 若直接用 concrete receiver，可能改綁到同名 public member。
         // 明確轉成 metadata declaring interface，保留 explicit interface dispatch、overload 與回傳型別。
-        return $"(({declaringType}){receiver})";
+        target = $"(({info.DeclaringType}){receiver})";
+        return true;
+    }
+
+    private static bool IsExactCurrentInstanceReceiver(ReconContext context, string receiver) =>
+        !context.AmbiguousExpressionTypes.Contains(receiver) &&
+        !context.ParameterNames.Values.Contains("this", StringComparer.Ordinal) &&
+        !context.LocalNames.Values.Contains("this", StringComparer.Ordinal) &&
+        context.InstanceType is not null &&
+        context.ExpressionTypes.TryGetValue(receiver, out var receiverType) &&
+        IsSameCliType(receiverType, context.InstanceType);
+
+    private static bool TryClassifyThisCallOwner(
+        MetadataReader metadata,
+        CliType? instanceType,
+        EntityHandle declaringHandle,
+        out bool isBaseCall)
+    {
+        isBaseCall = false;
+        if (instanceType is null ||
+            !instanceType.IsExactNamedType ||
+            instanceType.NominalHandle.Kind != HandleKind.TypeDefinition ||
+            declaringHandle.IsNil)
+        {
+            return false;
+        }
+
+        var current = (TypeDefinitionHandle)instanceType.NominalHandle;
+        if (declaringHandle == current)
+        {
+            return true;
+        }
+
+        var baseType = metadata.GetTypeDefinition(current).BaseType;
+        if (baseType.Kind == HandleKind.TypeDefinition &&
+            declaringHandle.Kind == HandleKind.TypeDefinition &&
+            baseType == declaringHandle)
+        {
+            isBaseCall = true;
+            return true;
+        }
+
+        return false;
     }
 
     private static bool IsPotentialInterfaceType(MetadataReader metadata, string type)
@@ -5720,16 +5881,25 @@ internal static class ManagedSymbolReader
                 var method = metadata.GetMethodDefinition((MethodDefinitionHandle)handle);
                 var methodSignature = method.DecodeSignature(SignatureTypeNameProvider.Instance, null);
                 var methodDeclaringType = method.GetDeclaringType();
+                if (methodSignature.GenericParameterCount != method.GetGenericParameters().Count ||
+                    methodSignature.Header.IsInstance == method.Attributes.HasFlag(MethodAttributes.Static))
+                {
+                    return null;
+                }
+
                 return new CallInfo(
                     GetTypeName(metadata, methodDeclaringType) ?? string.Empty,
                     CreateNominalCliType(metadata, enumTypes, methodDeclaringType),
+                    methodDeclaringType,
                     metadata.GetString(method.Name),
                     methodSignature.ParameterTypes.Length,
                     methodSignature.Header.IsInstance,
                     CreateCliType(methodSignature.ReturnType, enumTypes),
-                    methodSignature.ReturnType.Text == "void",
+                    methodSignature.ReturnType.PrimitiveType == PrimitiveTypeCode.Void,
                     methodSignature.ParameterTypes.Select(type => CreateCliType(type, enumTypes)).ToArray(),
-                    []);
+                    [],
+                    methodSignature.GenericParameterCount,
+                    method.Attributes);
 
             case HandleKind.MemberReference:
                 var member = metadata.GetMemberReference((MemberReferenceHandle)handle);
@@ -5742,13 +5912,16 @@ internal static class ManagedSymbolReader
                 return new CallInfo(
                     GetTypeName(metadata, member.Parent) ?? string.Empty,
                     CreateNominalCliType(metadata, enumTypes, member.Parent),
+                    member.Parent,
                     metadata.GetString(member.Name),
                     memberSignature.ParameterTypes.Length,
                     memberSignature.Header.IsInstance,
                     CreateCliType(memberSignature.ReturnType, enumTypes),
-                    memberSignature.ReturnType.Text == "void",
+                    memberSignature.ReturnType.PrimitiveType == PrimitiveTypeCode.Void,
                     memberSignature.ParameterTypes.Select(type => CreateCliType(type, enumTypes)).ToArray(),
-                    []);
+                    [],
+                    memberSignature.GenericParameterCount,
+                    DefinitionAttributes: null);
 
             case HandleKind.MethodSpecification:
                 var spec = metadata.GetMethodSpecification((MethodSpecificationHandle)handle);
@@ -5759,7 +5932,16 @@ internal static class ManagedSymbolReader
                 }
 
                 var decodedGenericArguments = spec.DecodeSignature(SignatureTypeNameProvider.Instance, null);
-                if (decodedGenericArguments.Any(type => type.IsRestrictedGenericArgument))
+                if (resolved.GenericParameterCount <= 0 ||
+                    decodedGenericArguments.Length != resolved.GenericParameterCount ||
+                    decodedGenericArguments.Length > MaxGenericParametersPerOwner ||
+                    decodedGenericArguments.Any(type =>
+                        type.OuterCustomModifiers.Length != 0 ||
+                        type.HasNestedCustomModifiers ||
+                        type.IsRestrictedGenericArgument ||
+                        type.PrimitiveType is PrimitiveTypeCode.Void or PrimitiveTypeCode.TypedReference ||
+                        (type.Text == "nint" && type.PrimitiveType is null) ||
+                        (type.IsExactNamedType && IsPrimitiveAliasName(type.Text))))
                 {
                     return null;
                 }
