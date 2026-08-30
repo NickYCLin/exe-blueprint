@@ -9,6 +9,7 @@ namespace ExeBlueprint.Generation;
 public static class CSharpSkeletonGenerator
 {
     private const int MaxIlLinesInBody = 40;
+    private const int MaxIlCommentCharacters = 4_096;
     private const int MaxGenericConstraintDependencyDepth = 64;
     private static readonly IEqualityComparer<TypeModel> TypeModelIdentityComparer =
         ReferenceEqualityComparer.Instance;
@@ -426,7 +427,7 @@ public static class CSharpSkeletonGenerator
 
         if (method.IsConstructor)
         {
-            if (type.IsStatic)
+            if (!IsCanonicalInstanceConstructor(type, method))
             {
                 return;
             }
@@ -437,6 +438,10 @@ public static class CSharpSkeletonGenerator
             if (method.BodyReconstructed)
             {
                 AppendReconstructedBody(builder, type, method, body + "    ");
+            }
+            else
+            {
+                AppendUnreconstructedBody(builder, method, body + "    ");
             }
 
             builder.AppendLine($"{body}}}");
@@ -477,9 +482,7 @@ public static class CSharpSkeletonGenerator
         }
         else
         {
-            AppendIlComment(builder, method, body + "    ");
-            builder.AppendLine($"{body}    // TODO：以上 IL 尚未還原成 C#，暫時擲出例外。");
-            builder.AppendLine($"{body}    throw new global::System.NotImplementedException();");
+            AppendUnreconstructedBody(builder, method, body + "    ");
         }
 
         builder.AppendLine($"{body}}}");
@@ -497,6 +500,17 @@ public static class CSharpSkeletonGenerator
             HumanizeBodyStatement(argument, type.GenericParameters, method.GenericParameters));
         return $" : {initializer.Kind}({string.Join(", ", arguments)})";
     }
+
+    private static bool IsCanonicalInstanceConstructor(TypeModel type, MethodModel method) =>
+        method.Name == ".ctor" &&
+        method.IsConstructor &&
+        !method.IsStatic &&
+        !type.IsStatic &&
+        type.Kind is "class" or "struct" &&
+        !method.IsAbstract &&
+        !method.IsVirtual &&
+        method.GenericParameters.Count == 0 &&
+        method.ReturnType == "void";
 
     private static void AppendReconstructedBody(
         StringBuilder builder,
@@ -524,13 +538,50 @@ public static class CSharpSkeletonGenerator
         builder.AppendLine($"{indent}// 原始 IL（供還原方法體參考）：");
         foreach (var instruction in method.Il.Take(MaxIlLinesInBody))
         {
-            builder.AppendLine($"{indent}// {instruction}");
+            builder.AppendLine($"{indent}// {SanitizeIlComment(instruction)}");
         }
 
         if (method.Il.Count > MaxIlLinesInBody || method.IlTruncated)
         {
             builder.AppendLine($"{indent}// …其餘 IL 請看 blueprint.json。");
         }
+    }
+
+    private static void AppendUnreconstructedBody(
+        StringBuilder builder,
+        MethodModel method,
+        string indent)
+    {
+        AppendIlComment(builder, method, indent);
+        builder.AppendLine($"{indent}// TODO：以上 IL 尚未還原成 C#，暫時擲出例外。");
+        builder.AppendLine($"{indent}throw new global::System.NotImplementedException();");
+    }
+
+    private static string SanitizeIlComment(string? instruction)
+    {
+        instruction ??= "<null>";
+        var sanitized = new StringBuilder(Math.Min(instruction.Length, MaxIlCommentCharacters));
+        foreach (var character in instruction)
+        {
+            var escape = char.IsControl(character) || character is '\u2028' or '\u2029';
+            var requiredCharacters = escape ? 6 : 1;
+            if (sanitized.Length + requiredCharacters > MaxIlCommentCharacters - 1)
+            {
+                sanitized.Append('…');
+                break;
+            }
+
+            if (escape)
+            {
+                sanitized.Append($"\\u{(int)character:X4}");
+            }
+            else
+            {
+                sanitized.Append(character);
+            }
+        }
+
+        return sanitized.ToString();
     }
 
     private static string BuildMethodModifiers(TypeModel type, MethodModel method)

@@ -657,7 +657,8 @@ public sealed class CSharpSkeletonGeneratorTests
                                     Kind = "this",
                                     Arguments = ["default(!0)"]
                                 },
-                                Body = ["throw new global::System.Exception();"]
+                                Body = ["throw new global::System.Exception();"],
+                                Il = ["IL_0000: ldarg.0", "IL_0001: ret"]
                             },
                             new MethodModel
                             {
@@ -715,6 +716,11 @@ public sealed class CSharpSkeletonGeneratorTests
         Assert.Contains(
             "protected GenericOwner(int value) : this(default(T))\n" +
             "    {\n" +
+            "        // 原始 IL（供還原方法體參考）：\n" +
+            "        // IL_0000: ldarg.0\n" +
+            "        // IL_0001: ret\n" +
+            "        // TODO：以上 IL 尚未還原成 C#，暫時擲出例外。\n" +
+            "        throw new global::System.NotImplementedException();\n" +
             "    }",
             source,
             StringComparison.Ordinal);
@@ -726,6 +732,141 @@ public sealed class CSharpSkeletonGeneratorTests
             StringComparison.Ordinal);
         Assert.DoesNotContain("throw new global::System.Exception();", source, StringComparison.Ordinal);
         Assert.DoesNotContain("global::System.Console.WriteLine", source, StringComparison.Ordinal);
+        Assert.Equal(
+            1,
+            source.Split("throw new global::System.NotImplementedException();", StringSplitOptions.None).Length - 1);
+    }
+
+    [Fact]
+    public void SanitizesAndBoundsUnreconstructedConstructorIlComments()
+    {
+        var artifact = CreateManagedArtifact("ConstructorComments", []) with
+        {
+            Code = new CodeModel
+            {
+                Kind = "managed",
+                NamespaceCount = 1,
+                TypeCount = 1,
+                Types =
+                [
+                    new TypeModel
+                    {
+                        FullName = "ConstructorComments.Owner",
+                        Namespace = "ConstructorComments",
+                        Name = "Owner",
+                        Kind = "class",
+                        Accessibility = "public",
+                        Methods =
+                        [
+                            new MethodModel
+                            {
+                                Name = ".ctor",
+                                Signature = "void .ctor()",
+                                ReturnType = "void",
+                                Accessibility = "public",
+                                IsConstructor = true,
+                                Il =
+                                [
+                                    "IL_0000: token\r\npublic injected",
+                                    "IL_0001: token\u0085next",
+                                    "IL_0002: token\0\u007F\u009F\u2028\u2029next",
+                                    "IL_0003: " + new string('A', 5_000),
+                                    .. Enumerable.Range(4, 42).Select(index => $"IL_{index:X4}: nop")
+                                ],
+                                IlTruncated = true
+                            }
+                        ]
+                    }
+                ]
+            }
+        };
+        var source = Assert.Single(
+            CSharpSkeletonGenerator.Generate(CreateDocument(artifact)),
+            file => file.RelativePath == "ConstructorComments/ConstructorComments.cs")
+            .Content
+            .ReplaceLineEndings("\n");
+
+        Assert.Contains("IL_0000: token\\u000D\\u000Apublic injected", source, StringComparison.Ordinal);
+        Assert.Contains("IL_0001: token\\u0085next", source, StringComparison.Ordinal);
+        Assert.Contains(
+            "IL_0002: token\\u0000\\u007F\\u009F\\u2028\\u2029next",
+            source,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(source.Split('\n'), line => line.TrimStart().StartsWith("public injected", StringComparison.Ordinal));
+        Assert.DoesNotContain('\u0085', source);
+        Assert.DoesNotContain('\u2028', source);
+        Assert.DoesNotContain('\u2029', source);
+        var longLine = Assert.Single(source.Split('\n'), line => line.Contains(new string('A', 32), StringComparison.Ordinal));
+        Assert.True(longLine.Length <= 4_110, $"IL comment line 長度未受限：{longLine.Length}");
+        Assert.EndsWith("…", longLine, StringComparison.Ordinal);
+        Assert.Contains("IL_0027: nop", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("IL_0028: nop", source, StringComparison.Ordinal);
+        Assert.Equal(
+            1,
+            source.Split("// …其餘 IL 請看 blueprint.json。", StringSplitOptions.None).Length - 1);
+        Assert.Contains("throw new global::System.NotImplementedException();", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void OmitsStaticAndNoncanonicalConstructorModels()
+    {
+        static MethodModel Constructor(
+            string name,
+            string marker,
+            bool isStatic = false,
+            string returnType = "void",
+            IReadOnlyList<string>? genericParameters = null) =>
+            new()
+            {
+                Name = name,
+                Signature = $"{returnType} {name}()",
+                ReturnType = returnType,
+                Accessibility = "public",
+                IsStatic = isStatic,
+                IsConstructor = true,
+                GenericParameters = genericParameters ?? [],
+                Il = [$"IL_0000: {marker}"]
+            };
+
+        var artifact = CreateManagedArtifact("ConstructorGuards", []) with
+        {
+            Code = new CodeModel
+            {
+                Kind = "managed",
+                NamespaceCount = 1,
+                TypeCount = 1,
+                Types =
+                [
+                    new TypeModel
+                    {
+                        FullName = "ConstructorGuards.Owner",
+                        Namespace = "ConstructorGuards",
+                        Name = "Owner",
+                        Kind = "class",
+                        Accessibility = "public",
+                        Methods =
+                        [
+                            Constructor(".cctor", "static-marker", isStatic: true),
+                            Constructor("Factory", "wrong-name-marker"),
+                            Constructor(".ctor", "static-instance-marker", isStatic: true),
+                            Constructor(".ctor", "generic-marker", genericParameters: ["T"]),
+                            Constructor(".ctor", "nonvoid-marker", returnType: "int"),
+                            Constructor(".ctor", "valid-marker")
+                        ]
+                    }
+                ]
+            }
+        };
+        var source = Assert.Single(
+            CSharpSkeletonGenerator.Generate(CreateDocument(artifact)),
+            file => file.RelativePath == "ConstructorGuards/ConstructorGuards.cs").Content;
+
+        Assert.DoesNotContain("static-marker", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("wrong-name-marker", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("static-instance-marker", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("generic-marker", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("nonvoid-marker", source, StringComparison.Ordinal);
+        Assert.Contains("valid-marker", source, StringComparison.Ordinal);
     }
 
     [Fact]
