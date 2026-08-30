@@ -289,11 +289,55 @@ public sealed class IlDecoderSafetyTests
         }
     }
 
+    [Fact]
+    public async Task ProductionReadRejectsRawIlAboveConfiguredLimitWithoutPartialEvidence()
+    {
+        const int targetToken = 0x06000001;
+        var oversizedCall = BuildCall(
+            targetToken,
+            includeRet: true,
+            malformedSuffix: false,
+            nopCount: ManagedSymbolReader.MaxRawIlBytes - 5);
+        var controlCall = BuildCall(
+            targetToken,
+            includeRet: true,
+            malformedSuffix: false);
+        Assert.Equal(ManagedSymbolReader.MaxRawIlBytes + 1, oversizedCall.Length);
+
+        using var assembly = CreateProbeAssembly(oversizedCall, controlCall);
+        var code = await ManagedSymbolReader.TryReadAsync(
+            assembly.Path,
+            CancellationToken.None);
+        var probe = GetMethod(code, "Probe");
+        var control = GetMethod(code, "Control");
+
+        Assert.True(code!.Truncated);
+        Assert.True(probe.IlTruncated);
+        Assert.False(probe.BodyReconstructed);
+        Assert.Empty(probe.Il);
+        Assert.DoesNotContain(
+            code.CallGraph,
+            edge => edge.Caller == "Tests.Probe.Probe");
+
+        Assert.False(control.IlTruncated);
+        Assert.True(control.BodyReconstructed);
+        Assert.Equal(2, control.Il.Count);
+        Assert.Single(
+            code.CallGraph,
+            edge => edge.Caller == "Tests.Probe.Control"
+                && edge.Callee == "Tests.Probe.Target");
+    }
+
     private static MethodModel GetProbe(CodeModel? code)
+    {
+        return GetMethod(code, "Probe");
+    }
+
+    private static MethodModel GetMethod(CodeModel? code, string methodName)
     {
         Assert.NotNull(code);
         var type = Assert.Single(code.Types, type => type.FullName == "Tests.Probe");
-        return Assert.Single(type.Methods, method => method.Name == "Probe");
+        return Assert.Single(type.Methods, method => method.Name == methodName);
     }
 
     private static byte[] BuildSwitchBody(params int[] targetCounts)
@@ -359,7 +403,9 @@ public sealed class IlDecoderSafetyTests
         return [.. bytes];
     }
 
-    private static TemporaryAssembly CreateProbeAssembly(byte[] probeIl)
+    private static TemporaryAssembly CreateProbeAssembly(
+        byte[] probeIl,
+        byte[]? controlIl = null)
     {
         var metadata = new MetadataBuilder();
         metadata.AddModule(
@@ -422,6 +468,16 @@ public sealed class IlDecoderSafetyTests
         var probeBody = bodies.AddMethodBody(
             new InstructionEncoder(probeInstructions),
             maxStack: 8);
+        var controlBody = 0;
+        if (controlIl is not null)
+        {
+            var controlInstructions = new BlobBuilder();
+            controlInstructions.WriteBytes(controlIl);
+            controlBody = bodies.AddMethodBody(
+                new InstructionEncoder(controlInstructions),
+                maxStack: 8);
+        }
+
         var signature = new BlobBuilder();
         signature.WriteByte(0x00); // DEFAULT
         signature.WriteByte(0x00); // zero parameters
@@ -441,6 +497,16 @@ public sealed class IlDecoderSafetyTests
             signatureHandle,
             probeBody,
             MetadataTokens.ParameterHandle(1));
+        if (controlIl is not null)
+        {
+            metadata.AddMethodDefinition(
+                MethodAttributes.Public | MethodAttributes.Static | MethodAttributes.HideBySig,
+                MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                metadata.GetOrAddString("Control"),
+                signatureHandle,
+                controlBody,
+                MetadataTokens.ParameterHandle(1));
+        }
 
         var peBuilder = new ManagedPEBuilder(
             new PEHeaderBuilder(

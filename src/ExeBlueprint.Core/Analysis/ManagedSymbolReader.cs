@@ -22,6 +22,7 @@ internal static class ManagedSymbolReader
     private const int MaxCallEdges = 50_000;
     private const int MaxIlInstructions = 400;
     private const int MaxIlSwitchTargets = 4_096;
+    internal const int MaxRawIlBytes = 32 * 1_024;
     private const int MaxUserStringHeapBytes = 0x0100_0000;
     private const int MaxResolvedUserStrings = 65_536;
     private const int MaxUserStringCharacters = 4_096;
@@ -756,6 +757,11 @@ internal static class ManagedSymbolReader
     {
         try
         {
+            if (body.GetILReader().Length > MaxRawIlBytes)
+            {
+                return null;
+            }
+
             return body.GetILBytes();
         }
         catch (Exception exception) when (exception is BadImageFormatException or InvalidOperationException)
