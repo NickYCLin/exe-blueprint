@@ -354,9 +354,7 @@ public static class CSharpSkeletonGenerator
             }
         }
 
-        var nestedTypes = nestedTypesByDeclaringType.TryGetValue(type.FullName, out var children)
-            ? children
-            : [];
+        var nestedTypes = GetNestedTypesForOwner(type, nestedTypesByDeclaringType);
         if ((wroteMember || methods.Length > 0) && nestedTypes.Length > 0)
         {
             builder.AppendLine();
@@ -787,8 +785,8 @@ public static class CSharpSkeletonGenerator
                 return false;
             }
 
-            return nestedTypesByDeclaringType.TryGetValue(type.FullName, out var children) &&
-                children.Any(child => RequiresUnsafeContextInTree(
+            return GetNestedTypesForOwner(type, nestedTypesByDeclaringType)
+                .Any(child => RequiresUnsafeContextInTree(
                     child,
                     nestedTypesByDeclaringType,
                     activeTypes));
@@ -805,6 +803,26 @@ public static class CSharpSkeletonGenerator
         method.Parameters.Any(parameter => RequiresUnsafeContext(parameter.Type));
 
     private static bool RequiresUnsafeContext(string typeName) => typeName.Contains('*');
+
+    private static TypeModel[] GetNestedTypesForOwner(
+        TypeModel owner,
+        IReadOnlyDictionary<string, TypeModel[]> nestedTypesByDeclaringType)
+    {
+        if (!nestedTypesByDeclaringType.TryGetValue(owner.FullName, out var candidates))
+        {
+            return [];
+        }
+
+        return candidates
+            .Where(candidate =>
+                candidate.InheritedGenericParameterCount == owner.GenericParameters.Count &&
+                candidate.InheritedGenericParameterCount >= 0 &&
+                candidate.GenericParameters.Count >= candidate.InheritedGenericParameterCount &&
+                candidate.GenericParameters
+                    .Take(candidate.InheritedGenericParameterCount)
+                    .SequenceEqual(owner.GenericParameters, StringComparer.Ordinal))
+            .ToArray();
+    }
 
     private static void AppendConstrainedDeclaration(
         StringBuilder builder,

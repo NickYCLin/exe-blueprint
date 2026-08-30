@@ -173,6 +173,86 @@ public sealed class CSharpSkeletonGeneratorTests
     }
 
     [Fact]
+    public async Task AttachesNestedTypeOnlyToExactGenericOwnerScope()
+    {
+        var artifact = CreateManagedArtifact("NestedOwnerScope", []) with
+        {
+            Code = new CodeModel
+            {
+                Kind = "managed",
+                NamespaceCount = 1,
+                TypeCount = 3,
+                Types =
+                [
+                    new TypeModel
+                    {
+                        FullName = "NestedOwnerScope.Owner",
+                        Namespace = "NestedOwnerScope",
+                        Name = "Owner",
+                        Kind = "class",
+                        Accessibility = "public"
+                    },
+                    new TypeModel
+                    {
+                        FullName = "NestedOwnerScope.Owner",
+                        Namespace = "NestedOwnerScope",
+                        Name = "Owner`1",
+                        Kind = "class",
+                        Accessibility = "public",
+                        GenericParameters = ["T"]
+                    },
+                    new TypeModel
+                    {
+                        FullName = "NestedOwnerScope.Owner.Child",
+                        Namespace = "NestedOwnerScope",
+                        Name = "Child",
+                        Kind = "class",
+                        Accessibility = "public",
+                        IsNested = true,
+                        DeclaringType = "NestedOwnerScope.Owner",
+                        InheritedGenericParameterCount = 1,
+                        GenericParameters = ["T"],
+                        Fields =
+                        [
+                            new FieldModel
+                            {
+                                Name = "Value",
+                                Type = "!0",
+                                Accessibility = "public"
+                            }
+                        ]
+                    }
+                ]
+            }
+        };
+        var document = new BlueprintDocument
+        {
+            Input = new InputDescriptor
+            {
+                Name = "nested-owner-scope",
+                Kind = "file",
+                SourcePath = "NestedOwnerScope.dll",
+                FileCount = 1,
+                TotalBytes = 0
+            },
+            Summary = new BlueprintSummary(),
+            Files = [artifact]
+        };
+
+        var generated = CSharpSkeletonGenerator.Generate(document);
+        var source = Assert.Single(
+            generated,
+            file => file.RelativePath == "NestedOwnerScope/NestedOwnerScope.cs").Content;
+
+        Assert.Equal(1, source.Split("class Child", StringSplitOptions.None).Length - 1);
+        Assert.Contains(
+            "public class Owner<T>\n{\n    public class Child\n    {\n        public T Value = default!;",
+            source.ReplaceLineEndings("\n"),
+            StringComparison.Ordinal);
+        await AssertGeneratedSolutionBuildsAsync(generated);
+    }
+
+    [Fact]
     public void EmitsWhitelistedConstructorInitializersAndReconstructedBodies()
     {
         var artifact = CreateManagedArtifact("ConstructorCases", []) with
