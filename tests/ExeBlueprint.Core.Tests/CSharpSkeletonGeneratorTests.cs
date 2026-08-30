@@ -256,6 +256,36 @@ public sealed class CSharpSkeletonGeneratorTests
     }
 
     [Fact]
+    public async Task GeneratedCliStackCoercionSubsetBuildsInRelease()
+    {
+        var analyzed = await new BlueprintAnalyzer().AnalyzeAsync(typeof(CliStackCoercionFixture).Assembly.Location);
+        var artifact = Assert.Single(analyzed.Files);
+        var includedTypes = new HashSet<string>(StringComparer.Ordinal)
+        {
+            typeof(CliStackCoercionFixture).FullName!,
+            typeof(Int32StackCoercionEnum).FullName!
+        };
+        var types = artifact.Code!.Types
+            .Where(type => includedTypes.Contains(type.FullName))
+            .ToArray();
+        Assert.Equal(includedTypes.Count, types.Length);
+        var filteredArtifact = artifact with
+        {
+            ManagedReferences = [],
+            Code = artifact.Code with
+            {
+                NamespaceCount = 1,
+                TypeCount = types.Length,
+                MethodCount = types.Sum(type => type.Methods.Count),
+                Types = types
+            }
+        };
+        var generatedFiles = CSharpSkeletonGenerator.Generate(analyzed with { Files = [filteredArtifact] });
+
+        await AssertGeneratedSolutionBuildsAsync(generatedFiles);
+    }
+
+    [Fact]
     public async Task PreservesGenericInterfacesWithoutEmittingCompilerGeneratedTypeSegments()
     {
         var assemblyPath = typeof(GenericInterfaceFixture<>).Assembly.Location;

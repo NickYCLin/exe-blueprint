@@ -1,3 +1,5 @@
+using System.Buffers.Binary;
+using System.Reflection;
 using System.Reflection.Metadata;
 using System.Reflection.PortableExecutable;
 using ExeBlueprint.Analysis;
@@ -5,7 +7,7 @@ using ExeBlueprint.Analysis;
 namespace ExeBlueprint.Core.Tests;
 
 // 用手工組出的 IL bytes 驗證控制流程還原，不依賴自我組件剛好有對應形狀。
-// 這些 IL 只用區域變數、參數、算式與分支，不碰任何 metadata token。
+// 多數 IL 只用區域變數、參數、算式與分支；typed field target 另使用本測試 assembly 的真實 token。
 public sealed class IlBodyReconstructionTests
 {
     [Fact]
@@ -28,11 +30,16 @@ public sealed class IlBodyReconstructionTests
             0x2A              // ret
         ];
 
-        var body = Reconstruct(il, isInstance: false, returnType: "int");
+        var body = Reconstruct(
+            il,
+            isInstance: false,
+            returnType: "int",
+            localTypes: ["int"],
+            parameterTypes: ["int"]);
 
         Assert.NotNull(body);
         Assert.Equal(
-            ["var v0 = 0;", "while (v0 < arg0)", "{", "    v0 = (v0 + 1);", "}", "return v0;"],
+            ["int v0 = 0;", "while (v0 < arg0)", "{", "    v0 = (v0 + 1);", "}", "return v0;"],
             body);
     }
 
@@ -55,11 +62,16 @@ public sealed class IlBodyReconstructionTests
             0x2A        // ret
         ];
 
-        var body = Reconstruct(il, isInstance: false, returnType: "int");
+        var body = Reconstruct(
+            il,
+            isInstance: false,
+            returnType: "int",
+            localTypes: ["int"],
+            parameterTypes: ["int"]);
 
         Assert.NotNull(body);
         Assert.Equal(
-            ["var v0 = 0;", "do", "{", "    v0 = (v0 + 1);", "} while (v0 < arg0);", "return v0;"],
+            ["int v0 = 0;", "do", "{", "    v0 = (v0 + 1);", "} while (v0 < arg0);", "return v0;"],
             body);
     }
 
@@ -75,9 +87,14 @@ public sealed class IlBodyReconstructionTests
             0x2A        // IL_0005 ret
         ];
 
-        var body = Reconstruct(il, isInstance: false, returnType: "int");
+        var body = Reconstruct(
+            il,
+            isInstance: false,
+            returnType: "int",
+            localTypes: ["int"],
+            parameterTypes: ["int"]);
 
-        Assert.Equal(["var v0 = arg0;", "return v0;"], body);
+        Assert.Equal(["int v0 = arg0;", "return v0;"], body);
     }
 
     [Fact]
@@ -276,30 +293,30 @@ public sealed class IlBodyReconstructionTests
                 isInstance: false,
                 returnType: "bool",
                 parameterTypes: ["double"])!);
-        Assert.Equal("return !((arg0 < 0));", inverted);
+        Assert.Equal("return !((arg0 < 0.0));", inverted);
         Assert.DoesNotContain(">=", inverted, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void CastsIntegerExpressionReturnedAsEnum()
+    public void RejectsIntegerExpressionsReturnedAsUnverifiedEnums()
     {
         byte[] il = [0x19, 0x2A]; // ldc.i4.3; ret
         byte[] converted = [0x17, 0x6A, 0x2A]; // ldc.i4.1; conv.i8; ret
         byte[] argument = [0x02, 0x2A]; // ldarg.0; ret
 
-        Assert.Equal(
-            ["return unchecked((System.Reflection.FieldAttributes)3);"],
-            Reconstruct(il, isInstance: false, returnType: "System.Reflection.FieldAttributes"));
-        Assert.Equal(
-            ["return unchecked((Example.LongEnum)(long)(1));"],
-            Reconstruct(converted, isInstance: false, returnType: "Example.LongEnum"));
-        Assert.Equal(
-            ["return unchecked((System.Reflection.FieldAttributes)arg0);"],
-            Reconstruct(
-                argument,
-                isInstance: false,
-                returnType: "System.Reflection.FieldAttributes",
-                parameterTypes: ["int"]));
+        Assert.Null(Reconstruct(
+            il,
+            isInstance: false,
+            returnType: "System.Reflection.FieldAttributes"));
+        Assert.Null(Reconstruct(
+            converted,
+            isInstance: false,
+            returnType: "Example.LongEnum"));
+        Assert.Null(Reconstruct(
+            argument,
+            isInstance: false,
+            returnType: "System.Reflection.FieldAttributes",
+            parameterTypes: ["int"]));
         Assert.Equal(
             ["return arg0;"],
             Reconstruct(
@@ -472,11 +489,12 @@ public sealed class IlBodyReconstructionTests
         byte[] localRoundTrip = [0x02, 0x0A, 0x06, 0x2A];
 
         Assert.Equal(
-            ["var v0 = arg0;", "return v0;"],
+            ["uint v0 = arg0;", "return v0;"],
             Reconstruct(
                 localRoundTrip,
                 isInstance: false,
                 returnType: "uint",
+                localTypes: ["uint"],
                 parameterTypes: ["uint"]));
     }
 
@@ -561,6 +579,152 @@ public sealed class IlBodyReconstructionTests
     }
 
     [Fact]
+    public void NormalizesCliBooleanAndEnumAssignmentsAtTypedTargets()
+    {
+        byte[] storeLocalAndReturn = [0x02, 0x0A, 0x06, 0x2A];
+        byte[] assignArgumentAndReturn = [0x17, 0x10, 0x00, 0x02, 0x2A];
+        byte[] assignEnumArgumentAndReturn = [0x17, 0xFE, 0x0B, 0x00, 0x00, 0x02, 0x2A];
+        byte[] storeEnumInIntArgumentAndReturn = [0x03, 0x10, 0x00, 0x02, 0x2A];
+        byte[] invalidBoolean = [0x18, 0x0A, 0x2A];
+        var intEnum = typeof(Int32StackCoercionEnum).FullName!;
+        var longEnum = typeof(Int64StackCoercionEnum).FullName!;
+        var nonEnum = typeof(StackCoercionClass).FullName!;
+
+        Assert.Equal(
+            ["bool v0 = false;", "return v0;"],
+            Reconstruct(
+                [0x16, 0x0A, 0x06, 0x2A],
+                isInstance: false,
+                returnType: "bool",
+                localTypes: ["bool"]));
+        Assert.Equal(
+            ["arg0 = true;", "return arg0;"],
+            Reconstruct(
+                assignArgumentAndReturn,
+                isInstance: false,
+                returnType: "bool",
+                parameterTypes: ["bool"]));
+        Assert.Null(Reconstruct(
+            invalidBoolean,
+            isInstance: false,
+            returnType: "void",
+            localTypes: ["bool"]));
+        Assert.Null(Reconstruct(
+            [0x02, 0x2A],
+            isInstance: false,
+            returnType: "bool",
+            parameterTypes: ["int"]));
+        Assert.Null(Reconstruct(
+            storeLocalAndReturn,
+            isInstance: false,
+            returnType: "int",
+            localTypes: ["int"],
+            parameterTypes: ["bool"]));
+
+        Assert.Equal(
+            ["int v0 = unchecked((int)arg0);", "return v0;"],
+            Reconstruct(
+                storeLocalAndReturn,
+                isInstance: false,
+                returnType: "int",
+                localTypes: ["int"],
+                parameterTypes: [intEnum]));
+        Assert.Equal(
+            [$"{intEnum} v0 = unchecked(({intEnum})arg0);", "return v0;"],
+            Reconstruct(
+                storeLocalAndReturn,
+                isInstance: false,
+                returnType: intEnum,
+                localTypes: [intEnum],
+                parameterTypes: ["int"]));
+        Assert.Equal(
+            ["long v0 = unchecked((long)arg0);", "return v0;"],
+            Reconstruct(
+                storeLocalAndReturn,
+                isInstance: false,
+                returnType: "long",
+                localTypes: ["long"],
+                parameterTypes: [longEnum]));
+        Assert.Equal(
+            ["arg0 = unchecked((int)arg1);", "return arg0;"],
+            Reconstruct(
+                storeEnumInIntArgumentAndReturn,
+                isInstance: false,
+                returnType: "int",
+                parameterTypes: ["int", intEnum]));
+        Assert.Equal(
+            [$"arg0 = unchecked(({intEnum})1);", "return arg0;"],
+            Reconstruct(
+                assignEnumArgumentAndReturn,
+                isInstance: false,
+                returnType: intEnum,
+                parameterTypes: [intEnum]));
+        Assert.Null(Reconstruct(
+            storeLocalAndReturn,
+            isInstance: false,
+            returnType: "int",
+            localTypes: ["int"],
+            parameterTypes: [longEnum]));
+        Assert.Null(Reconstruct(
+            [0x02, 0x2A],
+            isInstance: false,
+            returnType: "int",
+            parameterTypes: [longEnum]));
+        Assert.Null(Reconstruct(
+            storeEnumInIntArgumentAndReturn,
+            isInstance: false,
+            returnType: "int",
+            parameterTypes: ["int", longEnum]));
+        Assert.Null(Reconstruct(
+            storeLocalAndReturn,
+            isInstance: false,
+            returnType: "int",
+            localTypes: ["int"],
+            parameterTypes: [nonEnum]));
+        Assert.Null(Reconstruct(
+            [0x16, 0x2A],
+            isInstance: false,
+            returnType: nonEnum));
+
+        var instanceEnumToken = typeof(CliStackCoercionFixture)
+            .GetField("_instanceEnum", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .MetadataToken;
+        var staticIntToken = typeof(CliStackCoercionFixture)
+            .GetField("s_staticInt", BindingFlags.Static | BindingFlags.NonPublic)!
+            .MetadataToken;
+        var staticFlagToken = typeof(CliStackCoercionFixture)
+            .GetField("s_staticFlag", BindingFlags.Static | BindingFlags.NonPublic)!
+            .MetadataToken;
+        Assert.Equal(
+            [$"this._instanceEnum = unchecked(({intEnum})1);"],
+            Reconstruct(
+                BuildFieldStoreIl([0x02, 0x17], 0x7D, instanceEnumToken),
+                isInstance: true,
+                returnType: "void"));
+        Assert.Equal(
+            ["ExeBlueprint.Core.Tests.CliStackCoercionFixture.s_staticInt = unchecked((int)arg0);"],
+            Reconstruct(
+                BuildFieldStoreIl([0x02], 0x80, staticIntToken),
+                isInstance: false,
+                returnType: "void",
+                parameterTypes: [intEnum]));
+        Assert.Null(Reconstruct(
+            BuildFieldStoreIl([0x18], 0x80, staticFlagToken),
+            isInstance: false,
+            returnType: "void"));
+    }
+
+    private static byte[] BuildFieldStoreIl(byte[] prefix, byte opcode, int token)
+    {
+        var il = new byte[prefix.Length + 6];
+        prefix.CopyTo(il, 0);
+        il[prefix.Length] = opcode;
+        BinaryPrimitives.WriteInt32LittleEndian(il.AsSpan(prefix.Length + 1, 4), token);
+        il[^1] = 0x2A;
+        return il;
+    }
+
+    [Fact]
     public void ReconstructsTerminalSwitchCases()
     {
         // static int M(int n) => n switch { 0 => 10, 1 => 20, 2 => 30, _ => 99 };
@@ -601,7 +765,7 @@ public sealed class IlBodyReconstructionTests
     [Fact]
     public void ReconstructsEnumMaskAndSwitchCases()
     {
-        // static int M(FieldAttributes value) => (value & (FieldAttributes)7) - 1 switch { 0 => 10, 1 => 20, _ => 99 };
+        // static int M(Int32StackCoercionEnum value) => (value & (Int32StackCoercionEnum)7) - 1 switch { ... };
         byte[] il =
         [
             0x02,                         // IL_0000 ldarg.0
@@ -618,20 +782,21 @@ public sealed class IlBodyReconstructionTests
             0x1F, 0x63, 0x2A              // IL_001A ldc.i4.s 99; ret
         ];
 
+        var enumType = typeof(Int32StackCoercionEnum).FullName!;
         var body = Reconstruct(
             il,
             isInstance: false,
             returnType: "int",
-            parameterTypes: ["System.Reflection.FieldAttributes"]);
+            parameterTypes: [enumType]);
 
         Assert.NotNull(body);
         Assert.Equal(
             [
-                "switch (((arg0 & unchecked((System.Reflection.FieldAttributes)7)) - 1))",
+                $"switch (((arg0 & unchecked(({enumType})7)) - 1))",
                 "{",
-                "    case unchecked((System.Reflection.FieldAttributes)0):",
+                $"    case unchecked(({enumType})0):",
                 "        return 10;",
-                "    case unchecked((System.Reflection.FieldAttributes)1):",
+                $"    case unchecked(({enumType})1):",
                 "        return 20;",
                 "    default:",
                 "        return 99;",
@@ -750,7 +915,8 @@ public sealed class IlBodyReconstructionTests
             isInstance: false,
             returnType: "int",
             localTypes: ["int"],
-            exceptionRegions: regions);
+            exceptionRegions: regions,
+            parameterTypes: ["int"]);
 
         Assert.NotNull(body);
         Assert.Equal(
@@ -803,7 +969,8 @@ public sealed class IlBodyReconstructionTests
             isInstance: false,
             returnType: "int",
             localTypes: ["int"],
-            exceptionRegions: regions);
+            exceptionRegions: regions,
+            parameterTypes: ["int"]);
 
         Assert.NotNull(body);
         Assert.Equal(
@@ -850,7 +1017,8 @@ public sealed class IlBodyReconstructionTests
             il,
             isInstance: false,
             returnType: "void",
-            exceptionRegions: regions);
+            exceptionRegions: regions,
+            parameterTypes: ["int"]);
 
         Assert.NotNull(body);
         Assert.Equal(
@@ -929,7 +1097,8 @@ public sealed class IlBodyReconstructionTests
             isInstance: false,
             returnType: "int",
             localTypes: ["int"],
-            exceptionRegions: regions);
+            exceptionRegions: regions,
+            parameterTypes: ["int"]);
 
         Assert.NotNull(body);
         Assert.Equal(
@@ -995,7 +1164,8 @@ public sealed class IlBodyReconstructionTests
             isInstance: false,
             returnType: "int",
             localTypes: ["int"],
-            exceptionRegions: regions);
+            exceptionRegions: regions,
+            parameterTypes: ["int"]);
 
         Assert.NotNull(body);
         Assert.Equal(
@@ -1071,8 +1241,8 @@ public sealed class IlBodyReconstructionTests
         IReadOnlyList<ManagedSymbolReader.ExceptionRegionInfo>? exceptionRegions = null,
         IReadOnlyList<string>? parameterTypes = null)
     {
-        // 隨便挑一個現成組件當 MetadataReader；這些 IL 不含 token，不會真的用到它。
-        var assemblyPath = typeof(BlueprintAnalyzer).Assembly.Location;
+        // 使用測試組件 metadata，讓手工 IL 也能精確驗證本地 enum 的 underlying type。
+        var assemblyPath = typeof(IlBodyReconstructionTests).Assembly.Location;
         using var peReader = new PEReader(File.OpenRead(assemblyPath));
         var metadata = peReader.GetMetadataReader();
         return ManagedSymbolReader.ReconstructBodyForTest(
@@ -1118,6 +1288,50 @@ public sealed class IlBodyReconstructionTests
         opcode, 0xF4, 0xFF, 0xFF, 0xFF, // branch back to body
         0x04, 0x2A                    // return arg2
     ];
+}
+
+internal enum Int32StackCoercionEnum
+{
+    Zero
+}
+
+internal enum Int64StackCoercionEnum : long
+{
+    Zero
+}
+
+internal sealed class StackCoercionClass
+{
+}
+
+internal sealed class CliStackCoercionFixture
+{
+    private bool _instanceFlag = true;
+    private Int32StackCoercionEnum _instanceEnum;
+    private static bool s_staticFlag = true;
+    private static int s_staticInt;
+
+    public bool ReadInstanceFlag() => _instanceFlag;
+
+    public static bool ReadStaticFlag() => s_staticFlag;
+
+    public void ClearInstanceFlag() => _instanceFlag = false;
+
+    public static void ClearStaticFlag() => s_staticFlag = false;
+
+    public static void SetStaticFlag() => s_staticFlag = true;
+
+    public Int32StackCoercionEnum ReadInstanceEnum() => _instanceEnum;
+
+    public void SetInstanceEnumFromInt(int value) => _instanceEnum = (Int32StackCoercionEnum)value;
+
+    public static int ReadStaticInt() => s_staticInt;
+
+    public static void SetStaticIntFromEnum(Int32StackCoercionEnum value) => s_staticInt = (int)value;
+
+    public static int ToInt32(Int32StackCoercionEnum value) => (int)value;
+
+    public static Int32StackCoercionEnum FromInt32(int value) => (Int32StackCoercionEnum)value;
 }
 
 internal static class SwitchFixture

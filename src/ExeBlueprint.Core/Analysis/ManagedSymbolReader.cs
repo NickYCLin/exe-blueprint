@@ -7,6 +7,7 @@ using System.Reflection.Metadata;
 using System.Reflection.Metadata.Ecma335;
 using System.Reflection.PortableExecutable;
 using System.Resources;
+using System.Security.Cryptography;
 using System.Text;
 using ExeBlueprint.Models;
 
@@ -19,6 +20,9 @@ internal static class ManagedSymbolReader
     private const int MaxTypes = 5_000;
     private const int MaxCallEdges = 50_000;
     private const int MaxIlInstructions = 400;
+    private const int MaxEnumFieldsToInspect = 1_024;
+    private const int MaxEnumFieldsToInspectAcrossAssembly = 100_000;
+    private const int MaxAssemblyPublicKeyBytes = 4_096;
     private const int MaxGenericParametersPerOwner = 256;
     private const int MaxGenericConstraintsPerParameter = 256;
     private const int MaxConstraintModifiers = 64;
@@ -70,6 +74,7 @@ internal static class ManagedSymbolReader
         var seenEdges = new HashSet<(string, string, string)>();
         var genericMetadataBudget = new GenericMetadataBudget();
         var typeGenericParameterResolver = new TypeGenericParameterResolver(metadata, genericMetadataBudget);
+        var enumTypes = ReadEnumTypeCatalog(metadata, cancellationToken);
         var methodCount = 0;
         var truncated = false;
 
@@ -113,7 +118,7 @@ internal static class ManagedSymbolReader
                 var hasBody = method.RelativeVirtualAddress != 0;
                 var declaringName = fullName;
                 var il = hasBody ? TryReadIl(peReader, method) : null;
-                var localTypes = hasBody ? TryReadLocalTypes(peReader, method) : [];
+                var localTypes = hasBody ? TryReadLocalTypes(peReader, method, enumTypes) : [];
                 var exceptionRegions = hasBody ? TryReadExceptionRegions(peReader, metadata, method) : [];
 
                 var model = BuildMethod(
@@ -124,12 +129,17 @@ internal static class ManagedSymbolReader
                     hasBody,
                     entryPointMethod.Handle,
                     genericMetadataBudget);
+                var reconstructionSignature = TryReadReconstructionSignature(
+                    metadata,
+                    method,
+                    model,
+                    enumTypes);
                 if (il is { Length: > 0 })
                 {
                     var (instructions, ilTruncated) = Disassemble(metadata, il);
                     model = model with { Il = instructions, IlTruncated = ilTruncated };
 
-                    if (methodName is not (".ctor" or ".cctor"))
+                    if (methodName is not (".ctor" or ".cctor") && reconstructionSignature is not null)
                     {
                         var isInstance = !method.Attributes.HasFlag(MethodAttributes.Static);
                         var body = TryReconstructLinearBody(
@@ -137,10 +147,14 @@ internal static class ManagedSymbolReader
                             il,
                             isInstance,
                             ReadParameterNames(metadata, method),
-                            model.Parameters.Select(parameter => parameter.Type).ToArray(),
-                            model.ReturnType,
+                            reconstructionSignature.ParameterTypes,
+                            reconstructionSignature.ReturnType,
                             localTypes,
                             exceptionRegions,
+                            enumTypes,
+                            isInstance
+                                ? CreateNominalCliType(metadata, enumTypes, method.GetDeclaringType())
+                                : null,
                             out var requiresUnsafeContext);
                         if (body is not null)
                         {
@@ -651,7 +665,10 @@ internal static class ManagedSymbolReader
         }
     }
 
-    private static IReadOnlyList<string> TryReadLocalTypes(PEReader peReader, MethodDefinition method)
+    private static IReadOnlyList<CliType> TryReadLocalTypes(
+        PEReader peReader,
+        MethodDefinition method,
+        EnumTypeCatalog enumTypes)
     {
         try
         {
@@ -665,12 +682,45 @@ internal static class ManagedSymbolReader
             var signature = metadata.GetStandaloneSignature(body.LocalSignature);
             return signature
                 .DecodeLocalSignature(SignatureTypeNameProvider.Instance, null)
-                .Select(type => type.Text)
+                .Select(type => CreateCliType(type, enumTypes))
                 .ToArray();
         }
         catch (Exception exception) when (exception is BadImageFormatException or InvalidOperationException)
         {
             return [];
+        }
+    }
+
+    private sealed record MethodReconstructionSignature(
+        CliType ReturnType,
+        IReadOnlyList<CliType> ParameterTypes);
+
+    private static MethodReconstructionSignature? TryReadReconstructionSignature(
+        MetadataReader metadata,
+        MethodDefinition method,
+        MethodModel model,
+        EnumTypeCatalog enumTypes)
+    {
+        try
+        {
+            var signature = method.DecodeSignature(SignatureTypeNameProvider.Instance, null);
+            if (signature.ParameterTypes.Length != model.Parameters.Count ||
+                signature.Header.IsInstance == method.Attributes.HasFlag(MethodAttributes.Static))
+            {
+                return null;
+            }
+
+            var returnType = CreateCliType(signature.ReturnType, enumTypes) with { Text = model.ReturnType };
+            var parameterTypes = signature.ParameterTypes
+                .Select((type, index) =>
+                    CreateCliType(type, enumTypes) with { Text = model.Parameters[index].Type })
+                .ToArray();
+            return new MethodReconstructionSignature(returnType, parameterTypes);
+        }
+        catch (Exception exception) when (
+            exception is BadImageFormatException or ArgumentException or InvalidOperationException)
+        {
+            return null;
         }
     }
 
@@ -943,12 +993,13 @@ internal static class ManagedSymbolReader
 
     private sealed record CallInfo(
         string DeclaringType,
+        CliType DeclaringCliType,
         string Name,
         int ParamCount,
         bool HasThis,
-        string ReturnType,
+        CliType ReturnType,
         bool ReturnsVoid,
-        IReadOnlyList<string> ParameterTypes,
+        IReadOnlyList<CliType> ParameterTypes,
         IReadOnlyList<string> GenericArguments);
 
     private const int MaxStructureDepth = 32;
@@ -998,6 +1049,29 @@ internal static class ManagedSymbolReader
         public bool RequiresUnsafeContext { get; set; }
     }
 
+    private sealed record EnumTypeCatalog(
+        IReadOnlyDictionary<TypeDefinitionHandle, string> UnderlyingTypes,
+        IReadOnlyDictionary<string, TypeDefinitionHandle> TestTypeHandles)
+    {
+        public static EnumTypeCatalog Empty { get; } = new(
+            new Dictionary<TypeDefinitionHandle, string>(),
+            new Dictionary<string, TypeDefinitionHandle>(StringComparer.Ordinal));
+    }
+
+    private sealed record CliType(
+        string Text,
+        string? EnumUnderlyingType = null,
+        EntityHandle NominalHandle = default,
+        byte RawTypeKind = 0,
+        bool IsExactNamedType = false)
+    {
+        public static implicit operator string(CliType value) => value.Text;
+
+        public static implicit operator CliType(string value) => new(value);
+
+        public override string ToString() => Text;
+    }
+
     internal readonly record struct ExceptionRegionInfo(
         ExceptionRegionKind Kind,
         int TryOffset,
@@ -1011,14 +1085,18 @@ internal static class ManagedSymbolReader
         MetadataReader Metadata,
         byte[] Il,
         Dictionary<int, string> ParameterNames,
-        IReadOnlyList<string> ParameterTypes,
+        IReadOnlyList<CliType> ParameterTypes,
         bool IsInstance,
-        string ReturnType,
-        IReadOnlyList<string> LocalTypes,
+        CliType? InstanceType,
+        CliType ReturnType,
+        IReadOnlyList<CliType> LocalTypes,
         IReadOnlyList<ExceptionRegionInfo> ExceptionRegions,
         IReadOnlyDictionary<int, string> LocalNames,
-        Dictionary<string, string> ExpressionTypes,
+        Dictionary<string, CliType> ExpressionTypes,
+        HashSet<string> UnknownExpressionTypes,
+        HashSet<string> AmbiguousExpressionTypes,
         HashSet<string> UnsignedIntegralExpressions,
+        EnumTypeCatalog EnumTypes,
         ReconstructionState State,
         ExceptionLeaveRedirect? LeaveRedirect,
         int CatchDepth);
@@ -1031,17 +1109,22 @@ internal static class ManagedSymbolReader
         string returnType,
         IReadOnlyList<string>? localTypes = null,
         IReadOnlyList<ExceptionRegionInfo>? exceptionRegions = null,
-        IReadOnlyList<string>? parameterTypes = null) =>
-        TryReconstructLinearBody(
+        IReadOnlyList<string>? parameterTypes = null)
+    {
+        var enumTypes = ReadEnumTypeCatalog(metadata);
+        return TryReconstructLinearBody(
             metadata,
             il,
             isInstance,
             new Dictionary<int, string>(),
-            parameterTypes ?? [],
-            returnType,
-            localTypes ?? [],
+            (parameterTypes ?? []).Select(type => CreateTestCliType(type, enumTypes)).ToArray(),
+            CreateTestCliType(returnType, enumTypes),
+            (localTypes ?? []).Select(type => CreateTestCliType(type, enumTypes)).ToArray(),
             exceptionRegions ?? [],
+            enumTypes,
+            isInstance ? new CliType("<test-instance>") : null,
             out _);
+    }
 
     // 把方法的 IL 還原成 C#。先解碼成指令陣列，再用區間遞迴結構化還原 if／if-else（可巢狀）。
     // 採全有或全無：遇到無法安全切開的迴圈、非終止型 switch、不支援的例外區域或任何無法結構化的跳轉就整個方法放棄，
@@ -1051,10 +1134,12 @@ internal static class ManagedSymbolReader
         byte[] il,
         bool isInstance,
         Dictionary<int, string> parameterNames,
-        IReadOnlyList<string> parameterTypes,
-        string returnType,
-        IReadOnlyList<string> localTypes,
+        IReadOnlyList<CliType> parameterTypes,
+        CliType returnType,
+        IReadOnlyList<CliType> localTypes,
         IReadOnlyList<ExceptionRegionInfo> exceptionRegions,
+        EnumTypeCatalog enumTypes,
+        CliType? instanceType,
         out bool requiresUnsafeContext)
     {
         requiresUnsafeContext = false;
@@ -1101,7 +1186,7 @@ internal static class ManagedSymbolReader
         offsetToIndex[il.Length] = instructions.Count;
         var state = new ReconstructionState
         {
-            RequiresUnsafeContext = localTypes.Any(RequiresUnsafeType)
+            RequiresUnsafeContext = localTypes.Any(type => RequiresUnsafeType(type.Text))
         };
         var context = new ReconContext(
             metadata,
@@ -1109,12 +1194,16 @@ internal static class ManagedSymbolReader
             parameterNames,
             parameterTypes,
             isInstance,
+            instanceType,
             returnType,
             localTypes,
             exceptionRegions,
             new Dictionary<int, string>(),
-            new Dictionary<string, string>(StringComparer.Ordinal),
+            new Dictionary<string, CliType>(StringComparer.Ordinal),
             new HashSet<string>(StringComparer.Ordinal),
+            new HashSet<string>(StringComparer.Ordinal),
+            new HashSet<string>(StringComparer.Ordinal),
+            enumTypes,
             state,
             LeaveRedirect: null,
             CatchDepth: 0);
@@ -1126,6 +1215,11 @@ internal static class ManagedSymbolReader
             instructions.Count,
             new HashSet<int>(),
             0);
+        if (context.AmbiguousExpressionTypes.Count > 0)
+        {
+            body = null;
+        }
+
         requiresUnsafeContext = body is not null && state.RequiresUnsafeContext;
         return body;
     }
@@ -2382,9 +2476,10 @@ internal static class ManagedSymbolReader
 
     private static string RenderSwitchCaseValue(ReconContext context, string selector, int value)
     {
-        if (context.ExpressionTypes.TryGetValue(selector, out var selectorType) && IsPotentialEnumType(selectorType))
+        if (context.ExpressionTypes.TryGetValue(selector, out var selectorType) &&
+            IsPotentialEnumType(selectorType.Text))
         {
-            return $"unchecked(({selectorType}){value})";
+            return $"unchecked(({selectorType.Text}){value})";
         }
 
         return value.ToString(CultureInfo.InvariantCulture);
@@ -2694,19 +2789,19 @@ internal static class ManagedSymbolReader
             return branchWhenTrue ? expression : $"!({expression})";
         }
 
-        if (IsKnownReferenceType(context.Metadata, type))
+        if (IsKnownReferenceType(context.Metadata, type.Text))
         {
             return $"{expression} is {(branchWhenTrue ? "not null" : "null")}";
         }
 
-        if (type.EndsWith('*') || type.StartsWith("delegate*", StringComparison.Ordinal))
+        if (type.Text.EndsWith('*') || type.Text.StartsWith("delegate*", StringComparison.Ordinal))
         {
             return $"{expression} {(branchWhenTrue ? "!=" : "==")} null";
         }
 
-        if (type.StartsWith('!') ||
-            type.StartsWith("ref ", StringComparison.Ordinal) ||
-            type is "TypedReference" or "method*")
+        if (type.Text.StartsWith('!') ||
+            type.Text.StartsWith("ref ", StringComparison.Ordinal) ||
+            type.Text is "TypedReference" or "method*")
         {
             return branchWhenTrue ? expression : $"!({expression})";
         }
@@ -2755,8 +2850,13 @@ internal static class ManagedSymbolReader
         return context.ParameterNames.TryGetValue(slot + 1, out var value) && !string.IsNullOrEmpty(value) ? value : $"arg{slot}";
     }
 
-    private static string? ArgType(ReconContext context, int slot)
+    private static CliType? ArgType(ReconContext context, int slot)
     {
+        if (context.IsInstance && slot == 0)
+        {
+            return context.InstanceType;
+        }
+
         var parameterIndex = context.IsInstance ? slot - 1 : slot;
         return parameterIndex >= 0 && parameterIndex < context.ParameterTypes.Count
             ? context.ParameterTypes[parameterIndex]
@@ -2773,15 +2873,37 @@ internal static class ManagedSymbolReader
             LocalName(context, index),
             index >= 0 && index < context.LocalTypes.Count ? context.LocalTypes[index] : null);
 
-    private static void PushExpression(ReconContext context, Stack<string> stack, string expression, string? type)
+    private static void PushExpression(ReconContext context, Stack<string> stack, string expression, CliType? type)
     {
-        if (!string.IsNullOrEmpty(type))
+        if (type is null || type.Text.Length == 0)
+        {
+            context.UnknownExpressionTypes.Add(expression);
+            if (context.ExpressionTypes.ContainsKey(expression))
+            {
+                context.AmbiguousExpressionTypes.Add(expression);
+            }
+        }
+        else if (context.UnknownExpressionTypes.Contains(expression))
+        {
+            context.AmbiguousExpressionTypes.Add(expression);
+        }
+        else if (context.ExpressionTypes.TryGetValue(expression, out var existingType))
+        {
+            if (existingType != type)
+            {
+                context.AmbiguousExpressionTypes.Add(expression);
+            }
+        }
+        else
         {
             context.ExpressionTypes[expression] = type;
         }
 
         stack.Push(expression);
     }
+
+    private static void PushExpression(ReconContext context, Stack<string> stack, string expression, string? type) =>
+        PushExpression(context, stack, expression, type is null ? null : new CliType(type));
 
     private static bool ApplySimpleInstruction(
         ReconContext context,
@@ -2824,13 +2946,31 @@ internal static class ManagedSymbolReader
                 return true;
             case "starg.s":
                 var argumentSlot = il[offset];
-                if (!TryPop(stack, out var stargValue)
-                    || !TryRenderTargetExpression(context, stargValue, ArgType(context, argumentSlot), out stargValue))
+                var argumentType = ArgType(context, argumentSlot);
+                if (argumentType is null ||
+                    !TryPop(stack, out var stargValue) ||
+                    !TryRenderTargetExpression(context, stargValue, argumentType, out stargValue))
                 {
                     return false;
                 }
 
                 statements.Add($"{ArgName(context, argumentSlot)} = {stargValue};");
+                return true;
+            case "starg":
+                var wideArgumentSlot = BinaryPrimitives.ReadUInt16LittleEndian(il.AsSpan(offset, 2));
+                var wideArgumentType = ArgType(context, wideArgumentSlot);
+                if (wideArgumentType is null ||
+                    !TryPop(stack, out var wideStargValue)
+                    || !TryRenderTargetExpression(
+                        context,
+                        wideStargValue,
+                        wideArgumentType,
+                        out wideStargValue))
+                {
+                    return false;
+                }
+
+                statements.Add($"{ArgName(context, wideArgumentSlot)} = {wideStargValue};");
                 return true;
 
             case "ldnull":
@@ -2870,7 +3010,12 @@ internal static class ManagedSymbolReader
                 PushExpression(context, stack, $"{BitConverter.Int32BitsToSingle(BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)))}f", "float");
                 return true;
             case "ldc.r8":
-                PushExpression(context, stack, $"{BitConverter.Int64BitsToDouble(BinaryPrimitives.ReadInt64LittleEndian(il.AsSpan(offset, 8)))}", "double");
+                PushExpression(
+                    context,
+                    stack,
+                    FormatDoubleLiteral(BitConverter.Int64BitsToDouble(
+                        BinaryPrimitives.ReadInt64LittleEndian(il.AsSpan(offset, 8)))),
+                    "double");
                 return true;
 
             case "ldloc.0":
@@ -2896,7 +3041,10 @@ internal static class ManagedSymbolReader
                 return TryStoreLocal(context, stack, statements, declaredLocals, BinaryPrimitives.ReadUInt16LittleEndian(il.AsSpan(offset, 2)));
 
             case "ldsfld":
-                var loadStatic = ResolveField(metadata, BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)));
+                var loadStatic = ResolveField(
+                    metadata,
+                    context.EnumTypes,
+                    BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)));
                 if (loadStatic is null || IsGeneratedName(loadStatic.Value.DeclaringType) || IsGeneratedName(loadStatic.Value.Name))
                 {
                     return false;
@@ -2910,7 +3058,10 @@ internal static class ManagedSymbolReader
                     loadStatic.Value.Type);
                 return true;
             case "ldfld":
-                var loadField = ResolveField(metadata, BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)));
+                var loadField = ResolveField(
+                    metadata,
+                    context.EnumTypes,
+                    BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)));
                 if (loadField is null || IsGeneratedName(loadField.Value.Name) || !TryPop(stack, out var fieldTarget))
                 {
                     return false;
@@ -2920,7 +3071,10 @@ internal static class ManagedSymbolReader
                 PushExpression(context, stack, $"{fieldTarget}.{loadField.Value.Name}", loadField.Value.Type);
                 return true;
             case "stsfld":
-                var storeStatic = ResolveField(metadata, BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)));
+                var storeStatic = ResolveField(
+                    metadata,
+                    context.EnumTypes,
+                    BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)));
                 if (storeStatic is null
                     || IsGeneratedName(storeStatic.Value.DeclaringType)
                     || IsGeneratedName(storeStatic.Value.Name)
@@ -2938,7 +3092,10 @@ internal static class ManagedSymbolReader
                 statements.Add($"{storeStatic.Value.DeclaringType}.{storeStatic.Value.Name} = {storeStaticValue};");
                 return true;
             case "stfld":
-                var storeField = ResolveField(metadata, BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)));
+                var storeField = ResolveField(
+                    metadata,
+                    context.EnumTypes,
+                    BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)));
                 if (storeField is null
                     || IsGeneratedName(storeField.Value.Name)
                     || !TryPop(stack, out var storeFieldValue)
@@ -3068,15 +3225,7 @@ internal static class ManagedSymbolReader
                     }
 
                     var value = stack.Pop();
-                    if (context.ReturnType == "bool" && value is "0" or "1")
-                    {
-                        value = value == "1" ? "true" : "false";
-                    }
-                    else if (IsPotentialEnumType(context.ReturnType) && IsIntegerExpression(context, value))
-                    {
-                        value = $"unchecked(({context.ReturnType}){value})";
-                    }
-                    else if (!TryRenderTargetExpression(context, value, context.ReturnType, out value))
+                    if (!TryRenderTargetExpression(context, value, context.ReturnType, out value))
                     {
                         return false;
                     }
@@ -3108,7 +3257,7 @@ internal static class ManagedSymbolReader
         ReconContext context,
         Stack<string> stack,
         string op,
-        string? resultType = null)
+        CliType? resultType = null)
     {
         if (stack.Count < 2)
         {
@@ -3127,14 +3276,14 @@ internal static class ManagedSymbolReader
 
         if (op is "&" or "|" or "^")
         {
-            if (IsPotentialEnumType(leftType) && IsIntegerLiteral(right))
+            if (leftType is not null && IsPotentialEnumType(leftType.Text) && IsIntegerLiteral(right))
             {
-                right = $"unchecked(({leftType}){right})";
+                right = $"unchecked(({leftType.Text}){right})";
                 resultType ??= leftType;
             }
-            else if (IsPotentialEnumType(rightType) && IsIntegerLiteral(left))
+            else if (rightType is not null && IsPotentialEnumType(rightType.Text) && IsIntegerLiteral(left))
             {
-                left = $"unchecked(({rightType}){left})";
+                left = $"unchecked(({rightType.Text}){left})";
                 resultType ??= rightType;
             }
         }
@@ -3188,7 +3337,7 @@ internal static class ManagedSymbolReader
         if (allowReferenceNull
             && right == "null"
             && context.ExpressionTypes.TryGetValue(left, out var leftType)
-            && IsKnownReferenceType(context.Metadata, leftType))
+            && IsKnownReferenceType(context.Metadata, leftType.Text))
         {
             PushExpression(context, stack, $"({left} is not null)", "bool");
             return true;
@@ -3220,8 +3369,8 @@ internal static class ManagedSymbolReader
             return false;
         }
 
-        var stackFamily = IntegralStackFamily(leftType);
-        if (stackFamily < 0 || stackFamily != IntegralStackFamily(rightType))
+        var stackFamily = IntegralStackFamily(leftType.Text);
+        if (stackFamily < 0 || stackFamily != IntegralStackFamily(rightType.Text))
         {
             return false;
         }
@@ -3238,18 +3387,18 @@ internal static class ManagedSymbolReader
 
     private static bool TryNormalizeBooleanEquality(
         string left,
-        string? leftType,
+        CliType? leftType,
         string right,
-        string? rightType,
+        CliType? rightType,
         out string expression)
     {
-        if (leftType == "bool" && TryReadIlBooleanLiteral(right, rightType, out var rightValue))
+        if (leftType?.Text == "bool" && TryReadIlBooleanLiteral(right, rightType, out var rightValue))
         {
             expression = rightValue ? left : $"!({left})";
             return true;
         }
 
-        if (rightType == "bool" && TryReadIlBooleanLiteral(left, leftType, out var leftValue))
+        if (rightType?.Text == "bool" && TryReadIlBooleanLiteral(left, leftType, out var leftValue))
         {
             expression = leftValue ? right : $"!({right})";
             return true;
@@ -3259,9 +3408,9 @@ internal static class ManagedSymbolReader
         return false;
     }
 
-    private static bool TryReadIlBooleanLiteral(string expression, string? type, out bool value)
+    private static bool TryReadIlBooleanLiteral(string expression, CliType? type, out bool value)
     {
-        if (type == "int" && expression is "0" or "1")
+        if (type?.Text == "int" && expression is "0" or "1")
         {
             value = expression == "1";
             return true;
@@ -3279,7 +3428,7 @@ internal static class ManagedSymbolReader
 
     private static bool IsIntegerExpression(ReconContext context, string expression) =>
         IsIntegerLiteral(expression) ||
-        (context.ExpressionTypes.TryGetValue(expression, out var type) && type is
+        (context.ExpressionTypes.TryGetValue(expression, out var type) && type.Text is
             "char" or
             "sbyte" or
             "byte" or
@@ -3301,6 +3450,440 @@ internal static class ManagedSymbolReader
         && !type.StartsWith("delegate*", StringComparison.Ordinal)
         && !type.EndsWith('*')
         && !type.EndsWith(']');
+
+    private static bool TryGetKnownEnumUnderlyingType(
+        CliType? type,
+        out string underlyingType)
+    {
+        underlyingType = type?.EnumUnderlyingType ?? string.Empty;
+        return underlyingType.Length > 0;
+    }
+
+    private static CliType CreateCliType(SignatureTypeName type, EnumTypeCatalog enumTypes)
+    {
+        var underlyingType = type.IsExactNamedType &&
+                             type.NominalHandle.Kind == HandleKind.TypeDefinition &&
+                             type.RawTypeKind == (byte)SignatureTypeKind.ValueType &&
+                             type.SignatureKind == SignatureTypeKind.ValueType &&
+                             enumTypes.UnderlyingTypes.TryGetValue(
+                                 (TypeDefinitionHandle)type.NominalHandle,
+                                 out var knownUnderlyingType)
+            ? knownUnderlyingType
+            : null;
+        return new CliType(
+            type.Text,
+            underlyingType,
+            type.NominalHandle,
+            type.RawTypeKind,
+            type.IsExactNamedType);
+    }
+
+    private static CliType CreateTestCliType(string type, EnumTypeCatalog enumTypes)
+    {
+        if (!enumTypes.TestTypeHandles.TryGetValue(type, out var handle))
+        {
+            return new CliType(type);
+        }
+
+        return new CliType(
+            type,
+            enumTypes.UnderlyingTypes[handle],
+            handle,
+            (byte)SignatureTypeKind.ValueType,
+            IsExactNamedType: true);
+    }
+
+    private static EnumTypeCatalog ReadEnumTypeCatalog(
+        MetadataReader metadata,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            if (metadata.GetTableRowCount(TableIndex.TypeDef) > MaxTypes)
+            {
+                return EnumTypeCatalog.Empty;
+            }
+
+            var definitions = new Dictionary<string, TypeDefinitionHandle>(StringComparer.Ordinal);
+            var ambiguousNames = new HashSet<string>(StringComparer.Ordinal);
+            var typesWithNestedChildren = new HashSet<TypeDefinitionHandle>();
+            foreach (var handle in metadata.TypeDefinitions)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (!TryGetBoundedTypeDefinitionFullName(metadata, handle, out var name))
+                {
+                    return EnumTypeCatalog.Empty;
+                }
+
+                var declaringType = metadata.GetTypeDefinition(handle).GetDeclaringType();
+                if (!declaringType.IsNil)
+                {
+                    typesWithNestedChildren.Add(declaringType);
+                }
+
+                if (ambiguousNames.Contains(name))
+                {
+                    continue;
+                }
+
+                if (!definitions.TryAdd(name, handle))
+                {
+                    definitions.Remove(name);
+                    ambiguousNames.Add(name);
+                }
+            }
+
+            var underlyingTypes = new Dictionary<TypeDefinitionHandle, string>();
+            var testTypeHandles = new Dictionary<string, TypeDefinitionHandle>(StringComparer.Ordinal);
+            var inspectedFields = 0;
+            foreach (var (name, handle) in definitions)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var fieldCount = metadata.GetTypeDefinition(handle).GetFields().Count;
+                if (fieldCount > MaxEnumFieldsToInspect ||
+                    inspectedFields > MaxEnumFieldsToInspectAcrossAssembly - fieldCount)
+                {
+                    continue;
+                }
+
+                inspectedFields += fieldCount;
+                if (typesWithNestedChildren.Contains(handle) ||
+                    !HasNonGenericDefinitionChain(metadata, handle) ||
+                    !TryReadExactEnumUnderlyingType(metadata, handle, out var underlyingType))
+                {
+                    continue;
+                }
+
+                underlyingTypes.Add(handle, underlyingType);
+                testTypeHandles.Add(name, handle);
+            }
+
+            return new EnumTypeCatalog(underlyingTypes, testTypeHandles);
+        }
+        catch (Exception exception) when (exception is BadImageFormatException or ArgumentException or InvalidOperationException)
+        {
+            return EnumTypeCatalog.Empty;
+        }
+    }
+
+    private static bool HasNonGenericDefinitionChain(
+        MetadataReader metadata,
+        TypeDefinitionHandle handle)
+    {
+        var seen = new HashSet<TypeDefinitionHandle>();
+        var current = handle;
+        while (!current.IsNil)
+        {
+            if (seen.Count >= MaxGenericAttributeTypeNameDepth || !seen.Add(current))
+            {
+                return false;
+            }
+
+            var definition = metadata.GetTypeDefinition(current);
+            var name = metadata.GetString(definition.Name);
+            if (name.Contains('`', StringComparison.Ordinal) ||
+                definition.GetGenericParameters().Count != 0)
+            {
+                return false;
+            }
+
+            current = definition.GetDeclaringType();
+        }
+
+        return true;
+    }
+
+    private static bool TryReadExactEnumUnderlyingType(
+        MetadataReader metadata,
+        TypeDefinitionHandle handle,
+        out string underlyingType)
+    {
+        underlyingType = string.Empty;
+        var definition = metadata.GetTypeDefinition(handle);
+        var attributes = definition.Attributes;
+        if (!attributes.HasFlag(TypeAttributes.Sealed) ||
+            attributes.HasFlag(TypeAttributes.Abstract) ||
+            attributes.HasFlag(TypeAttributes.Interface) ||
+            (attributes & TypeAttributes.LayoutMask) != TypeAttributes.AutoLayout ||
+            !IsSystemEnumBase(metadata, definition.BaseType) ||
+            definition.GetMethods().Count != 0 ||
+            definition.GetProperties().Count != 0 ||
+            definition.GetEvents().Count != 0 ||
+            definition.GetInterfaceImplementations().Count != 0)
+        {
+            return false;
+        }
+
+        var instanceFieldCount = 0;
+        var literalConstants = new List<(FieldDefinitionHandle Field, ConstantHandle Constant)>();
+        foreach (var fieldHandle in definition.GetFields())
+        {
+            var field = metadata.GetFieldDefinition(fieldHandle);
+            var fieldAttributes = field.Attributes;
+            if (fieldAttributes.HasFlag(FieldAttributes.Static))
+            {
+                const FieldAttributes expected = FieldAttributes.Public |
+                                                 FieldAttributes.Static |
+                                                 FieldAttributes.Literal |
+                                                 FieldAttributes.HasDefault;
+                if (fieldAttributes != expected ||
+                    field.GetDefaultValue().IsNil ||
+                    !IsExactEnumLiteralFieldSignature(metadata, field.Signature, handle))
+                {
+                    return false;
+                }
+
+                literalConstants.Add((fieldHandle, field.GetDefaultValue()));
+                continue;
+            }
+
+            instanceFieldCount++;
+            if (instanceFieldCount != 1 ||
+                metadata.GetString(field.Name) != "value__" ||
+                fieldAttributes != (FieldAttributes.Public |
+                                    FieldAttributes.SpecialName |
+                                    FieldAttributes.RTSpecialName) ||
+                !TryReadExactEnumFieldSignature(metadata, field.Signature, out underlyingType))
+            {
+                return false;
+            }
+        }
+
+        var verifiedUnderlyingType = underlyingType;
+        return instanceFieldCount == 1 && literalConstants.All(item =>
+            IsExactEnumLiteralConstant(
+                metadata,
+                item.Field,
+                item.Constant,
+                verifiedUnderlyingType));
+    }
+
+    private static bool IsExactEnumLiteralConstant(
+        MetadataReader metadata,
+        FieldDefinitionHandle fieldHandle,
+        ConstantHandle constantHandle,
+        string underlyingType)
+    {
+        var constant = metadata.GetConstant(constantHandle);
+        var expected = underlyingType switch
+        {
+            "sbyte" => (ConstantTypeCode.SByte, 1),
+            "byte" => (ConstantTypeCode.Byte, 1),
+            "short" => (ConstantTypeCode.Int16, 2),
+            "ushort" => (ConstantTypeCode.UInt16, 2),
+            "int" => (ConstantTypeCode.Int32, 4),
+            "uint" => (ConstantTypeCode.UInt32, 4),
+            "long" => (ConstantTypeCode.Int64, 8),
+            "ulong" => (ConstantTypeCode.UInt64, 8),
+            _ => (ConstantTypeCode.Invalid, 0)
+        };
+        return expected.Item2 > 0 &&
+               constant.Parent == fieldHandle &&
+               constant.TypeCode == expected.Item1 &&
+               metadata.GetBlobReader(constant.Value).Length == expected.Item2;
+    }
+
+    private static bool IsExactEnumLiteralFieldSignature(
+        MetadataReader metadata,
+        BlobHandle signature,
+        TypeDefinitionHandle enumHandle)
+    {
+        var reader = metadata.GetBlobReader(signature);
+        return reader.RemainingBytes >= 3 &&
+               reader.ReadByte() == 0x06 &&
+               reader.ReadByte() == 0x11 &&
+               reader.ReadTypeHandle() == enumHandle &&
+               reader.RemainingBytes == 0;
+    }
+
+    private static bool TryReadExactEnumFieldSignature(
+        MetadataReader metadata,
+        BlobHandle signature,
+        out string underlyingType)
+    {
+        underlyingType = string.Empty;
+        var reader = metadata.GetBlobReader(signature);
+        if (reader.Length != 2 || reader.ReadByte() != 0x06)
+        {
+            return false;
+        }
+
+        underlyingType = reader.ReadByte() switch
+        {
+            0x04 => "sbyte",
+            0x05 => "byte",
+            0x06 => "short",
+            0x07 => "ushort",
+            0x08 => "int",
+            0x09 => "uint",
+            0x0A => "long",
+            0x0B => "ulong",
+            _ => string.Empty
+        };
+        return underlyingType.Length > 0;
+    }
+
+    private static bool IsSystemEnumBase(MetadataReader metadata, EntityHandle handle)
+    {
+        if (handle.Kind != HandleKind.TypeReference)
+        {
+            return false;
+        }
+
+        var reference = metadata.GetTypeReference((TypeReferenceHandle)handle);
+        if (metadata.GetString(reference.Namespace) != "System" ||
+            metadata.GetString(reference.Name) != "Enum" ||
+            reference.ResolutionScope.Kind != HandleKind.AssemblyReference)
+        {
+            return false;
+        }
+
+        var assembly = metadata.GetAssemblyReference((AssemblyReferenceHandle)reference.ResolutionScope);
+        return IsTrustedFrameworkAssembly(
+            metadata,
+            metadata.GetString(assembly.Name),
+            assembly.PublicKeyOrToken,
+            assembly.Culture,
+            assembly.Flags);
+    }
+
+    private static bool IsTrustedFrameworkAssembly(
+        MetadataReader metadata,
+        string name,
+        BlobHandle publicKeyOrToken,
+        StringHandle culture,
+        AssemblyFlags flags)
+    {
+        if ((!culture.IsNil && metadata.GetString(culture).Length != 0) ||
+            flags.HasFlag(AssemblyFlags.Retargetable) ||
+            flags.HasFlag(AssemblyFlags.WindowsRuntime))
+        {
+            return false;
+        }
+
+        var reader = metadata.GetBlobReader(publicKeyOrToken);
+        if (reader.Length == 0 || reader.Length > MaxAssemblyPublicKeyBytes)
+        {
+            return false;
+        }
+
+        var keyOrToken = metadata.GetBlobBytes(publicKeyOrToken);
+        byte[] token;
+        if (flags.HasFlag(AssemblyFlags.PublicKey))
+        {
+            var hash = SHA1.HashData(keyOrToken);
+            token = new byte[8];
+            for (var index = 0; index < token.Length; index++)
+            {
+                token[index] = hash[hash.Length - 1 - index];
+            }
+        }
+        else
+        {
+            if (keyOrToken.Length != 8)
+            {
+                return false;
+            }
+
+            token = keyOrToken;
+        }
+
+        var tokenText = Convert.ToHexString(token);
+        return name switch
+        {
+            "System.Private.CoreLib" => tokenText == "7CEC85D7BEA7798E",
+            "System.Runtime" => tokenText == "B03F5F7F11D50A3A",
+            "mscorlib" => tokenText == "B77A5C561934E089",
+            "netstandard" => tokenText == "CC7B13FFCD2DDD51",
+            _ => false
+        };
+    }
+
+    private static bool TryGetBoundedTypeDefinitionFullName(
+        MetadataReader metadata,
+        TypeDefinitionHandle handle,
+        out string fullName)
+    {
+        var segments = new List<string>();
+        var seen = new HashSet<TypeDefinitionHandle>();
+        var current = handle;
+        var namespaceName = string.Empty;
+        while (!current.IsNil)
+        {
+            if (segments.Count >= MaxGenericAttributeTypeNameDepth || !seen.Add(current))
+            {
+                fullName = string.Empty;
+                return false;
+            }
+
+            var definition = metadata.GetTypeDefinition(current);
+            var segment = StripArity(metadata.GetString(definition.Name));
+            if (segment.Length == 0 || segment.Length > MaxGenericAttributeTypeNameCharacters)
+            {
+                fullName = string.Empty;
+                return false;
+            }
+
+            segments.Add(segment);
+            var declaringType = definition.GetDeclaringType();
+            if (declaringType.IsNil)
+            {
+                namespaceName = metadata.GetString(definition.Namespace);
+            }
+
+            current = declaringType;
+        }
+
+        segments.Reverse();
+        fullName = string.IsNullOrEmpty(namespaceName)
+            ? string.Join('.', segments)
+            : $"{namespaceName}.{string.Join('.', segments)}";
+        return fullName.Length <= MaxGenericAttributeTypeNameCharacters;
+    }
+
+    private static bool TryGetBoundedTypeReferenceFullName(
+        MetadataReader metadata,
+        TypeReferenceHandle handle,
+        out string fullName)
+    {
+        var segments = new List<string>();
+        var seen = new HashSet<TypeReferenceHandle>();
+        var current = handle;
+        var namespaceName = string.Empty;
+        while (!current.IsNil)
+        {
+            if (segments.Count >= MaxGenericAttributeTypeNameDepth || !seen.Add(current))
+            {
+                fullName = string.Empty;
+                return false;
+            }
+
+            var reference = metadata.GetTypeReference(current);
+            var segment = StripArity(metadata.GetString(reference.Name));
+            if (segment.Length == 0 || segment.Length > MaxGenericAttributeTypeNameCharacters)
+            {
+                fullName = string.Empty;
+                return false;
+            }
+
+            segments.Add(segment);
+            if (reference.ResolutionScope.Kind != HandleKind.TypeReference)
+            {
+                namespaceName = metadata.GetString(reference.Namespace);
+                current = default;
+            }
+            else
+            {
+                current = (TypeReferenceHandle)reference.ResolutionScope;
+            }
+        }
+
+        segments.Reverse();
+        fullName = string.IsNullOrEmpty(namespaceName)
+            ? string.Join('.', segments)
+            : $"{namespaceName}.{string.Join('.', segments)}";
+        return fullName.Length <= MaxGenericAttributeTypeNameCharacters;
+    }
 
     private static bool TryUnary(ReconContext context, Stack<string> stack, string op)
     {
@@ -3367,12 +3950,14 @@ internal static class ManagedSymbolReader
         }
 
         var type = context.LocalTypes[index];
-        if (string.IsNullOrEmpty(type) || type.StartsWith("ref ", StringComparison.Ordinal) || IsGeneratedName(type))
+        if (type.Text.Length == 0 ||
+            type.Text.StartsWith("ref ", StringComparison.Ordinal) ||
+            IsGeneratedName(type.Text))
         {
             return "var";
         }
 
-        return type;
+        return type.Text;
     }
 
     // 編譯器產生的名稱（狀態機、lambda、匿名型別）沒辦法在 C# 直接寫出來，碰到就放棄整個方法。
@@ -3382,7 +3967,7 @@ internal static class ManagedSymbolReader
     private static bool TryEmitCall(ReconContext context, int token, Stack<string> stack, List<string> statements)
     {
         var metadata = context.Metadata;
-        var info = ResolveCall(metadata, token);
+        var info = ResolveCall(metadata, context.EnumTypes, token);
         if (info is null || info.Name is ".ctor" or ".cctor" || IsGeneratedName(info.Name))
         {
             return false;
@@ -3557,8 +4142,8 @@ internal static class ManagedSymbolReader
         info.Name == nameof(object.GetHashCode) &&
         info.DeclaringType.StartsWith("System.Collections.Generic.EqualityComparer<", StringComparison.Ordinal) &&
         context.ExpressionTypes.TryGetValue(argument, out var argumentType) &&
-        (argumentType.EndsWith("?", StringComparison.Ordinal) ||
-         argumentType.StartsWith("System.Nullable<", StringComparison.Ordinal));
+        (argumentType.Text.EndsWith("?", StringComparison.Ordinal) ||
+         argumentType.Text.StartsWith("System.Nullable<", StringComparison.Ordinal));
 
     // 把運算子方法（op_Equality 等）還原成運算子語法，避免產生 Type.op_Equality(a, b) 這種非法 C#。
     // 對應不到的運算子就放棄整個方法，退回 IL 註解。
@@ -3610,7 +4195,7 @@ internal static class ManagedSymbolReader
     private static bool TryEmitNewObject(ReconContext context, int token, Stack<string> stack)
     {
         var metadata = context.Metadata;
-        var info = ResolveCall(metadata, token);
+        var info = ResolveCall(metadata, context.EnumTypes, token);
         if (info is null || IsGeneratedName(info.DeclaringType))
         {
             return false;
@@ -3632,14 +4217,18 @@ internal static class ManagedSymbolReader
                 index < info.ParameterTypes.Count ? info.ParameterTypes[index] : null);
         }
 
-        PushExpression(context, stack, $"new {info.DeclaringType}({string.Join(", ", args)})", info.DeclaringType);
+        PushExpression(
+            context,
+            stack,
+            $"new {info.DeclaringType}({string.Join(", ", args)})",
+            info.DeclaringCliType);
         return true;
     }
 
     private static void MarkUnsafeSignature(ReconContext context, CallInfo info)
     {
-        if (RequiresUnsafeType(info.ReturnType) ||
-            info.ParameterTypes.Any(RequiresUnsafeType) ||
+        if (RequiresUnsafeType(info.ReturnType.Text) ||
+            info.ParameterTypes.Any(type => RequiresUnsafeType(type.Text)) ||
             info.GenericArguments.Any(RequiresUnsafeType))
         {
             context.State.RequiresUnsafeContext = true;
@@ -3657,19 +4246,19 @@ internal static class ManagedSymbolReader
     private static bool RequiresUnsafeType(string type) => type.Contains('*');
 
     // bool、char 與 enum 在 IL 中都以整數常值傳遞；依正式參數型別還原成可編譯的 C# 引數。
-    private static string RenderArgument(ReconContext context, string argument, string? parameterType)
+    private static string RenderArgument(ReconContext context, string argument, CliType? parameterType)
     {
         var isIntegerLiteral = long.TryParse(
             argument,
             NumberStyles.Integer,
             CultureInfo.InvariantCulture,
             out var value);
-        if (isIntegerLiteral && parameterType == "bool" && value is 0 or 1)
+        if (isIntegerLiteral && parameterType?.Text == "bool" && value is 0 or 1)
         {
             return value == 1 ? "true" : "false";
         }
 
-        if (isIntegerLiteral && parameterType == "char" && value is >= 0 and <= 0xFFFF)
+        if (isIntegerLiteral && parameterType?.Text == "char" && value is >= 0 and <= 0xFFFF)
         {
             return FormatCharLiteral((char)value);
         }
@@ -3677,10 +4266,10 @@ internal static class ManagedSymbolReader
         // CLI 在同一 integral stack family 內不區分 signedness／窄型別，C# 呼叫則要求正式型別。
         if (parameterType is not null &&
             context.ExpressionTypes.TryGetValue(argument, out var argumentType) &&
-            argumentType != parameterType &&
-            IsSameIntegralStackFamily(argumentType, parameterType))
+            argumentType.Text != parameterType.Text &&
+            IsSameIntegralStackFamily(argumentType.Text, parameterType.Text))
         {
-            return $"unchecked(({parameterType}){argument})";
+            return $"unchecked(({parameterType.Text}){argument})";
         }
 
         if (!isIntegerLiteral)
@@ -3688,9 +4277,9 @@ internal static class ManagedSymbolReader
             return argument;
         }
 
-        return IsNumericOrReferenceParameter(parameterType)
+        return IsNumericOrReferenceParameter(parameterType?.Text)
             ? argument
-            : $"unchecked(({parameterType}){argument})";
+            : $"unchecked(({parameterType?.Text}){argument})";
     }
 
     private static bool IsSameIntegralStackFamily(string left, string right)
@@ -3702,31 +4291,115 @@ internal static class ManagedSymbolReader
     private static bool TryRenderTargetExpression(
         ReconContext context,
         string expression,
-        string? targetType,
+        CliType? targetType,
         out string rendered)
     {
         rendered = expression;
-        if (!context.ExpressionTypes.TryGetValue(expression, out var sourceType)
-            || sourceType == targetType
-            || !context.UnsignedIntegralExpressions.Contains(expression))
+        if (targetType is null)
+        {
+            return false;
+        }
+
+        if (context.AmbiguousExpressionTypes.Contains(expression))
+        {
+            return false;
+        }
+
+        if (!context.ExpressionTypes.TryGetValue(expression, out var sourceType))
+        {
+            return false;
+        }
+
+        if (sourceType.Text == targetType.Text)
+        {
+            return IsSameCliType(sourceType, targetType);
+        }
+
+        if (targetType.Text == "bool")
+        {
+            if (!TryReadIlBooleanLiteral(expression, sourceType, out var booleanValue))
+            {
+                return false;
+            }
+
+            rendered = booleanValue ? "true" : "false";
+            return true;
+        }
+
+        if (sourceType.Text == "bool")
+        {
+            return false;
+        }
+
+        var sourceIsEnum = TryGetKnownEnumUnderlyingType(sourceType, out var sourceUnderlyingType);
+        var targetIsEnum = TryGetKnownEnumUnderlyingType(targetType, out var targetUnderlyingType);
+        var sourceStackType = sourceIsEnum ? sourceUnderlyingType : sourceType.Text;
+        var targetStackType = targetIsEnum ? targetUnderlyingType : targetType.Text;
+        var sourceFamily = IntegralStackFamily(sourceStackType);
+        var targetFamily = IntegralStackFamily(targetStackType);
+        if (sourceFamily < 0 &&
+            targetFamily < 0 &&
+            (IsExactValueType(sourceType) || IsExactValueType(targetType)))
+        {
+            return false;
+        }
+
+        if (sourceIsEnum || targetIsEnum || (sourceFamily >= 0 && targetFamily >= 0))
+        {
+            if (sourceFamily < 0 || sourceFamily != targetFamily)
+            {
+                return false;
+            }
+
+            rendered = $"unchecked(({targetType.Text}){expression})";
+            return true;
+        }
+
+        // 具名型別若無法由目前 assembly 的 metadata 證實為 enum，就不能猜測其
+        // underlying stack family 後輸出數值轉型。
+        if ((sourceFamily >= 0 && IsPotentialEnumType(targetType.Text)) ||
+            (targetFamily >= 0 && IsPotentialEnumType(sourceType.Text)))
+        {
+            return false;
+        }
+
+        if (!context.UnsignedIntegralExpressions.Contains(expression))
         {
             return true;
         }
 
         // div.un／rem.un 會把結果標成該 stack family 的無號型別。若接收端是同 family
         // 的 signed／窄型別，必須明確轉回；缺少或跨 family 的目標則不能猜測。
-        if (sourceType is not ("uint" or "ulong" or "nuint"))
+        if (sourceType.Text is not ("uint" or "ulong" or "nuint"))
         {
             return true;
         }
 
-        if (targetType is null || !IsSameIntegralStackFamily(sourceType, targetType))
+        if (!IsSameIntegralStackFamily(sourceType.Text, targetType.Text))
         {
             return false;
         }
 
-        rendered = $"unchecked(({targetType}){expression})";
+        rendered = $"unchecked(({targetType.Text}){expression})";
         return true;
+    }
+
+    private static bool IsExactValueType(CliType type) =>
+        type.IsExactNamedType && type.RawTypeKind == (byte)SignatureTypeKind.ValueType;
+
+    private static bool IsSameCliType(CliType left, CliType right)
+    {
+        if (left == right)
+        {
+            return true;
+        }
+
+        return left.IsExactNamedType &&
+               right.IsExactNamedType &&
+               !left.NominalHandle.IsNil &&
+               left.NominalHandle == right.NominalHandle &&
+               (left.RawTypeKind == 0 || right.RawTypeKind == 0 || left.RawTypeKind == right.RawTypeKind) &&
+               left.EnumUnderlyingType == right.EnumUnderlyingType;
     }
 
     private static int IntegralStackFamily(string type) => type switch
@@ -3770,7 +4443,34 @@ internal static class ManagedSymbolReader
         _ => $"'\\u{(int)value:X4}'"
     };
 
-    private static CallInfo? ResolveCall(MetadataReader metadata, int token)
+    private static string FormatDoubleLiteral(double value)
+    {
+        if (double.IsNaN(value))
+        {
+            return "double.NaN";
+        }
+
+        if (double.IsPositiveInfinity(value))
+        {
+            return "double.PositiveInfinity";
+        }
+
+        if (double.IsNegativeInfinity(value))
+        {
+            return "double.NegativeInfinity";
+        }
+
+        var literal = value.ToString("R", CultureInfo.InvariantCulture);
+        return literal.Contains('.', StringComparison.Ordinal) ||
+               literal.Contains('E', StringComparison.Ordinal)
+            ? literal
+            : $"{literal}.0";
+    }
+
+    private static CallInfo? ResolveCall(
+        MetadataReader metadata,
+        EnumTypeCatalog enumTypes,
+        int token)
     {
         var handle = MetadataTokens.EntityHandle(token);
         switch (handle.Kind)
@@ -3778,14 +4478,16 @@ internal static class ManagedSymbolReader
             case HandleKind.MethodDefinition:
                 var method = metadata.GetMethodDefinition((MethodDefinitionHandle)handle);
                 var methodSignature = method.DecodeSignature(SignatureTypeNameProvider.Instance, null);
+                var methodDeclaringType = method.GetDeclaringType();
                 return new CallInfo(
-                    GetTypeName(metadata, method.GetDeclaringType()) ?? string.Empty,
+                    GetTypeName(metadata, methodDeclaringType) ?? string.Empty,
+                    CreateNominalCliType(metadata, enumTypes, methodDeclaringType),
                     metadata.GetString(method.Name),
                     methodSignature.ParameterTypes.Length,
                     methodSignature.Header.IsInstance,
-                    methodSignature.ReturnType,
+                    CreateCliType(methodSignature.ReturnType, enumTypes),
                     methodSignature.ReturnType.Text == "void",
-                    methodSignature.ParameterTypes.Select(type => type.Text).ToArray(),
+                    methodSignature.ParameterTypes.Select(type => CreateCliType(type, enumTypes)).ToArray(),
                     []);
 
             case HandleKind.MemberReference:
@@ -3798,17 +4500,18 @@ internal static class ManagedSymbolReader
                 var memberSignature = member.DecodeMethodSignature(SignatureTypeNameProvider.Instance, null);
                 return new CallInfo(
                     GetTypeName(metadata, member.Parent) ?? string.Empty,
+                    CreateNominalCliType(metadata, enumTypes, member.Parent),
                     metadata.GetString(member.Name),
                     memberSignature.ParameterTypes.Length,
                     memberSignature.Header.IsInstance,
-                    memberSignature.ReturnType,
+                    CreateCliType(memberSignature.ReturnType, enumTypes),
                     memberSignature.ReturnType.Text == "void",
-                    memberSignature.ParameterTypes.Select(type => type.Text).ToArray(),
+                    memberSignature.ParameterTypes.Select(type => CreateCliType(type, enumTypes)).ToArray(),
                     []);
 
             case HandleKind.MethodSpecification:
                 var spec = metadata.GetMethodSpecification((MethodSpecificationHandle)handle);
-                var resolved = ResolveCall(metadata, MetadataTokens.GetToken(spec.Method));
+                var resolved = ResolveCall(metadata, enumTypes, MetadataTokens.GetToken(spec.Method));
                 if (resolved is null)
                 {
                     return null;
@@ -3823,9 +4526,11 @@ internal static class ManagedSymbolReader
                 var genericArguments = decodedGenericArguments.Select(type => type.Text).ToArray();
                 return resolved with
                 {
-                    ReturnType = InstantiateMethodSignatureType(resolved.ReturnType, genericArguments),
+                    ReturnType = new CliType(
+                        InstantiateMethodSignatureType(resolved.ReturnType.Text, genericArguments)),
                     ParameterTypes = resolved.ParameterTypes
-                        .Select(type => InstantiateMethodSignatureType(type, genericArguments))
+                        .Select(type => new CliType(
+                            InstantiateMethodSignatureType(type.Text, genericArguments)))
                         .ToArray(),
                     GenericArguments = genericArguments
                 };
@@ -3835,7 +4540,36 @@ internal static class ManagedSymbolReader
         }
     }
 
-    private static (string DeclaringType, string Name, string Type)? ResolveField(MetadataReader metadata, int token)
+    private static CliType CreateNominalCliType(
+        MetadataReader metadata,
+        EnumTypeCatalog enumTypes,
+        EntityHandle handle)
+    {
+        var type = handle.Kind switch
+        {
+            HandleKind.TypeDefinition => SignatureTypeNameProvider.Instance.GetTypeFromDefinition(
+                metadata,
+                (TypeDefinitionHandle)handle,
+                rawTypeKind: 0),
+            HandleKind.TypeReference => SignatureTypeNameProvider.Instance.GetTypeFromReference(
+                metadata,
+                (TypeReferenceHandle)handle,
+                rawTypeKind: 0),
+            HandleKind.TypeSpecification => SignatureTypeNameProvider.Instance.GetTypeFromSpecification(
+                metadata,
+                genericContext: null,
+                (TypeSpecificationHandle)handle,
+                rawTypeKind: 0),
+            _ => new SignatureTypeName(string.Empty)
+        };
+        var text = GetTypeName(metadata, handle) ?? type.Text;
+        return CreateCliType(type, enumTypes) with { Text = text };
+    }
+
+    private static (string DeclaringType, string Name, CliType Type)? ResolveField(
+        MetadataReader metadata,
+        EnumTypeCatalog enumTypes,
+        int token)
     {
         var handle = MetadataTokens.EntityHandle(token);
         switch (handle.Kind)
@@ -3845,7 +4579,9 @@ internal static class ManagedSymbolReader
                 return (
                     GetTypeName(metadata, field.GetDeclaringType()) ?? string.Empty,
                     NormalizeFieldName(metadata.GetString(field.Name)),
-                    field.DecodeSignature(SignatureTypeNameProvider.Instance, null));
+                    CreateCliType(
+                        field.DecodeSignature(SignatureTypeNameProvider.Instance, null),
+                        enumTypes));
 
             case HandleKind.MemberReference:
                 var member = metadata.GetMemberReference((MemberReferenceHandle)handle);
@@ -3857,7 +4593,9 @@ internal static class ManagedSymbolReader
                 return (
                     GetTypeName(metadata, member.Parent) ?? string.Empty,
                     NormalizeFieldName(metadata.GetString(member.Name)),
-                    member.DecodeFieldSignature(SignatureTypeNameProvider.Instance, null));
+                    CreateCliType(
+                        member.DecodeFieldSignature(SignatureTypeNameProvider.Instance, null),
+                        enumTypes));
 
             default:
                 return null;
@@ -6126,7 +6864,11 @@ internal sealed record SignatureTypeName(
     string Text,
     ImmutableArray<SignatureCustomModifier> OuterCustomModifiers,
     bool HasNestedCustomModifiers,
-    bool IsRestrictedGenericArgument)
+    bool IsRestrictedGenericArgument,
+    EntityHandle NominalHandle = default,
+    byte RawTypeKind = 0,
+    SignatureTypeKind SignatureKind = SignatureTypeKind.Unknown,
+    bool IsExactNamedType = false)
 {
     public SignatureTypeName(string text)
         : this(text, [], false, false)
@@ -6301,7 +7043,11 @@ internal sealed class SignatureTypeNameProvider : ISignatureTypeProvider<Signatu
         unmodifiedType with
         {
             OuterCustomModifiers = unmodifiedType.OuterCustomModifiers.Add(
-                new SignatureCustomModifier(modifier.Text, isRequired))
+                new SignatureCustomModifier(modifier.Text, isRequired)),
+            NominalHandle = default,
+            RawTypeKind = 0,
+            SignatureKind = SignatureTypeKind.Unknown,
+            IsExactNamedType = false
         };
 
     public SignatureTypeName GetPinnedType(SignatureTypeName elementType) =>
@@ -6352,13 +7098,19 @@ internal sealed class SignatureTypeNameProvider : ISignatureTypeProvider<Signatu
         var definition = reader.GetTypeDefinition(handle);
         var name = reader.GetString(definition.Name);
         var declaringType = definition.GetDeclaringType();
-        if (!declaringType.IsNil)
-        {
-            return new SignatureTypeName($"{GetTypeFromDefinition(reader, declaringType, rawTypeKind).Text}.{name}");
-        }
-
         var namespaceName = reader.GetString(definition.Namespace);
-        return new SignatureTypeName(string.IsNullOrEmpty(namespaceName) ? name : $"{namespaceName}.{name}");
+        var text = !declaringType.IsNil
+            ? $"{GetTypeFromDefinition(reader, declaringType, rawTypeKind).Text}.{name}"
+            : string.IsNullOrEmpty(namespaceName) ? name : $"{namespaceName}.{name}";
+        return new SignatureTypeName(
+            text,
+            [],
+            HasNestedCustomModifiers: false,
+            IsRestrictedGenericArgument: false,
+            handle,
+            rawTypeKind,
+            reader.ResolveSignatureTypeKind(handle, rawTypeKind),
+            IsExactNamedType: true);
     }
 
     public SignatureTypeName GetTypeFromReference(
@@ -6368,14 +7120,19 @@ internal sealed class SignatureTypeNameProvider : ISignatureTypeProvider<Signatu
     {
         var reference = reader.GetTypeReference(handle);
         var name = reader.GetString(reference.Name);
-        if (reference.ResolutionScope.Kind == HandleKind.TypeReference)
-        {
-            return new SignatureTypeName(
-                $"{GetTypeFromReference(reader, (TypeReferenceHandle)reference.ResolutionScope, rawTypeKind).Text}.{name}");
-        }
-
         var namespaceName = reader.GetString(reference.Namespace);
-        return new SignatureTypeName(string.IsNullOrEmpty(namespaceName) ? name : $"{namespaceName}.{name}");
+        var text = reference.ResolutionScope.Kind == HandleKind.TypeReference
+            ? $"{GetTypeFromReference(reader, (TypeReferenceHandle)reference.ResolutionScope, rawTypeKind).Text}.{name}"
+            : string.IsNullOrEmpty(namespaceName) ? name : $"{namespaceName}.{name}";
+        return new SignatureTypeName(
+            text,
+            [],
+            HasNestedCustomModifiers: false,
+            IsRestrictedGenericArgument: false,
+            handle,
+            rawTypeKind,
+            reader.ResolveSignatureTypeKind(handle, rawTypeKind),
+            IsExactNamedType: true);
     }
 
     private static SignatureTypeName FormatLegacyGenericInstantiation(
@@ -6422,8 +7179,17 @@ internal sealed class SignatureTypeNameProvider : ISignatureTypeProvider<Signatu
         MetadataReader reader,
         object? genericContext,
         TypeSpecificationHandle handle,
-        byte rawTypeKind) =>
-        reader.GetTypeSpecification(handle).DecodeSignature(this, genericContext);
+        byte rawTypeKind)
+    {
+        var decoded = reader.GetTypeSpecification(handle).DecodeSignature(this, genericContext);
+        return decoded with
+        {
+            NominalHandle = default,
+            RawTypeKind = 0,
+            SignatureKind = SignatureTypeKind.Unknown,
+            IsExactNamedType = false
+        };
+    }
 }
 
 internal sealed record ConstraintSignatureType(

@@ -175,6 +175,51 @@ public sealed class ManagedSymbolReaderTests
     }
 
     [Fact]
+    public async Task ReconstructsCliBooleanAndEnumTargetAssignments()
+    {
+        var document = await new BlueprintAnalyzer().AnalyzeAsync(typeof(CliStackCoercionFixture).Assembly.Location);
+        var fixture = Assert.Single(
+            document.Files[0].Code!.Types,
+            type => type.FullName == typeof(CliStackCoercionFixture).FullName);
+
+        Assert.Equal(
+            ["this._instanceFlag = false;"],
+            Assert.Single(
+                fixture.Methods,
+                method => method.Name == nameof(CliStackCoercionFixture.ClearInstanceFlag)).Body);
+        Assert.Equal(
+            ["ExeBlueprint.Core.Tests.CliStackCoercionFixture.s_staticFlag = false;"],
+            Assert.Single(
+                fixture.Methods,
+                method => method.Name == nameof(CliStackCoercionFixture.ClearStaticFlag)).Body);
+        Assert.Equal(
+            ["ExeBlueprint.Core.Tests.CliStackCoercionFixture.s_staticFlag = true;"],
+            Assert.Single(
+                fixture.Methods,
+                method => method.Name == nameof(CliStackCoercionFixture.SetStaticFlag)).Body);
+        Assert.Equal(
+            ["this._instanceEnum = unchecked((ExeBlueprint.Core.Tests.Int32StackCoercionEnum)value);"],
+            Assert.Single(
+                fixture.Methods,
+                method => method.Name == nameof(CliStackCoercionFixture.SetInstanceEnumFromInt)).Body);
+        Assert.Equal(
+            ["ExeBlueprint.Core.Tests.CliStackCoercionFixture.s_staticInt = unchecked((int)value);"],
+            Assert.Single(
+                fixture.Methods,
+                method => method.Name == nameof(CliStackCoercionFixture.SetStaticIntFromEnum)).Body);
+        Assert.Equal(
+            ["return unchecked((int)value);"],
+            Assert.Single(
+                fixture.Methods,
+                method => method.Name == nameof(CliStackCoercionFixture.ToInt32)).Body);
+        Assert.Equal(
+            ["return unchecked((ExeBlueprint.Core.Tests.Int32StackCoercionEnum)value);"],
+            Assert.Single(
+                fixture.Methods,
+                method => method.Name == nameof(CliStackCoercionFixture.FromInt32)).Body);
+    }
+
+    [Fact]
     public async Task ReadsTopLevelNullableMethodAnnotations()
     {
         var assemblyPath = typeof(BlueprintAnalyzer).Assembly.Location;
