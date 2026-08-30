@@ -95,6 +95,167 @@ public sealed class CSharpSkeletonGeneratorTests
     }
 
     [Fact]
+    public async Task EmitsCompilableSetterOnlyPropertiesWithoutInventingGetters()
+    {
+        var artifact = CreateManagedArtifact("SetterOnly", []) with
+        {
+            Code = new CodeModel
+            {
+                Kind = "managed",
+                NamespaceCount = 1,
+                TypeCount = 6,
+                Types =
+                [
+                    CreateSetterOnlyType(
+                        "IWriteOnly",
+                        kind: "interface",
+                        isAbstract: true,
+                        properties:
+                        [
+                            CreateSetterOnlyProperty(
+                                "Value",
+                                isAbstract: true,
+                                isVirtual: true,
+                                isNewSlot: true)
+                        ]),
+                    CreateSetterOnlyType(
+                        "AbstractWriteOnly",
+                        isAbstract: true,
+                        properties:
+                        [
+                            CreateSetterOnlyProperty(
+                                "Value",
+                                isAbstract: true,
+                                isVirtual: true,
+                                isNewSlot: true)
+                        ]),
+                    CreateSetterOnlyType(
+                        "StaticWriteOnly",
+                        properties:
+                        [
+                            CreateSetterOnlyProperty("Value", isStatic: true),
+                            CreateSetterOnlyProperty(
+                                "InstanceValue",
+                                isVirtual: true,
+                                isNewSlot: true),
+                            CreateSetterOnlyProperty(
+                                "Item",
+                                type: "string",
+                                parameters:
+                                [
+                                    new ParameterModel
+                                    {
+                                        Name = "index",
+                                        Type = "int"
+                                    }
+                                ]),
+                            CreateSetterOnlyProperty("ProtectedValue", accessibility: "protected"),
+                            CreateSetterOnlyProperty("MissingAccessors", type: "byte*", hasSetter: false),
+                            CreateSetterOnlyProperty("ByRefSetter", type: "ref int"),
+                            CreateSetterOnlyProperty("Callback", type: "delegate* managed<void>")
+                        ],
+                        methods:
+                        [
+                            CreateSetterMethod()
+                        ]),
+                    CreateSetterOnlyType(
+                        "DerivedWriteOnly",
+                        baseType: "SetterOnly.StaticWriteOnly",
+                        properties:
+                        [
+                            CreateSetterOnlyProperty("InstanceValue", isVirtual: true, isFinal: true)
+                        ]),
+                    CreateSetterOnlyType(
+                        "WriteOnlyStruct",
+                        kind: "struct",
+                        properties:
+                        [
+                            CreateSetterOnlyProperty("Value")
+                        ]),
+                    CreateSetterOnlyType(
+                        "ExplicitWriteOnly",
+                        interfaces: ["SetterOnly.IWriteOnly"],
+                        properties:
+                        [
+                            CreateSetterOnlyProperty(
+                                "SetterOnly.IWriteOnly.Value",
+                                accessibility: "private",
+                                isVirtual: true,
+                                isFinal: true,
+                                isNewSlot: true)
+                        ])
+                ]
+            }
+        };
+        var document = new BlueprintDocument
+        {
+            Input = new InputDescriptor
+            {
+                Name = "setter-only",
+                Kind = "file",
+                SourcePath = "SetterOnly.dll",
+                FileCount = 1,
+                TotalBytes = 0
+            },
+            Summary = new BlueprintSummary(),
+            Files = [artifact]
+        };
+
+        var generatedFiles = CSharpSkeletonGenerator.Generate(document);
+        var source = Assert.Single(
+            generatedFiles,
+            file => file.RelativePath == "SetterOnly/SetterOnly.cs").Content.ReplaceLineEndings("\n");
+
+        Assert.Contains("public interface IWriteOnly\n{\n    int Value { set; }\n}", source, StringComparison.Ordinal);
+        Assert.Contains("public abstract int Value { set; }", source, StringComparison.Ordinal);
+        Assert.Contains("public unsafe class StaticWriteOnly", source, StringComparison.Ordinal);
+        Assert.Contains("public static int Value\n    {\n        set { }\n    }", source, StringComparison.Ordinal);
+        Assert.Contains("public virtual int InstanceValue\n    {\n        set { }\n    }", source, StringComparison.Ordinal);
+        Assert.Contains("public sealed override int InstanceValue\n    {\n        set { }\n    }", source, StringComparison.Ordinal);
+        Assert.Contains("public string this[int index]\n    {\n        set { }\n    }", source, StringComparison.Ordinal);
+        Assert.Contains("protected int ProtectedValue\n    {\n        set { }\n    }", source, StringComparison.Ordinal);
+        Assert.Contains(
+            "public delegate* managed<void> Callback\n    {\n        set { }\n    }",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains("public struct WriteOnlyStruct\n{\n    public int Value\n    {\n        set { }\n    }\n}", source, StringComparison.Ordinal);
+        Assert.Contains(
+            "int SetterOnly.IWriteOnly.Value\n    {\n        set { }\n    }",
+            source,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("get;", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("get =>", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("set_Value", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("MissingAccessors", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("ByRefSetter", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("protected set", source, StringComparison.Ordinal);
+        var project = Assert.Single(
+            generatedFiles,
+            file => file.RelativePath == "SetterOnly/SetterOnly.csproj").Content;
+        Assert.Contains("<AllowUnsafeBlocks>true</AllowUnsafeBlocks>", project, StringComparison.Ordinal);
+        Assert.False(CSharpSkeletonGenerator.RequiresUnsafeContext(
+            new TypeModel
+            {
+                FullName = "SetterOnly.MalformedOnly",
+                Namespace = "SetterOnly",
+                Name = "MalformedOnly",
+                Kind = "class",
+                Accessibility = "public",
+                Properties =
+                [
+                    new PropertyModel
+                    {
+                        Name = "MissingAccessors",
+                        Type = "byte*",
+                        Accessibility = "public"
+                    }
+                ]
+            }));
+
+        await AssertGeneratedSolutionBuildsAsync(generatedFiles);
+    }
+
+    [Fact]
     public async Task PreservesGenericInterfacesWithoutEmittingCompilerGeneratedTypeSegments()
     {
         var assemblyPath = typeof(GenericInterfaceFixture<>).Assembly.Location;
@@ -1072,6 +1233,72 @@ public sealed class CSharpSkeletonGeneratorTests
         return matches;
     }
 
+    private static TypeModel CreateSetterOnlyType(
+        string name,
+        string kind = "class",
+        bool isAbstract = false,
+        string? baseType = null,
+        IReadOnlyList<string>? interfaces = null,
+        IReadOnlyList<PropertyModel>? properties = null,
+        IReadOnlyList<MethodModel>? methods = null) =>
+        new()
+        {
+            FullName = "SetterOnly." + name,
+            Namespace = "SetterOnly",
+            Name = name,
+            Kind = kind,
+            Accessibility = "public",
+            IsAbstract = isAbstract,
+            BaseType = baseType,
+            Interfaces = interfaces ?? [],
+            Properties = properties ?? [],
+            Methods = methods ?? []
+        };
+
+    private static PropertyModel CreateSetterOnlyProperty(
+        string name,
+        string type = "int",
+        string accessibility = "public",
+        bool hasSetter = true,
+        bool isStatic = false,
+        bool isAbstract = false,
+        bool isVirtual = false,
+        bool isFinal = false,
+        bool isNewSlot = false,
+        IReadOnlyList<ParameterModel>? parameters = null) =>
+        new()
+        {
+            Name = name,
+            Type = type,
+            Accessibility = accessibility,
+            Parameters = parameters ?? [],
+            SetterAccessibility = hasSetter ? accessibility : null,
+            HasSetter = hasSetter,
+            IsStatic = isStatic,
+            IsAbstract = isAbstract,
+            IsVirtual = isVirtual,
+            IsFinal = isFinal,
+            IsNewSlot = isNewSlot
+        };
+
+    private static MethodModel CreateSetterMethod() =>
+        new()
+        {
+            Name = "set_Value",
+            Signature = "void set_Value(int value)",
+            ReturnType = "void",
+            Accessibility = "public",
+            IsStatic = true,
+            Parameters =
+            [
+                new ParameterModel
+                {
+                    Name = "value",
+                    Type = "int"
+                }
+            ]
+        };
+
     private static FileArtifact CreateManagedArtifact(string assemblyName, IReadOnlyList<string> references) =>
         new()
         {
@@ -1102,6 +1329,49 @@ public sealed class CSharpSkeletonGeneratorTests
                 ]
             }
         };
+
+    private static async Task AssertGeneratedSolutionBuildsAsync(IReadOnlyList<GeneratedFile> generatedFiles)
+    {
+        await using var temp = new TemporaryDirectory();
+        foreach (var file in generatedFiles)
+        {
+            var path = Path.Combine(temp.Path, file.RelativePath);
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            await File.WriteAllTextAsync(path, file.Content);
+        }
+
+        var startInfo = new ProcessStartInfo("dotnet")
+        {
+            WorkingDirectory = temp.Path,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false
+        };
+        startInfo.ArgumentList.Add("build");
+        startInfo.ArgumentList.Add("Reconstructed.slnx");
+        startInfo.ArgumentList.Add("-c");
+        startInfo.ArgumentList.Add("Release");
+        startInfo.ArgumentList.Add("--nologo");
+        startInfo.ArgumentList.Add("-warnaserror");
+        startInfo.Environment["DOTNET_CLI_HOME"] = Path.Combine(temp.Path, ".dotnet-home");
+        startInfo.Environment["DOTNET_CLI_TELEMETRY_OPTOUT"] = "1";
+        using var process = Assert.IsType<Process>(Process.Start(startInfo));
+        var standardOutput = process.StandardOutput.ReadToEndAsync();
+        var standardError = process.StandardError.ReadToEndAsync();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+        try
+        {
+            await process.WaitForExitAsync(timeout.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            process.Kill(entireProcessTree: true);
+            throw;
+        }
+
+        var buildOutput = (await standardOutput) + (await standardError);
+        Assert.True(process.ExitCode == 0, buildOutput);
+    }
 
     private sealed class TemporaryDirectory : IAsyncDisposable
     {

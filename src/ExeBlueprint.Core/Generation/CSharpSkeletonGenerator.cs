@@ -223,7 +223,7 @@ public static class CSharpSkeletonGenerator
             builder.AppendLine();
         }
 
-        foreach (var property in type.Properties.Where(property => !IsCompilerGenerated(property.Name)))
+        foreach (var property in type.Properties.Where(ShouldEmitProperty))
         {
             var isExplicitInterfaceMember = IsExplicitInterfaceMember(property.Name);
             var isIndexer = property.Parameters.Count > 0;
@@ -265,7 +265,10 @@ public static class CSharpSkeletonGenerator
                     property.IsNewSlot);
             if (type.Kind != "interface" &&
                 !property.IsAbstract &&
-                (isIndexer || IsByRefType(propertyType) || IsRefLikeType(propertyType, refLikeTypes)))
+                (isIndexer ||
+                 (property.HasSetter && !property.HasGetter) ||
+                 IsByRefType(propertyType) ||
+                 IsRefLikeType(propertyType, refLikeTypes)))
             {
                 builder.AppendLine($"{body}{modifiers}{propertyType} {propertyName}");
                 builder.AppendLine($"{body}{{");
@@ -719,7 +722,7 @@ public static class CSharpSkeletonGenerator
                    !eventNames.Contains(field.Name) &&
                    RequiresUnsafeContext(field.Type)) ||
                type.Properties.Any(property =>
-                   !IsCompilerGenerated(property.Name) &&
+                   ShouldEmitProperty(property) &&
                    (RequiresUnsafeContext(property.Type) ||
                     property.Parameters.Any(parameter => RequiresUnsafeContext(parameter.Type)))) ||
                type.Events.Any(@event =>
@@ -1509,6 +1512,11 @@ public static class CSharpSkeletonGenerator
             || unqualifiedName.StartsWith("op_", StringComparison.Ordinal)
             || IsCompilerGenerated(method.Name);
     }
+
+    private static bool ShouldEmitProperty(PropertyModel property) =>
+        !IsCompilerGenerated(property.Name) &&
+        (property.HasGetter || property.HasSetter) &&
+        !(property.HasSetter && IsByRefType(property.Type));
 
     private static bool IsExplicitInterfaceMember(string name) =>
         name.Contains('.', StringComparison.Ordinal);
