@@ -95,6 +95,7 @@ Ghidra 安裝目錄來自 `--ghidra` 或環境變數 `GHIDRA_INSTALL_DIR`。找�
 先把 IL 解碼成指令陣列，用區間遞迴結構化把條件分支還原成 if／if-else，比對 Roslyn 的
 while／for 形狀（先跳條件、主體、條件、往回跳）還原成 while，並把底測式（往回跳收尾）還原成 do-while（皆可巢狀）；
 區塊內以堆疊模擬還原載入、算式、欄位、屬性、方法呼叫、`new`、運算子、`return`、`throw`；
+`newobj` 只有在目標精確命名為 `.ctor`、具 instance `void` 簽章、沒有 method generic arguments，且本地 MethodDef 同時帶 `SpecialName`／`RTSpecialName` constructor flags 時才會輸出 `new Type(...)`；普通 static／instance method 即使 operand stack 形狀相容也會 fail closed。
 區間內的 terminal `void ret` 會保留為明確 `return;`，避免 if／switch／exception 分支誤穿透到 join 後繼續產生副作用；只有方法最外層的最後一個 `return;` 會略去。ECMA-335 禁止出現在 try／filter／handler 保護範圍內的 `ret` 會整體 fail closed，不會被誤轉成無法編譯的 C# `return`。
 auto-property 的隱藏欄位會還原成屬性名稱，運算子方法還原成運算子語法。
 一般 property accessor 會輸出成成員存取，帶索引參數的 instance accessor 則會還原成 `target[index]` getter 或 setter，避免顯式呼叫 C# 禁止的 `get_*`／`set_*` 方法。

@@ -8617,7 +8617,21 @@ internal static class ManagedSymbolReader
     {
         var metadata = context.Metadata;
         var info = ResolveCall(metadata, context.EnumTypes, token);
-        if (info is null || IsGeneratedName(info.DeclaringType))
+        if (info is null ||
+            info.Name != ".ctor" ||
+            !info.HasThis ||
+            !info.ReturnsVoid ||
+            info.GenericParameterCount != 0 ||
+            info.GenericArguments.Count != 0 ||
+            info.DeclaringHandle.Kind is not (
+                HandleKind.TypeDefinition or
+                HandleKind.TypeReference or
+                HandleKind.TypeSpecification) ||
+            (info.DefinitionAttributes is { } attributes &&
+             (!attributes.HasFlag(MethodAttributes.SpecialName) ||
+              !attributes.HasFlag(MethodAttributes.RTSpecialName) ||
+              attributes.HasFlag(MethodAttributes.Static))) ||
+            IsGeneratedName(info.DeclaringType))
         {
             return false;
         }

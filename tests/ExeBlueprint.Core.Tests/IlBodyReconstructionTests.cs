@@ -754,6 +754,30 @@ public sealed class IlBodyReconstructionTests
     }
 
     [Fact]
+    public void RejectsNewObjectOpcodesThatTargetOrdinaryMethods()
+    {
+        var staticMethod = typeof(CliStackCoercionFixture)
+            .GetMethod(
+                nameof(CliStackCoercionFixture.ClearStaticFlag),
+                BindingFlags.Static | BindingFlags.Public)!
+            .MetadataToken;
+        var instanceMethod = typeof(CliStackCoercionFixture)
+            .GetMethod(
+                nameof(CliStackCoercionFixture.ClearInstanceFlag),
+                BindingFlags.Instance | BindingFlags.Public)!
+            .MetadataToken;
+
+        Assert.Null(Reconstruct(
+            BuildNewObjectIl(staticMethod),
+            isInstance: false,
+            returnType: typeof(CliStackCoercionFixture).FullName!));
+        Assert.Null(Reconstruct(
+            BuildNewObjectIl(instanceMethod),
+            isInstance: false,
+            returnType: typeof(CliStackCoercionFixture).FullName!));
+    }
+
+    [Fact]
     public void RejectsIntegerExpressionsReturnedAsUnverifiedEnums()
     {
         byte[] il = [0x19, 0x2A]; // ldc.i4.3; ret
@@ -1382,6 +1406,15 @@ public sealed class IlBodyReconstructionTests
         il[prefix.Length] = 0x28;
         BinaryPrimitives.WriteInt32LittleEndian(il.AsSpan(prefix.Length + 1, 4), token);
         il[^1] = 0x2A;
+        return il;
+    }
+
+    private static byte[] BuildNewObjectIl(int token)
+    {
+        var il = new byte[6];
+        il[0] = 0x73; // newobj
+        BinaryPrimitives.WriteInt32LittleEndian(il.AsSpan(1, 4), token);
+        il[^1] = 0x2A; // ret
         return il;
     }
 
