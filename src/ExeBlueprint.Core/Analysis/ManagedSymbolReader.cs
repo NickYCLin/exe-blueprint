@@ -817,6 +817,8 @@ internal static class ManagedSymbolReader
         {
             var signature = method.DecodeSignature(SignatureTypeNameProvider.Instance, null);
             if (signature.ParameterTypes.Length != model.Parameters.Count ||
+                signature.ReturnType.HasPinnedQualifier ||
+                signature.ParameterTypes.Any(type => type.HasPinnedQualifier) ||
                 signature.Header.IsInstance == method.Attributes.HasFlag(MethodAttributes.Static))
             {
                 return null;
@@ -1253,6 +1255,7 @@ internal static class ManagedSymbolReader
         if (type.OuterCustomModifiers.Length != 0 ||
             type.HasNestedCustomModifiers ||
             type.IsRestrictedGenericArgument ||
+            type.HasPinnedQualifier ||
             type.PrimitiveType is PrimitiveTypeCode.Void or PrimitiveTypeCode.TypedReference)
         {
             return false;
@@ -1660,10 +1663,12 @@ internal static class ManagedSymbolReader
             signature.ReturnType.OuterCustomModifiers.Length != 0 ||
             signature.ReturnType.HasNestedCustomModifiers ||
             signature.ReturnType.IsRestrictedGenericArgument ||
+            signature.ReturnType.HasPinnedQualifier ||
             signature.ParameterTypes.Any(type =>
                 type.OuterCustomModifiers.Length != 0 ||
                 type.HasNestedCustomModifiers ||
                 type.IsRestrictedGenericArgument ||
+                type.HasPinnedQualifier ||
                 type.PrimitiveType == PrimitiveTypeCode.Void ||
                 !HasCanonicalLocalGenericDefinitions(metadata, type) ||
                 (type.IsExactNamedType &&
@@ -1987,6 +1992,7 @@ internal static class ManagedSymbolReader
         type.SignatureKind == SignatureTypeKind.Unknown &&
         type.PrimitiveType == PrimitiveTypeCode.Int32 &&
         !type.IsByReference &&
+        !type.HasPinnedQualifier &&
         signature.Text == "int" &&
         signature.PrimitiveType == PrimitiveTypeCode.Int32 &&
         signature.OuterCustomModifiers.Length == 0 &&
@@ -1997,6 +2003,7 @@ internal static class ManagedSymbolReader
         signature.SignatureKind == SignatureTypeKind.Unknown &&
         !signature.IsExactNamedType &&
         !signature.IsByReference &&
+        !signature.HasPinnedQualifier &&
         signature.GenericArguments.IsDefaultOrEmpty &&
         !signature.IsCanonicalGenericInstantiation &&
         signature.GenericDefinitionHandle.IsNil &&
@@ -2017,6 +2024,7 @@ internal static class ManagedSymbolReader
         type.SignatureKind == SignatureTypeKind.Unknown &&
         type.PrimitiveType is null &&
         !type.IsByReference &&
+        !type.HasPinnedQualifier &&
         signature.Text == "int[]" &&
         signature.PrimitiveType is null &&
         signature.OuterCustomModifiers.Length == 0 &&
@@ -2027,6 +2035,7 @@ internal static class ManagedSymbolReader
         signature.SignatureKind == SignatureTypeKind.Unknown &&
         !signature.IsExactNamedType &&
         !signature.IsByReference &&
+        !signature.HasPinnedQualifier &&
         signature.GenericArguments.IsDefaultOrEmpty &&
         !signature.IsCanonicalGenericInstantiation &&
         signature.GenericDefinitionHandle.IsNil &&
@@ -2833,7 +2842,9 @@ internal static class ManagedSymbolReader
         rendered = expression;
         if (expression == "null")
         {
-            if (!IsConstructorReferenceType(targetType, target.Signature))
+            if (targetType.HasPinnedQualifier ||
+                target.Signature.HasPinnedQualifier ||
+                !IsConstructorReferenceType(targetType, target.Signature))
             {
                 return false;
             }
@@ -2849,6 +2860,7 @@ internal static class ManagedSymbolReader
                    !target.Signature.HasNestedCustomModifiers &&
                    !target.Signature.IsRestrictedGenericArgument &&
                    !target.Signature.IsByReference &&
+                   !target.Signature.HasPinnedQualifier &&
                    target.Signature.SzArrayElementType is { } targetElement &&
                    AreSameConstructorSignature(foldedArrayElementSignature, targetElement);
         }
@@ -3151,6 +3163,14 @@ internal static class ManagedSymbolReader
         SignatureTypeName? sourceSignature,
         SignatureTypeName targetSignature)
     {
+        if (sourceType.HasPinnedQualifier ||
+            targetType.HasPinnedQualifier ||
+            sourceSignature?.HasPinnedQualifier == true ||
+            targetSignature.HasPinnedQualifier)
+        {
+            return false;
+        }
+
         if (sourceType.IsExactNamedType || targetType.IsExactNamedType)
         {
             return IsSameCliType(sourceType, targetType);
@@ -3189,7 +3209,9 @@ internal static class ManagedSymbolReader
             source.IsRestrictedGenericArgument ||
             target.IsRestrictedGenericArgument ||
             source.IsByReference ||
-            target.IsByReference)
+            target.IsByReference ||
+            source.HasPinnedQualifier ||
+            target.HasPinnedQualifier)
         {
             return false;
         }
@@ -4283,7 +4305,8 @@ internal static class ManagedSymbolReader
         bool IsExactNamedType = false,
         SignatureTypeKind SignatureKind = SignatureTypeKind.Unknown,
         PrimitiveTypeCode? PrimitiveType = null,
-        bool IsByReference = false)
+        bool IsByReference = false,
+        bool HasPinnedQualifier = false)
     {
         public static implicit operator string(CliType value) => value.Text;
 
@@ -4610,7 +4633,8 @@ internal static class ManagedSymbolReader
         int startOffset = 0)
     {
         requiresUnsafeContext = false;
-        if (decoded.Status != IlDecodeStatus.Complete ||
+        if (localTypes.Any(type => type.HasPinnedQualifier) ||
+            decoded.Status != IlDecodeStatus.Complete ||
             decoded.Instructions.Count == 0 ||
             !HasSupportedMethodTermination(
                 decoded.Instructions,
@@ -7092,8 +7116,17 @@ internal static class ManagedSymbolReader
                 return TryUnaryCast(context, stack, ConversionType(name));
 
             case "castclass":
-                var castType = GetTypeName(metadata, MetadataTokens.EntityHandle(BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4))));
-                if (castType is null || IsGeneratedName(castType) || !TryPop(stack, out var castValue))
+                var castHandle = MetadataTokens.EntityHandle(
+                    BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)));
+                if (HasInvalidPinnedTypeSpecification(metadata, castHandle))
+                {
+                    return false;
+                }
+
+                var castType = GetTypeName(metadata, castHandle);
+                if (castType is null ||
+                    IsGeneratedName(castType) ||
+                    !TryPop(stack, out var castValue))
                 {
                     return false;
                 }
@@ -7105,8 +7138,17 @@ internal static class ManagedSymbolReader
                     new CliType(castType));
                 return true;
             case "isinst":
-                var instType = GetTypeName(metadata, MetadataTokens.EntityHandle(BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4))));
-                if (instType is null || IsGeneratedName(instType) || !TryPop(stack, out var instValue))
+                var instHandle = MetadataTokens.EntityHandle(
+                    BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(offset, 4)));
+                if (HasInvalidPinnedTypeSpecification(metadata, instHandle))
+                {
+                    return false;
+                }
+
+                var instType = GetTypeName(metadata, instHandle);
+                if (instType is null ||
+                    IsGeneratedName(instType) ||
+                    !TryPop(stack, out var instValue))
                 {
                     return false;
                 }
@@ -7660,7 +7702,8 @@ internal static class ManagedSymbolReader
             type.IsExactNamedType,
             type.SignatureKind,
             type.PrimitiveType,
-            type.IsByReference);
+            type.IsByReference,
+            type.HasPinnedQualifier);
     }
 
     private static CliType CreateTestCliType(string type, EnumTypeCatalog enumTypes)
@@ -8925,6 +8968,8 @@ internal static class ManagedSymbolReader
                 var methodSignature = method.DecodeSignature(SignatureTypeNameProvider.Instance, null);
                 var methodDeclaringType = method.GetDeclaringType();
                 if (methodSignature.GenericParameterCount != method.GetGenericParameters().Count ||
+                    methodSignature.ReturnType.HasPinnedQualifier ||
+                    methodSignature.ParameterTypes.Any(type => type.HasPinnedQualifier) ||
                     methodSignature.Header.IsInstance == method.Attributes.HasFlag(MethodAttributes.Static))
                 {
                     return null;
@@ -8954,14 +8999,18 @@ internal static class ManagedSymbolReader
                 object? declaringTypeContext = null;
                 if (member.Parent.Kind == HandleKind.TypeSpecification)
                 {
-                    var declaringType = SignatureTypeNameProvider.Instance.GetTypeFromSpecification(
+                    var declaringType = TryReadSignatureTypeSpecification(
                         metadata,
-                        genericContext: null,
-                        (TypeSpecificationHandle)member.Parent,
-                        rawTypeKind: 0);
+                        (TypeSpecificationHandle)member.Parent);
+                    if (declaringType is null || declaringType.HasPinnedQualifier)
+                    {
+                        return null;
+                    }
+
                     if (declaringType.IsCanonicalGenericInstantiation &&
                         !declaringType.GenericArguments.IsDefaultOrEmpty &&
                         !declaringType.HasNestedCustomModifiers &&
+                        !declaringType.HasPinnedQualifier &&
                         declaringType.OuterCustomModifiers.IsEmpty)
                     {
                         declaringTypeContext = SignatureGenericContext.ForSubstitution(
@@ -8972,6 +9021,12 @@ internal static class ManagedSymbolReader
                 var memberSignature = member.DecodeMethodSignature(
                     SignatureTypeNameProvider.Instance,
                     declaringTypeContext);
+                if (memberSignature.ReturnType.HasPinnedQualifier ||
+                    memberSignature.ParameterTypes.Any(type => type.HasPinnedQualifier))
+                {
+                    return null;
+                }
+
                 return new CallInfo(
                     GetTypeName(metadata, member.Parent) ?? string.Empty,
                     CreateNominalCliType(metadata, enumTypes, member.Parent),
@@ -9002,6 +9057,7 @@ internal static class ManagedSymbolReader
                         type.OuterCustomModifiers.Length != 0 ||
                         type.HasNestedCustomModifiers ||
                         type.IsRestrictedGenericArgument ||
+                        type.HasPinnedQualifier ||
                         type.PrimitiveType is PrimitiveTypeCode.Void or PrimitiveTypeCode.TypedReference ||
                         (type.Text == "nint" && type.PrimitiveType is null) ||
                         (type.IsExactNamedType && IsPrimitiveAliasName(type.Text))))
@@ -9033,7 +9089,10 @@ internal static class ManagedSymbolReader
         var text = InstantiateMethodSignatureType(type.Text, genericArguments);
         return text == type.Text
             ? type
-            : new CliType(text, IsByReference: type.IsByReference);
+            : new CliType(
+                text,
+                IsByReference: type.IsByReference,
+                HasPinnedQualifier: type.HasPinnedQualifier);
     }
 
     private static CliType CreateNominalCliType(
@@ -9051,15 +9110,47 @@ internal static class ManagedSymbolReader
                 metadata,
                 (TypeReferenceHandle)handle,
                 rawTypeKind: 0),
-            HandleKind.TypeSpecification => SignatureTypeNameProvider.Instance.GetTypeFromSpecification(
+            HandleKind.TypeSpecification => TryReadSignatureTypeSpecification(
                 metadata,
-                genericContext: null,
-                (TypeSpecificationHandle)handle,
-                rawTypeKind: 0),
+                (TypeSpecificationHandle)handle) ?? new SignatureTypeName(string.Empty),
             _ => new SignatureTypeName(string.Empty)
         };
         var text = GetTypeName(metadata, handle) ?? type.Text;
         return CreateCliType(type, enumTypes) with { Text = text };
+    }
+
+    private static SignatureTypeName? TryReadSignatureTypeSpecification(
+        MetadataReader metadata,
+        TypeSpecificationHandle handle)
+    {
+        try
+        {
+            return SignatureTypeNameProvider.Instance.GetTypeFromSpecification(
+                metadata,
+                genericContext: null,
+                handle,
+                rawTypeKind: 0);
+        }
+        catch (Exception exception) when (
+            exception is BadImageFormatException or ArgumentException or InvalidOperationException)
+        {
+            return null;
+        }
+    }
+
+    private static bool HasInvalidPinnedTypeSpecification(
+        MetadataReader metadata,
+        EntityHandle handle)
+    {
+        if (handle.Kind != HandleKind.TypeSpecification)
+        {
+            return false;
+        }
+
+        var type = TryReadSignatureTypeSpecification(
+            metadata,
+            (TypeSpecificationHandle)handle);
+        return type is null || type.HasPinnedQualifier;
     }
 
     private static (string DeclaringType, string Name, CliType Type)? ResolveField(
@@ -9072,12 +9163,16 @@ internal static class ManagedSymbolReader
         {
             case HandleKind.FieldDefinition:
                 var field = metadata.GetFieldDefinition((FieldDefinitionHandle)handle);
+                var fieldType = field.DecodeSignature(SignatureTypeNameProvider.Instance, null);
+                if (fieldType.HasPinnedQualifier)
+                {
+                    return null;
+                }
+
                 return (
                     GetTypeName(metadata, field.GetDeclaringType()) ?? string.Empty,
                     NormalizeFieldName(metadata.GetString(field.Name)),
-                    CreateCliType(
-                        field.DecodeSignature(SignatureTypeNameProvider.Instance, null),
-                        enumTypes));
+                    CreateCliType(fieldType, enumTypes));
 
             case HandleKind.MemberReference:
                 var member = metadata.GetMemberReference((MemberReferenceHandle)handle);
@@ -9086,12 +9181,27 @@ internal static class ManagedSymbolReader
                     return null;
                 }
 
+                if (member.Parent.Kind == HandleKind.TypeSpecification &&
+                    (TryReadSignatureTypeSpecification(
+                         metadata,
+                         (TypeSpecificationHandle)member.Parent) is not { } parentType ||
+                     parentType.HasPinnedQualifier))
+                {
+                    return null;
+                }
+
+                var memberType = member.DecodeFieldSignature(
+                    SignatureTypeNameProvider.Instance,
+                    null);
+                if (memberType.HasPinnedQualifier)
+                {
+                    return null;
+                }
+
                 return (
                     GetTypeName(metadata, member.Parent) ?? string.Empty,
                     NormalizeFieldName(metadata.GetString(member.Name)),
-                    CreateCliType(
-                        member.DecodeFieldSignature(SignatureTypeNameProvider.Instance, null),
-                        enumTypes));
+                    CreateCliType(memberType, enumTypes));
 
             default:
                 return null;
@@ -11628,7 +11738,8 @@ internal sealed record SignatureTypeName(
     SignatureTypeKind GenericDefinitionSignatureKind = SignatureTypeKind.Unknown,
     string? GenericDefinitionText = null,
     SignatureTypeParameterSlot? TypeParameterSlot = null,
-    SignatureTypeName? SzArrayElementType = null)
+    SignatureTypeName? SzArrayElementType = null,
+    bool HasPinnedQualifier = false)
 {
     public SignatureTypeName(string text)
         : this(text, [], false, false)
@@ -11672,6 +11783,9 @@ internal sealed class SignatureTypeNameProvider : ISignatureTypeProvider<Signatu
 
     public SignatureTypeName GetFunctionPointerType(MethodSignature<SignatureTypeName> signature)
     {
+        var hasPinnedQualifier = signature.ReturnType.HasPinnedQualifier ||
+                                 signature.ParameterTypes.Any(
+                                     parameter => parameter.HasPinnedQualifier);
         if (signature.Header.Kind != SignatureKind.Method ||
             signature.Header.IsGeneric ||
             signature.Header.IsInstance ||
@@ -11685,7 +11799,7 @@ internal sealed class SignatureTypeNameProvider : ISignatureTypeProvider<Signatu
                 parameter.HasNestedCustomModifiers ||
                 parameter.OuterCustomModifiers.Length > 0))
         {
-            return new SignatureTypeName("nint");
+            return Unsupported();
         }
 
         var conventions = new List<string>();
@@ -11701,7 +11815,7 @@ internal sealed class SignatureTypeNameProvider : ISignatureTypeProvider<Signatu
         };
         if (prefix.Length == 0)
         {
-            return new SignatureTypeName("nint");
+            return Unsupported();
         }
 
         const string callConventionPrefix = "System.Runtime.CompilerServices.CallConv";
@@ -11712,13 +11826,13 @@ internal sealed class SignatureTypeNameProvider : ISignatureTypeProvider<Signatu
             if (modifier.IsRequired ||
                 !modifier.Type.StartsWith(callConventionPrefix, StringComparison.Ordinal))
             {
-                return new SignatureTypeName("nint");
+                return Unsupported();
             }
 
             var convention = modifier.Type[callConventionPrefix.Length..];
             if (!SupportedFunctionPointerCallingConventions.Contains(convention))
             {
-                return new SignatureTypeName("nint");
+                return Unsupported();
             }
 
             conventions.Add(convention);
@@ -11726,7 +11840,7 @@ internal sealed class SignatureTypeNameProvider : ISignatureTypeProvider<Signatu
 
         if (prefix == " managed" && conventions.Count > 0)
         {
-            return new SignatureTypeName("nint");
+            return Unsupported();
         }
 
         if (prefix == " unmanaged" && conventions.Count > 0)
@@ -11740,7 +11854,14 @@ internal sealed class SignatureTypeNameProvider : ISignatureTypeProvider<Signatu
             ">",
             [],
             HasNestedCustomModifiers: false,
-            IsRestrictedGenericArgument: true);
+            IsRestrictedGenericArgument: true,
+            HasPinnedQualifier: hasPinnedQualifier);
+
+        SignatureTypeName Unsupported() =>
+            new SignatureTypeName("nint") with
+            {
+                HasPinnedQualifier = hasPinnedQualifier
+            };
 
         string AddConvention(string convention)
         {
@@ -11753,10 +11874,15 @@ internal sealed class SignatureTypeNameProvider : ISignatureTypeProvider<Signatu
         SignatureTypeName genericType,
         ImmutableArray<SignatureTypeName> typeArguments)
     {
+        var hasPinnedQualifier = genericType.HasPinnedQualifier ||
+                                 typeArguments.Any(type => type.HasPinnedQualifier);
         if (genericType.IsRestrictedGenericArgument ||
             typeArguments.Any(type => type.IsRestrictedGenericArgument))
         {
-            return new SignatureTypeName("nint");
+            return new SignatureTypeName("nint") with
+            {
+                HasPinnedQualifier = hasPinnedQualifier
+            };
         }
 
         var segments = genericType.Text.Split('.');
@@ -11846,7 +11972,7 @@ internal sealed class SignatureTypeNameProvider : ISignatureTypeProvider<Signatu
         };
 
     public SignatureTypeName GetPinnedType(SignatureTypeName elementType) =>
-        Wrap(elementType.Text, elementType, elementType.IsRestrictedGenericArgument);
+        elementType with { HasPinnedQualifier = true };
 
     public SignatureTypeName GetPointerType(SignatureTypeName elementType) =>
         Wrap($"{elementType.Text}*", elementType, isRestrictedGenericArgument: true);
@@ -11965,7 +12091,9 @@ internal sealed class SignatureTypeNameProvider : ISignatureTypeProvider<Signatu
             GenericDefinitionSignatureKind: hasExactDefinition
                 ? genericType.SignatureKind
                 : SignatureTypeKind.Unknown,
-            GenericDefinitionText: hasExactDefinition ? genericType.Text : null);
+            GenericDefinitionText: hasExactDefinition ? genericType.Text : null,
+            HasPinnedQualifier: genericType.HasPinnedQualifier ||
+                                typeArguments.Any(type => type.HasPinnedQualifier));
     }
 
     private static SignatureTypeName Wrap(
@@ -11976,7 +12104,8 @@ internal sealed class SignatureTypeNameProvider : ISignatureTypeProvider<Signatu
             text,
             [],
             HasAnyCustomModifiers(elementType),
-            isRestrictedGenericArgument);
+            isRestrictedGenericArgument,
+            HasPinnedQualifier: elementType.HasPinnedQualifier);
 
     private static bool HasAnyCustomModifiers(SignatureTypeName type) =>
         type.HasNestedCustomModifiers || type.OuterCustomModifiers.Length > 0;
