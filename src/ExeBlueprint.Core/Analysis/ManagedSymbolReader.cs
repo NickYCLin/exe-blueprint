@@ -23,6 +23,7 @@ internal static class ManagedSymbolReader
     private const int MaxEnumFieldsToInspect = 1_024;
     private const int MaxEnumFieldsToInspectAcrossAssembly = 100_000;
     private const int MaxConstructorInitializerArguments = 32;
+    private const int MaxConstructorArrayLength = 32;
     private const int MaxConstructorTypeSignatureBytes = 64;
     private const int MaxConstructorLocalSignatureBytes = MaxConstructorTypeSignatureBytes + 2;
     private const int MaxAssemblyPublicKeyBytes = 4_096;
@@ -756,7 +757,8 @@ internal static class ManagedSymbolReader
         string Expression,
         CliType Type,
         SignatureTypeName? Signature,
-        bool IsFoldedExpression = false);
+        bool IsFoldedExpression = false,
+        SignatureTypeName? FoldedArrayElementSignature = null);
 
     private sealed record ConstructorTypeSpecificationContext(
         TypeSpecificationHandle Handle,
@@ -909,6 +911,24 @@ internal static class ManagedSymbolReader
                 continue;
             }
 
+            if (name == "newarr")
+            {
+                if (arguments.Count == 0 ||
+                    !TryFoldInt32ArrayConstructorArgument(
+                        metadata,
+                        il,
+                        rawInstructions[index],
+                        arguments[^1],
+                        out var arrayArgument))
+                {
+                    return null;
+                }
+
+                arguments[^1] = arrayArgument;
+                index++;
+                continue;
+            }
+
             if (name == "ldtoken")
             {
                 if (arguments.Count >= MaxConstructorInitializerArguments ||
@@ -1033,6 +1053,7 @@ internal static class ManagedSymbolReader
                     argument.Expression,
                     argument.Type,
                     argument.Signature,
+                    argument.FoldedArrayElementSignature,
                     target.Parameters[argumentIndex],
                     allowVerifiedDirectBaseConversion: kind == "base",
                     out renderedArguments[argumentIndex]))
@@ -1748,6 +1769,62 @@ internal static class ManagedSymbolReader
         }
     }
 
+    private static bool TryFoldInt32ArrayConstructorArgument(
+        MetadataReader metadata,
+        byte[] il,
+        IlInstruction instruction,
+        ConstructorArgument lengthArgument,
+        out ConstructorArgument argument)
+    {
+        argument = default;
+        if (lengthArgument.IsFoldedExpression ||
+            lengthArgument.Signature is not null ||
+            lengthArgument.Type.PrimitiveType != PrimitiveTypeCode.Int32 ||
+            instruction.OperandSize != 4 ||
+            !int.TryParse(
+                lengthArgument.Expression,
+                NumberStyles.AllowLeadingSign,
+                CultureInfo.InvariantCulture,
+                out var length) ||
+            length < 0 ||
+            length > MaxConstructorArrayLength)
+        {
+            return false;
+        }
+
+        try
+        {
+            var token = BinaryPrimitives.ReadInt32LittleEndian(
+                il.AsSpan(instruction.OperandOffset, 4));
+            var handle = MetadataTokens.EntityHandle(token);
+            if (handle.Kind != HandleKind.TypeReference ||
+                !TryReadTrustedSystemRuntimeTypeReference(
+                    metadata,
+                    (TypeReferenceHandle)handle,
+                    "Int32",
+                    out _))
+            {
+                return false;
+            }
+
+            var elementSignature = SignatureTypeNameProvider.Instance.GetPrimitiveType(
+                PrimitiveTypeCode.Int32);
+            argument = new ConstructorArgument(
+                $"new int[{length.ToString(CultureInfo.InvariantCulture)}]",
+                new CliType("int[]"),
+                Signature: null,
+                IsFoldedExpression: true,
+                FoldedArrayElementSignature: elementSignature);
+            return true;
+        }
+        catch (Exception exception) when (
+            exception is BadImageFormatException or ArgumentException or InvalidOperationException)
+        {
+            argument = default;
+            return false;
+        }
+    }
+
     private static bool TryFoldTypeOfConstructorArgument(
         MetadataReader metadata,
         EnumTypeCatalog enumTypes,
@@ -2440,6 +2517,7 @@ internal static class ManagedSymbolReader
         string expression,
         CliType sourceType,
         SignatureTypeName? sourceSignature,
+        SignatureTypeName? foldedArrayElementSignature,
         ConstructorParameter target,
         bool allowVerifiedDirectBaseConversion,
         out string rendered)
@@ -2455,6 +2533,17 @@ internal static class ManagedSymbolReader
 
             rendered = $"(({targetType.Text})null!)";
             return true;
+        }
+
+        if (foldedArrayElementSignature is not null)
+        {
+            return allowVerifiedDirectBaseConversion &&
+                   target.Signature.OuterCustomModifiers.Length == 0 &&
+                   !target.Signature.HasNestedCustomModifiers &&
+                   !target.Signature.IsRestrictedGenericArgument &&
+                   !target.Signature.IsByReference &&
+                   target.Signature.SzArrayElementType is { } targetElement &&
+                   AreSameConstructorSignature(foldedArrayElementSignature, targetElement);
         }
 
         if (IsExactConstructorAssignment(
@@ -10644,7 +10733,8 @@ internal sealed record SignatureTypeName(
     byte GenericDefinitionRawTypeKind = 0,
     SignatureTypeKind GenericDefinitionSignatureKind = SignatureTypeKind.Unknown,
     string? GenericDefinitionText = null,
-    SignatureTypeParameterSlot? TypeParameterSlot = null)
+    SignatureTypeParameterSlot? TypeParameterSlot = null,
+    SignatureTypeName? SzArrayElementType = null)
 {
     public SignatureTypeName(string text)
         : this(text, [], false, false)
@@ -10900,7 +10990,10 @@ internal sealed class SignatureTypeNameProvider : ISignatureTypeProvider<Signatu
     }
 
     public SignatureTypeName GetSZArrayType(SignatureTypeName elementType) =>
-        Wrap($"{elementType.Text}[]", elementType, isRestrictedGenericArgument: false);
+        Wrap($"{elementType.Text}[]", elementType, isRestrictedGenericArgument: false) with
+        {
+            SzArrayElementType = elementType
+        };
 
     public SignatureTypeName GetTypeFromDefinition(
         MetadataReader reader,
