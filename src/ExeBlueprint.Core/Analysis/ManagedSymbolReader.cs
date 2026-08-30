@@ -4440,15 +4440,35 @@ internal static class ManagedSymbolReader
 
         if (op is "&" or "|" or "^")
         {
-            if (leftType is not null && IsPotentialEnumType(leftType.Text) && IsIntegerLiteral(right))
+            if (leftType is not null &&
+                TryGetKnownEnumUnderlyingType(leftType, out _) &&
+                IsIntegerLiteral(right))
             {
-                right = $"unchecked(({leftType.Text}){right})";
+                if (!TryRenderTargetExpression(context, right, leftType, out right))
+                {
+                    return false;
+                }
+
                 resultType ??= leftType;
             }
-            else if (rightType is not null && IsPotentialEnumType(rightType.Text) && IsIntegerLiteral(left))
+            else if (rightType is not null &&
+                     TryGetKnownEnumUnderlyingType(rightType, out _) &&
+                     IsIntegerLiteral(left))
             {
-                left = $"unchecked(({rightType.Text}){left})";
+                if (!TryRenderTargetExpression(context, left, rightType, out left))
+                {
+                    return false;
+                }
+
                 resultType ??= rightType;
+            }
+            else if (!TryNormalizeBitwiseOperands(context, ref left, ref right, out var bitwiseResultType))
+            {
+                return false;
+            }
+            else
+            {
+                resultType ??= bitwiseResultType;
             }
         }
 
@@ -4459,6 +4479,81 @@ internal static class ManagedSymbolReader
 
         PushExpression(context, stack, $"({left} {op} {right})", resultType);
         return true;
+    }
+
+    private static bool TryNormalizeBitwiseOperands(
+        ReconContext context,
+        ref string left,
+        ref string right,
+        out CliType resultType)
+    {
+        resultType = new CliType(string.Empty);
+        if (context.AmbiguousExpressionTypes.Contains(left) ||
+            context.AmbiguousExpressionTypes.Contains(right) ||
+            !context.ExpressionTypes.TryGetValue(left, out var leftType) ||
+            !context.ExpressionTypes.TryGetValue(right, out var rightType))
+        {
+            return false;
+        }
+
+        if (leftType.PrimitiveType == PrimitiveTypeCode.Boolean &&
+            TryReadIlBooleanLiteral(right, rightType, out var rightBoolean))
+        {
+            right = rightBoolean ? "true" : "false";
+            rightType = new CliType("bool", PrimitiveType: PrimitiveTypeCode.Boolean);
+        }
+        else if (rightType.PrimitiveType == PrimitiveTypeCode.Boolean &&
+                 TryReadIlBooleanLiteral(left, leftType, out var leftBoolean))
+        {
+            left = leftBoolean ? "true" : "false";
+            leftType = new CliType("bool", PrimitiveType: PrimitiveTypeCode.Boolean);
+        }
+
+        if (leftType.PrimitiveType == PrimitiveTypeCode.Boolean ||
+            rightType.PrimitiveType == PrimitiveTypeCode.Boolean)
+        {
+            if (leftType.PrimitiveType != PrimitiveTypeCode.Boolean ||
+                rightType.PrimitiveType != PrimitiveTypeCode.Boolean)
+            {
+                return false;
+            }
+
+            resultType = new CliType("bool", PrimitiveType: PrimitiveTypeCode.Boolean);
+            return true;
+        }
+
+        var leftIsEnum = TryGetKnownEnumUnderlyingType(leftType, out var leftUnderlyingType);
+        var rightIsEnum = TryGetKnownEnumUnderlyingType(rightType, out var rightUnderlyingType);
+        if (leftIsEnum && rightIsEnum && !IsSameCliType(leftType, rightType))
+        {
+            return false;
+        }
+
+        var leftFamily = IntegralStackFamily(leftIsEnum ? leftUnderlyingType : leftType.Text);
+        var rightFamily = IntegralStackFamily(rightIsEnum ? rightUnderlyingType : rightType.Text);
+        if (leftFamily < 0 || leftFamily != rightFamily)
+        {
+            return false;
+        }
+
+        resultType = leftIsEnum && rightIsEnum
+            ? leftType
+            : leftFamily switch
+            {
+                0 => new CliType("int", PrimitiveType: PrimitiveTypeCode.Int32),
+                1 => new CliType("long", PrimitiveType: PrimitiveTypeCode.Int64),
+                2 => new CliType("nint", PrimitiveType: PrimitiveTypeCode.IntPtr),
+                _ => new CliType(string.Empty)
+            };
+        if (resultType.Text.Length == 0)
+        {
+            return false;
+        }
+
+        var originalLeft = left;
+        var originalRight = right;
+        return TryRenderTargetExpression(context, originalLeft, resultType, out left) &&
+               TryRenderTargetExpression(context, originalRight, resultType, out right);
     }
 
     // CLI equality compares integral stack values, while C# does not permit enum/integer equality.
@@ -5342,10 +5437,14 @@ internal static class ManagedSymbolReader
                 return false;
             }
 
-            args[index] = RenderArgument(
-                context,
-                argument,
-                index < info.ParameterTypes.Count ? info.ParameterTypes[index] : null);
+            if (!TryRenderArgument(
+                    context,
+                    argument,
+                    index < info.ParameterTypes.Count ? info.ParameterTypes[index] : null,
+                    out args[index]))
+            {
+                return false;
+            }
             if (RequiresNullForgivingComparerArgument(context, info, argument))
             {
                 args[index] += "!";
@@ -5666,6 +5765,15 @@ internal static class ManagedSymbolReader
             return false;
         }
 
+        // MemberRef signatures on a constructed declaring TypeSpec are decoded with that
+        // declaring-type context. A remaining !n is therefore still open and does not identify
+        // the actual constructor parameter; do not guess its identity from the stack value.
+        if (info.DeclaringHandle.Kind == HandleKind.TypeSpecification &&
+            info.ParameterTypes.Any(type => ContainsUninstantiatedTypeGenericParameter(type.Text)))
+        {
+            return false;
+        }
+
         MarkUnsafeSignature(context, info);
 
         var args = new string[info.ParamCount];
@@ -5676,10 +5784,14 @@ internal static class ManagedSymbolReader
                 return false;
             }
 
-            args[index] = RenderArgument(
-                context,
-                argument,
-                index < info.ParameterTypes.Count ? info.ParameterTypes[index] : null);
+            if (!TryRenderArgument(
+                    context,
+                    argument,
+                    index < info.ParameterTypes.Count ? info.ParameterTypes[index] : null,
+                    out args[index]))
+            {
+                return false;
+            }
         }
 
         PushExpression(
@@ -5711,8 +5823,13 @@ internal static class ManagedSymbolReader
     private static bool RequiresUnsafeType(string type) => type.Contains('*');
 
     // bool、char 與 enum 在 IL 中都以整數常值傳遞；依正式參數型別還原成可編譯的 C# 引數。
-    private static string RenderArgument(ReconContext context, string argument, CliType? parameterType)
+    private static bool TryRenderArgument(
+        ReconContext context,
+        string argument,
+        CliType? parameterType,
+        out string rendered)
     {
+        rendered = argument;
         var isIntegerLiteral = long.TryParse(
             argument,
             NumberStyles.Integer,
@@ -5720,31 +5837,63 @@ internal static class ManagedSymbolReader
             out var value);
         if (isIntegerLiteral && parameterType?.Text == "bool" && value is 0 or 1)
         {
-            return value == 1 ? "true" : "false";
+            rendered = value == 1 ? "true" : "false";
+            return true;
         }
 
         if (isIntegerLiteral && parameterType?.Text == "char" && value is >= 0 and <= 0xFFFF)
         {
-            return FormatCharLiteral((char)value);
+            rendered = FormatCharLiteral((char)value);
+            return true;
         }
 
-        // CLI 在同一 integral stack family 內不區分 signedness／窄型別，C# 呼叫則要求正式型別。
         if (parameterType is not null &&
             context.ExpressionTypes.TryGetValue(argument, out var argumentType) &&
-            argumentType.Text != parameterType.Text &&
-            IsSameIntegralStackFamily(argumentType.Text, parameterType.Text))
+            argumentType.Text != parameterType.Text)
         {
-            return $"unchecked(({parameterType.Text}){argument})";
+            var argumentIsEnum = TryGetKnownEnumUnderlyingType(argumentType, out var argumentUnderlyingType);
+            var parameterIsEnum = TryGetKnownEnumUnderlyingType(parameterType, out var parameterUnderlyingType);
+            var argumentFamily = IntegralStackFamily(argumentIsEnum ? argumentUnderlyingType : argumentType.Text);
+            var parameterFamily = IntegralStackFamily(parameterIsEnum ? parameterUnderlyingType : parameterType.Text);
+            var enumLikeMismatch = !isIntegerLiteral && (
+                argumentFamily >= 0 && IsPotentialEnumType(parameterType.Text) ||
+                parameterFamily >= 0 && IsPotentialEnumType(argumentType.Text));
+            if (argumentType.PrimitiveType == PrimitiveTypeCode.Boolean ||
+                parameterType.PrimitiveType == PrimitiveTypeCode.Boolean ||
+                argumentIsEnum ||
+                parameterIsEnum ||
+                argumentFamily >= 0 && parameterFamily >= 0 ||
+                enumLikeMismatch)
+            {
+                return TryRenderTargetExpression(context, argument, parameterType, out rendered);
+            }
         }
 
         if (!isIntegerLiteral)
         {
-            return argument;
+            return true;
         }
 
-        return IsNumericOrReferenceParameter(parameterType?.Text)
+        rendered = IsNumericOrReferenceParameter(parameterType?.Text)
             ? argument
             : $"unchecked(({parameterType?.Text}){argument})";
+        return true;
+    }
+
+    private static bool ContainsUninstantiatedTypeGenericParameter(string type)
+    {
+        for (var index = 0; index + 1 < type.Length; index++)
+        {
+            if (type[index] == '!' &&
+                (index == 0 || type[index - 1] != '!') &&
+                type[index + 1] != '!' &&
+                char.IsAsciiDigit(type[index + 1]))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static bool IsSameIntegralStackFamily(string left, string right)
@@ -6015,7 +6164,26 @@ internal static class ManagedSymbolReader
                     return null;
                 }
 
-                var memberSignature = member.DecodeMethodSignature(SignatureTypeNameProvider.Instance, null);
+                object? declaringTypeContext = null;
+                if (member.Parent.Kind == HandleKind.TypeSpecification)
+                {
+                    var declaringType = SignatureTypeNameProvider.Instance.GetTypeFromSpecification(
+                        metadata,
+                        genericContext: null,
+                        (TypeSpecificationHandle)member.Parent,
+                        rawTypeKind: 0);
+                    if (declaringType.IsCanonicalGenericInstantiation &&
+                        !declaringType.GenericArguments.IsDefaultOrEmpty &&
+                        !declaringType.HasNestedCustomModifiers &&
+                        declaringType.OuterCustomModifiers.IsEmpty)
+                    {
+                        declaringTypeContext = new SignatureGenericContext(declaringType.GenericArguments);
+                    }
+                }
+
+                var memberSignature = member.DecodeMethodSignature(
+                    SignatureTypeNameProvider.Instance,
+                    declaringTypeContext);
                 return new CallInfo(
                     GetTypeName(metadata, member.Parent) ?? string.Empty,
                     CreateNominalCliType(metadata, enumTypes, member.Parent),
@@ -8598,6 +8766,9 @@ internal static class ManagedSymbolReader
 
 internal readonly record struct SignatureCustomModifier(string Type, bool IsRequired);
 
+internal readonly record struct SignatureGenericContext(
+    ImmutableArray<SignatureTypeName> TypeArguments);
+
 internal sealed record SignatureTypeName(
     string Text,
     ImmutableArray<SignatureCustomModifier> OuterCustomModifiers,
@@ -8608,7 +8779,9 @@ internal sealed record SignatureTypeName(
     SignatureTypeKind SignatureKind = SignatureTypeKind.Unknown,
     bool IsExactNamedType = false,
     PrimitiveTypeCode? PrimitiveType = null,
-    bool IsByReference = false)
+    bool IsByReference = false,
+    ImmutableArray<SignatureTypeName> GenericArguments = default,
+    bool IsCanonicalGenericInstantiation = false)
 {
     public SignatureTypeName(string text)
         : this(text, [], false, false)
@@ -8771,13 +8944,27 @@ internal sealed class SignatureTypeNameProvider : ISignatureTypeProvider<Signatu
         }
 
         return foundArity && argumentIndex == typeArguments.Length
-            ? CreateGenericInstantiation(string.Join('.', rendered), genericType, typeArguments)
+            ? CreateGenericInstantiation(
+                string.Join('.', rendered),
+                genericType,
+                typeArguments,
+                isCanonical: true)
             : FormatLegacyGenericInstantiation(genericType, typeArguments);
     }
 
     public SignatureTypeName GetGenericMethodParameter(object? genericContext, int index) => new($"!!{index}");
 
-    public SignatureTypeName GetGenericTypeParameter(object? genericContext, int index) => new($"!{index}");
+    public SignatureTypeName GetGenericTypeParameter(object? genericContext, int index)
+    {
+        if (genericContext is SignatureGenericContext context &&
+            index >= 0 &&
+            index < context.TypeArguments.Length)
+        {
+            return context.TypeArguments[index];
+        }
+
+        return new SignatureTypeName($"!{index}");
+    }
 
     public SignatureTypeName GetModifiedType(
         SignatureTypeName modifier,
@@ -8885,17 +9072,21 @@ internal sealed class SignatureTypeNameProvider : ISignatureTypeProvider<Signatu
         CreateGenericInstantiation(
             $"{StripQualifiedArity(genericType.Text)}<{string.Join(", ", typeArguments.Select(type => type.Text))}>",
             genericType,
-            typeArguments);
+            typeArguments,
+            isCanonical: false);
 
     private static SignatureTypeName CreateGenericInstantiation(
         string text,
         SignatureTypeName genericType,
-        ImmutableArray<SignatureTypeName> typeArguments) =>
+        ImmutableArray<SignatureTypeName> typeArguments,
+        bool isCanonical) =>
         new(
             text,
             [],
             HasAnyCustomModifiers(genericType) || typeArguments.Any(HasAnyCustomModifiers),
-            IsRestrictedGenericArgument: false);
+            IsRestrictedGenericArgument: false,
+            GenericArguments: typeArguments,
+            IsCanonicalGenericInstantiation: isCanonical);
 
     private static SignatureTypeName Wrap(
         string text,

@@ -109,6 +109,8 @@ ByRef formal 會以 signature 的結構化資訊辨識，不靠 `ref ` 顯示字
 重建 context 也會追蹤參數、區域變數、欄位、運算式與呼叫回傳型別；`brtrue`／`brfalse` 遇到參考型別時會輸出 `is null`／`is not null`，避免把物件直接當成 C# bool 條件。
 IL enum 位元運算的整數常值會轉回另一側的 enum 型別，enum selector 的 `switch` case 常值也會套用相同型別，避免輸出無法編譯的 enum／int 混合運算。
 `ceq`、`beq` 與 `bne.un` 的 equality operands 也會依同一份已驗 TypeDef enum catalog 正規化；相同 enum identity 可直接比較，enum 與同 stack family 整數會把整數側明確轉型，跨 enum identity、外部或未驗證的 enum-like 型別則 fail closed。
+一般 `and`／`or`／`xor` 會要求兩側都有非 ambiguous 的 primitive 或已驗 enum 型別，且屬於同一個 CLI integral stack family；除同 enum 與 enum/literal mask 外，運算前統一轉成 `int`／`long`／`nint` carrier，之後再由 typed store/return 轉回目標，避免 C# signedness promotion 改變位元寬度或產生無法編譯的混合運算。bool 接受 bool/bool，也會把另一側已證明為 IL 0/1 的常值正規化成 `false`／`true`；其他 bool/integer 混合、跨 family、不同 enum identity、外部 enum-like 與未知型別皆 fail closed。
+call 與 `newobj` 引數也會重用 typed-target gate，只有已驗 enum／integral 同 stack family 才補 `unchecked` 轉型；MemberRef 指向 canonical constructed declaring TypeSpec 時，會先以該 TypeSpec 的結構化 generic arguments 代入正式參數，closed `Span<byte>`／`Nullable<bool>` 等可得到精確型別。無法對齊 arity 的 legacy rendering 不會成為代入證據；`newobj` 代入後若仍殘留開放 `!n` 才會 fail closed，不把 generic slot 猜成具體型別。一般呼叫則保留原有 generic owner context，不因顯示字串含 `!n` 而整批拒絕。
 `div.un`／`rem.un`／`cgt.un`／`clt.un` 只在兩側型別都能確認屬於同一個 int32、int64 或 native-int stack family 時還原；運算元會先明確轉成 `uint`、`ulong` 或 `nuint`，算術結果寫回同 family 的 signed／窄型別時再使用 `unchecked` 轉型。`cgt.un` 的既有 reference/null 正規化仍保留；型別未知、跨 family 或具 unordered 語意的浮點輸入則讓整個方法 fail closed。
 
 `bge.un`／`bgt.un`／`ble.un`／`blt.un`（含 short form）沿用同一個型別閘門；前向 `if` 會輸出 unsigned fall-through 補集，迴圈與 filter 所需的 taken 分支則輸出原始關係運算。浮點 `.un` 分支包含 NaN unordered 語意，尚未能無損表示時不會退化成一般 signed C# 比較。

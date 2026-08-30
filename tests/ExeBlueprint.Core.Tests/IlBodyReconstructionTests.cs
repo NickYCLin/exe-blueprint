@@ -390,6 +390,91 @@ public sealed class IlBodyReconstructionTests
     }
 
     [Fact]
+    public void NormalizesMetadataProvenBitwiseStackFamilies()
+    {
+        byte[] binaryAnd = [0x02, 0x03, 0x5F, 0x2A];
+        byte[] binaryOr = [0x02, 0x03, 0x60, 0x2A];
+        byte[] binaryXor = [0x02, 0x03, 0x61, 0x2A];
+        byte[] andNegativeFive = [0x02, 0x1F, 0xFB, 0x5F, 0x2A];
+        var intEnum = typeof(Int32StackCoercionEnum).FullName!;
+        var byteEnum = typeof(ByteStackCoercionEnum).FullName!;
+
+        Assert.Equal(
+            ["return (arg0 & unchecked((long)arg1));"],
+            Reconstruct(binaryAnd, false, "long", parameterTypes: ["long", "ulong"]));
+        Assert.Equal(
+            ["return unchecked((ulong)(unchecked((long)arg0) | arg1));"],
+            Reconstruct(binaryOr, false, "ulong", parameterTypes: ["ulong", "long"]));
+        Assert.Equal(
+            ["return unchecked((uint)(unchecked((int)arg0) & -5));"],
+            Reconstruct(andNegativeFive, false, "uint", parameterTypes: ["uint"]));
+        Assert.Equal(
+            ["return (arg0 & true);"],
+            Reconstruct([0x02, 0x17, 0x5F, 0x2A], false, "bool", parameterTypes: ["bool"]));
+        Assert.Equal(
+            ["return (false | arg0);"],
+            Reconstruct([0x16, 0x02, 0x60, 0x2A], false, "bool", parameterTypes: ["bool"]));
+        Assert.Equal(
+            ["return (arg0 ^ true);"],
+            Reconstruct([0x02, 0x17, 0x61, 0x2A], false, "bool", parameterTypes: ["bool"]));
+        Assert.Equal(
+            ["return (arg0 ^ unchecked((int)arg1));"],
+            Reconstruct(binaryXor, false, "int", parameterTypes: ["int", intEnum]));
+        Assert.Null(Reconstruct([0x02, 0x18, 0x5F, 0x2A], false, "bool", parameterTypes: ["bool"]));
+        Assert.Null(Reconstruct(binaryAnd, false, "bool", parameterTypes: ["bool", "int"]));
+        Assert.Null(Reconstruct(binaryAnd, false, "int", parameterTypes: ["int", "long"]));
+        Assert.Null(Reconstruct(binaryAnd, false, intEnum, parameterTypes: [intEnum, byteEnum]));
+        Assert.Null(Reconstruct(binaryAnd, false, "int", parameterTypes: ["int", "Example.EnumLookingValue"]));
+    }
+
+    [Fact]
+    public void NormalizesOnlyProvenCallArgumentTargets()
+    {
+        var intEnum = typeof(Int32StackCoercionEnum).FullName!;
+        var acceptUInt = typeof(CliStackCoercionFixture)
+            .GetMethod(nameof(CliStackCoercionFixture.AcceptUInt), BindingFlags.Static | BindingFlags.Public)!
+            .MetadataToken;
+        var acceptEnum = typeof(CliStackCoercionFixture)
+            .GetMethod(nameof(CliStackCoercionFixture.AcceptEnum), BindingFlags.Static | BindingFlags.Public)!
+            .MetadataToken;
+        var closedConstructedType = typeof(GenericConstructorCallFixture)
+            .GetMethod(nameof(GenericConstructorCallFixture.Create), BindingFlags.Static | BindingFlags.Public)!
+            .GetMethodBody()!
+            .GetILAsByteArray()!;
+        var unresolvedConstructedType = typeof(OpenGenericConstructorCallFixture<>)
+            .GetMethod(nameof(OpenGenericConstructorCallFixture<int>.Create), BindingFlags.Static | BindingFlags.Public)!
+            .GetMethodBody()!
+            .GetILAsByteArray()!;
+
+        Assert.Equal(
+            [$"return ExeBlueprint.Core.Tests.CliStackCoercionFixture.AcceptUInt(unchecked((uint)arg0));"],
+            Reconstruct(
+                BuildCallIl([0x02], acceptUInt),
+                isInstance: false,
+                returnType: "uint",
+                parameterTypes: [intEnum]));
+        Assert.Equal(
+            [$"return ExeBlueprint.Core.Tests.CliStackCoercionFixture.AcceptEnum(unchecked(({intEnum})arg0));"],
+            Reconstruct(
+                BuildCallIl([0x02], acceptEnum),
+                isInstance: false,
+                returnType: intEnum,
+                parameterTypes: ["byte"]));
+        Assert.Equal(
+            ["return new ExeBlueprint.Core.Tests.GenericConstructorTarget<bool>(arg0);"],
+            Reconstruct(
+                closedConstructedType,
+                isInstance: false,
+                returnType: "ExeBlueprint.Core.Tests.GenericConstructorTarget<bool>",
+                parameterTypes: ["bool"]));
+        Assert.Null(Reconstruct(
+            unresolvedConstructedType,
+            isInstance: false,
+            returnType: "ExeBlueprint.Core.Tests.GenericConstructorTarget<int>",
+            parameterTypes: ["int"]));
+    }
+
+    [Fact]
     public void RejectsIntegerExpressionsReturnedAsUnverifiedEnums()
     {
         byte[] il = [0x19, 0x2A]; // ldc.i4.3; ret
@@ -1006,6 +1091,16 @@ public sealed class IlBodyReconstructionTests
         var il = new byte[prefix.Length + 6];
         prefix.CopyTo(il, 0);
         il[prefix.Length] = opcode;
+        BinaryPrimitives.WriteInt32LittleEndian(il.AsSpan(prefix.Length + 1, 4), token);
+        il[^1] = 0x2A;
+        return il;
+    }
+
+    private static byte[] BuildCallIl(byte[] prefix, int token)
+    {
+        var il = new byte[prefix.Length + 6];
+        prefix.CopyTo(il, 0);
+        il[prefix.Length] = 0x28;
         BinaryPrimitives.WriteInt32LittleEndian(il.AsSpan(prefix.Length + 1, 4), token);
         il[^1] = 0x2A;
         return il;
@@ -1630,7 +1725,26 @@ internal sealed class CliStackCoercionFixture
 
     public static Int32StackCoercionEnum FromInt32(int value) => (Int32StackCoercionEnum)value;
 
+    public static uint AcceptUInt(uint value) => value;
+
+    public static Int32StackCoercionEnum AcceptEnum(Int32StackCoercionEnum value) => value;
+
     public static int ShiftLeft(Int32StackCoercionEnum value, int count) => (int)value << count;
+}
+
+internal sealed class GenericConstructorTarget<T>(T value)
+{
+    public T Value { get; } = value;
+}
+
+internal static class GenericConstructorCallFixture
+{
+    public static GenericConstructorTarget<bool> Create(bool value) => new(value);
+}
+
+internal static class OpenGenericConstructorCallFixture<T>
+{
+    public static GenericConstructorTarget<T> Create(T value) => new(value);
 }
 
 internal static class SwitchFixture

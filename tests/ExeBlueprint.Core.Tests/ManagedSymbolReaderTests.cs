@@ -377,13 +377,13 @@ public sealed class ManagedSymbolReaderTests
     public async Task PreservesNullableSkeletonExpressions()
     {
         var coreDocument = await new BlueprintAnalyzer().AnalyzeAsync(typeof(BlueprintAnalyzer).Assembly.Location);
-        var reader = Assert.Single(
+        var workspace = Assert.Single(
             coreDocument.Files[0].Code!.Types,
-            type => type.FullName == "ExeBlueprint.Analysis.ManagedSymbolReader");
-        var accessibility = Assert.Single(
-            reader.Methods,
-            method => method.Name == "GetFieldAccessibility");
-        Assert.Contains("string v0 = default!;", accessibility.Body);
+            type => type.FullName == "ExeBlueprint.Input.InputWorkspace");
+        var logicalPathKey = Assert.Single(
+            workspace.Methods,
+            method => method.Name == "CreateLogicalPathKey");
+        Assert.Contains("string v0 = default!;", logicalPathKey.Body);
 
         var fixtureDocument = await new BlueprintAnalyzer().AnalyzeAsync(typeof(NullableHashFixture).Assembly.Location);
         var fixture = Assert.Single(
@@ -874,22 +874,30 @@ public sealed class ManagedSymbolReaderTests
     public void DistributesGenericArgumentsAcrossNestedTypeSegments()
     {
         var provider = SignatureTypeNameProvider.Instance;
+        var canonical = provider.GetGenericInstantiation("Example.Outer`2.Nested", ["!0", "!1"]);
+        var legacy = provider.GetGenericInstantiation("Example.Legacy", ["!0"]);
+        var mismatchedArity = provider.GetGenericInstantiation(
+            "Example.Outer`1.Child`1",
+            ["!0", "!1", "!!0"]);
 
         Assert.Equal(
             "Example.Outer<!0, !1>.Nested",
-            provider.GetGenericInstantiation("Example.Outer`2.Nested", ["!0", "!1"]).Text);
+            canonical.Text);
+        Assert.True(canonical.IsCanonicalGenericInstantiation);
         Assert.Equal(
             "Example.Outer<!0>.Child<!!0>.Leaf",
             provider.GetGenericInstantiation("Example.Outer`1.Child`1.Leaf", ["!0", "!!0"]).Text);
         Assert.Equal(
             "Example.Legacy<!0>",
-            provider.GetGenericInstantiation("Example.Legacy", ["!0"]).Text);
+            legacy.Text);
+        Assert.False(legacy.IsCanonicalGenericInstantiation);
         Assert.Equal(
             "Example.Outer.Child<!0>",
             provider.GetGenericInstantiation("Example.Outer`1.Child`1", ["!0"]).Text);
         Assert.Equal(
             "Example.Outer.Child<!0, !1, !!0>",
-            provider.GetGenericInstantiation("Example.Outer`1.Child`1", ["!0", "!1", "!!0"]).Text);
+            mismatchedArity.Text);
+        Assert.False(mismatchedArity.IsCanonicalGenericInstantiation);
     }
 
     [Fact]
