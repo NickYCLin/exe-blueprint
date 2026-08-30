@@ -435,6 +435,37 @@ public sealed class ManagedSymbolReaderTests
     }
 
     [Fact]
+    public async Task FailsClosedWhenCallsRequireByReferenceArguments()
+    {
+        var document = await new BlueprintAnalyzer().AnalyzeAsync(typeof(ManagedSymbolReaderTests).Assembly.Location);
+        var fixture = Assert.Single(
+            document.Files[0].Code!.Types,
+            type => type.FullName == typeof(ByReferenceCallFixture).FullName);
+
+        var local = Assert.Single(
+            fixture.Methods,
+            method => method.Name == nameof(ByReferenceCallFixture.CallLocal));
+        var external = Assert.Single(
+            fixture.Methods,
+            method => method.Name == nameof(ByReferenceCallFixture.CallExternal));
+        var generic = Assert.Single(
+            fixture.Methods,
+            method => method.Name == nameof(ByReferenceCallFixture.CallGeneric));
+        var constructor = Assert.Single(
+            fixture.Methods,
+            method => method.Name == nameof(ByReferenceCallFixture.CallConstructor));
+
+        Assert.False(local.BodyReconstructed);
+        Assert.Empty(local.Body);
+        Assert.False(external.BodyReconstructed);
+        Assert.Empty(external.Body);
+        Assert.False(generic.BodyReconstructed);
+        Assert.Empty(generic.Body);
+        Assert.False(constructor.BodyReconstructed);
+        Assert.Empty(constructor.Body);
+    }
+
+    [Fact]
     public async Task ReconstructsReferenceBranchesAsNullChecks()
     {
         var assemblyPath = typeof(ManagedSymbolReaderTests).Assembly.Location;
@@ -2882,6 +2913,37 @@ internal sealed class DispatchImplementationFixture : DispatchContractFixture
 internal static class NumericArgumentFixture
 {
     public static int Log2(int value) => System.Numerics.BitOperations.Log2((uint)value);
+}
+
+internal static class ByReferenceCallFixture
+{
+    public static int CallLocal(ref int value)
+    {
+        Increment(ref value);
+        return value;
+    }
+
+    public static bool CallExternal(string text, out int value) => int.TryParse(text, out value);
+
+    public static string CallGeneric(ref string value)
+    {
+        Assign(ref value, "updated");
+        return value;
+    }
+
+    public static ByReferenceConstructorFixture CallConstructor(ref int value) => new(ref value);
+
+    private static void Increment(ref int value) => value++;
+
+    private static void Assign<T>(ref T target, T value) => target = value;
+}
+
+internal sealed class ByReferenceConstructorFixture
+{
+    public ByReferenceConstructorFixture(ref int value)
+    {
+        value++;
+    }
 }
 
 internal static class UnsignedArithmeticFixture

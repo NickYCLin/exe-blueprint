@@ -105,6 +105,7 @@ type 與 method generic parameter 會另外保存 position、raw flags、varianc
 泛型讀取另有 assembly 與 owner 共用的 parameter row、constraint row、保留字元預算；單一 TypeSpec 的 bytes／節點／深度／arity、qualified-name bytes、modifier 數量與 modifier 輸出也各自受限。達到任一上限時會停止保留後續資料，透過 owner 的 `genericParametersComplete=false`／`genericParametersError` 與 `code.truncated` 明示不完整；因此極端情況下該 owner 的明細陣列可以是空的，不會把缺資料誤報為完整，並避免少量惡意 metadata 放大成巨量記憶體或 JSON。
 控制流程合併前必須預先宣告的 reference local 會使用 `default!` skeleton 佔位值；compiler-generated record 對 nullable value 呼叫 `EqualityComparer<T>.GetHashCode` 時也會保留 null-forgiving 語意，避免產生與原始程式無關的 nullable warning。
 呼叫時會依正式參數型別，把 IL 整數常值還原成 bool、char 或具明確轉型的 enum 引數；區域變數會依方法的 local signature 用實際型別宣告。
+ByRef formal 會以 signature 的結構化資訊辨識，不靠 `ref ` 顯示字串猜測；在 expression stack 尚未同時保存 managed-address provenance 與 ref/out/in pass kind 前，含這類呼叫的方法會整體 fail closed，避免輸出不可編譯或改變傳遞語意的 C#。
 重建 context 也會追蹤參數、區域變數、欄位、運算式與呼叫回傳型別；`brtrue`／`brfalse` 遇到參考型別時會輸出 `is null`／`is not null`，避免把物件直接當成 C# bool 條件。
 IL enum 位元運算的整數常值會轉回另一側的 enum 型別，enum selector 的 `switch` case 常值也會套用相同型別，避免輸出無法編譯的 enum／int 混合運算。
 `div.un`／`rem.un`／`cgt.un`／`clt.un` 只在兩側型別都能確認屬於同一個 int32、int64 或 native-int stack family 時還原；運算元會先明確轉成 `uint`、`ulong` 或 `nuint`，算術結果寫回同 family 的 signed／窄型別時再使用 `unchecked` 轉型。`cgt.un` 的既有 reference/null 正規化仍保留；型別未知、跨 family 或具 unordered 語意的浮點輸入則讓整個方法 fail closed。

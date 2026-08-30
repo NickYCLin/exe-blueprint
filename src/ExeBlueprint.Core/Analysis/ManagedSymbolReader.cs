@@ -2007,7 +2007,8 @@ internal static class ManagedSymbolReader
         byte RawTypeKind = 0,
         bool IsExactNamedType = false,
         SignatureTypeKind SignatureKind = SignatureTypeKind.Unknown,
-        PrimitiveTypeCode? PrimitiveType = null)
+        PrimitiveTypeCode? PrimitiveType = null,
+        bool IsByReference = false)
     {
         public static implicit operator string(CliType value) => value.Text;
 
@@ -4720,7 +4721,8 @@ internal static class ManagedSymbolReader
             type.RawTypeKind,
             type.IsExactNamedType,
             type.SignatureKind,
-            type.PrimitiveType);
+            type.PrimitiveType,
+            type.IsByReference);
     }
 
     private static CliType CreateTestCliType(string type, EnumTypeCatalog enumTypes)
@@ -5253,6 +5255,14 @@ internal static class ManagedSymbolReader
             return false;
         }
 
+        // C# 的 ref/out/in 呼叫除了型別之外，還需要 managed-address provenance 與
+        // parameter pass kind。現有 expression stack 尚未保存這兩項證據，不能只靠
+        // 顯示字串前綴猜測修飾詞，否則 hostile IL 可能被還原成不同語意的呼叫。
+        if (info.ParameterTypes.Any(type => type.IsByReference))
+        {
+            return false;
+        }
+
         if (usesVirtualDispatch && !info.HasThis)
         {
             return false;
@@ -5593,6 +5603,11 @@ internal static class ManagedSymbolReader
         var metadata = context.Metadata;
         var info = ResolveCall(metadata, context.EnumTypes, token);
         if (info is null || IsGeneratedName(info.DeclaringType))
+        {
+            return false;
+        }
+
+        if (info.ParameterTypes.Any(type => type.IsByReference))
         {
             return false;
         }
@@ -6006,7 +6021,9 @@ internal static class ManagedSymbolReader
         IReadOnlyList<string> genericArguments)
     {
         var text = InstantiateMethodSignatureType(type.Text, genericArguments);
-        return text == type.Text ? type : new CliType(text);
+        return text == type.Text
+            ? type
+            : new CliType(text, IsByReference: type.IsByReference);
     }
 
     private static CliType CreateNominalCliType(
@@ -8536,7 +8553,8 @@ internal sealed record SignatureTypeName(
     byte RawTypeKind = 0,
     SignatureTypeKind SignatureKind = SignatureTypeKind.Unknown,
     bool IsExactNamedType = false,
-    PrimitiveTypeCode? PrimitiveType = null)
+    PrimitiveTypeCode? PrimitiveType = null,
+    bool IsByReference = false)
 {
     public SignatureTypeName(string text)
         : this(text, [], false, false)
@@ -8573,7 +8591,10 @@ internal sealed class SignatureTypeNameProvider : ISignatureTypeProvider<Signatu
             isRestrictedGenericArgument: false);
 
     public SignatureTypeName GetByReferenceType(SignatureTypeName elementType) =>
-        Wrap($"ref {elementType.Text}", elementType, isRestrictedGenericArgument: true);
+        Wrap($"ref {elementType.Text}", elementType, isRestrictedGenericArgument: true) with
+        {
+            IsByReference = true
+        };
 
     public SignatureTypeName GetFunctionPointerType(MethodSignature<SignatureTypeName> signature)
     {

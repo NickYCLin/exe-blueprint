@@ -54,6 +54,17 @@ public sealed class FunctionPointerSignatureTests
     }
 
     [Fact]
+    public void TracksTopLevelByReferenceShapeStructurally()
+    {
+        var provider = SignatureTypeNameProvider.Instance;
+
+        Assert.True(provider.GetByReferenceType("int").IsByReference);
+        Assert.True(provider.GetModifiedType("Example.Optional", provider.GetByReferenceType("int"), false).IsByReference);
+        Assert.False(new SignatureTypeName("ref int").IsByReference);
+        Assert.False(provider.GetSZArrayType(provider.GetByReferenceType("int")).IsByReference);
+    }
+
+    [Fact]
     public void FallsBackForUnrepresentableFunctionPointerMetadata()
     {
         var provider = SignatureTypeNameProvider.Instance;
