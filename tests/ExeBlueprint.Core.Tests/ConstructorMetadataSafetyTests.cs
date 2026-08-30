@@ -23,6 +23,36 @@ public sealed class ConstructorMetadataSafetyTests
         Assert.Empty(result.Body);
     }
 
+    [Fact]
+    public void AcceptsStructurallyIdenticalClosedGenericConstructorArgument()
+    {
+        using var fixture = CreateClosedGenericArgumentFixture();
+
+        var result = Reconstruct(fixture);
+
+        Assert.NotNull(result);
+        Assert.Equal("base", result.Initializer.Kind);
+        Assert.Equal(["arg0"], result.Initializer.Arguments);
+        Assert.NotNull(result.Body);
+        Assert.Empty(result.Body);
+    }
+
+    [Theory]
+    [InlineData(ClosedGenericArgumentMutation.DifferentGenericDefinitionHandle)]
+    [InlineData(ClosedGenericArgumentMutation.DifferentArgumentHandle)]
+    [InlineData(ClosedGenericArgumentMutation.DifferentGenericDefinitionKind)]
+    [InlineData(ClosedGenericArgumentMutation.DifferentArgumentKind)]
+    [InlineData(ClosedGenericArgumentMutation.OpenGenericArgument)]
+    [InlineData(ClosedGenericArgumentMutation.NonCanonicalGenericDefinitionName)]
+    [InlineData(ClosedGenericArgumentMutation.ExcessiveNesting)]
+    public void RejectsUnprovenClosedGenericConstructorArgumentIdentity(
+        ClosedGenericArgumentMutation mutation)
+    {
+        using var fixture = CreateClosedGenericArgumentFixture(mutation);
+
+        Assert.Null(Reconstruct(fixture));
+    }
+
     [Theory]
     [InlineData(ConstructorMethodRole.Caller, ConstructorDefinitionFlagMutation.Static)]
     [InlineData(ConstructorMethodRole.Caller, ConstructorDefinitionFlagMutation.Abstract)]
@@ -295,6 +325,175 @@ public sealed class ConstructorMetadataSafetyTests
         }
     }
 
+    private static MetadataFixture CreateClosedGenericArgumentFixture(
+        ClosedGenericArgumentMutation mutation = ClosedGenericArgumentMutation.None)
+    {
+        var metadata = new MetadataBuilder();
+        metadata.AddModule(
+            generation: 0,
+            moduleName: metadata.GetOrAddString("ClosedGenericConstructorArgumentTests.dll"),
+            mvid: metadata.GetOrAddGuid(new Guid("cff2aa37-f96d-4ca6-9c15-ccdd94f75874")),
+            encId: default,
+            encBaseId: default);
+        metadata.AddAssembly(
+            metadata.GetOrAddString("ClosedGenericConstructorArgumentTests"),
+            new Version(1, 0, 0, 0),
+            culture: default,
+            publicKey: default,
+            flags: (AssemblyFlags)0,
+            hashAlgorithm: AssemblyHashAlgorithm.None);
+
+        var systemRuntime = AddAssemblyReference("System.Runtime");
+        var shadowRuntime = AddAssemblyReference("Shadow.Runtime");
+        var objectType = metadata.AddTypeReference(
+            systemRuntime,
+            metadata.GetOrAddString("System"),
+            metadata.GetOrAddString("Object"));
+        var nullableType = metadata.AddTypeReference(
+            systemRuntime,
+            metadata.GetOrAddString("System"),
+            metadata.GetOrAddString(
+                mutation == ClosedGenericArgumentMutation.NonCanonicalGenericDefinitionName
+                    ? "Nullable"
+                    : "Nullable`1"));
+        var shadowNullableType = metadata.AddTypeReference(
+            shadowRuntime,
+            metadata.GetOrAddString("System"),
+            metadata.GetOrAddString("Nullable`1"));
+        var optionType = metadata.AddTypeReference(
+            systemRuntime,
+            metadata.GetOrAddString("Tests"),
+            metadata.GetOrAddString("Option"));
+        var shadowOptionType = metadata.AddTypeReference(
+            shadowRuntime,
+            metadata.GetOrAddString("Tests"),
+            metadata.GetOrAddString("Option"));
+
+        metadata.AddTypeDefinition(
+            TypeAttributes.NotPublic,
+            @namespace: default,
+            metadata.GetOrAddString("<Module>"),
+            baseType: default,
+            MetadataTokens.FieldDefinitionHandle(1),
+            MetadataTokens.MethodDefinitionHandle(1));
+        var baseType = metadata.AddTypeDefinition(
+            TypeAttributes.Public,
+            metadata.GetOrAddString("Tests"),
+            metadata.GetOrAddString("Base"),
+            objectType,
+            MetadataTokens.FieldDefinitionHandle(1),
+            MetadataTokens.MethodDefinitionHandle(1));
+        metadata.AddTypeDefinition(
+            TypeAttributes.Public,
+            metadata.GetOrAddString("Tests"),
+            metadata.GetOrAddString("Derived"),
+            baseType,
+            MetadataTokens.FieldDefinitionHandle(1),
+            MetadataTokens.MethodDefinitionHandle(2));
+
+        var targetGenericType = nullableType;
+        var sourceGenericType = mutation == ClosedGenericArgumentMutation.DifferentGenericDefinitionHandle
+            ? shadowNullableType
+            : nullableType;
+        var targetArgumentType = optionType;
+        var sourceArgumentType = mutation == ClosedGenericArgumentMutation.DifferentArgumentHandle
+            ? shadowOptionType
+            : optionType;
+        var targetGenericKind = (byte)0x11; // VALUETYPE
+        var sourceGenericKind = mutation == ClosedGenericArgumentMutation.DifferentGenericDefinitionKind
+            ? (byte)0x12 // CLASS
+            : targetGenericKind;
+        var targetArgumentKind = (byte)0x11; // VALUETYPE
+        var sourceArgumentKind = mutation == ClosedGenericArgumentMutation.DifferentArgumentKind
+            ? (byte)0x12 // CLASS
+            : targetArgumentKind;
+        var useOpenArgument = mutation == ClosedGenericArgumentMutation.OpenGenericArgument;
+        var nestingDepth = mutation == ClosedGenericArgumentMutation.ExcessiveNesting ? 34 : 1;
+
+        var baseConstructor = metadata.AddMethodDefinition(
+            CanonicalConstructorAttributes,
+            MethodImplAttributes.IL | MethodImplAttributes.Managed,
+            metadata.GetOrAddString(".ctor"),
+            AddClosedGenericConstructorSignature(
+                targetGenericType,
+                targetArgumentType,
+                targetGenericKind,
+                targetArgumentKind,
+                useOpenArgument,
+                nestingDepth),
+            bodyOffset: 0,
+            parameterList: MetadataTokens.ParameterHandle(1));
+        var currentConstructor = metadata.AddMethodDefinition(
+            CanonicalConstructorAttributes,
+            MethodImplAttributes.IL | MethodImplAttributes.Managed,
+            metadata.GetOrAddString(".ctor"),
+            AddClosedGenericConstructorSignature(
+                sourceGenericType,
+                sourceArgumentType,
+                sourceGenericKind,
+                sourceArgumentKind,
+                useOpenArgument,
+                nestingDepth),
+            bodyOffset: 0,
+            parameterList: MetadataTokens.ParameterHandle(1));
+
+        var metadataImage = new BlobBuilder();
+        new MetadataRootBuilder(metadata).Serialize(
+            metadataImage,
+            methodBodyStreamRva: 0,
+            mappedFieldDataStreamRva: 0);
+        var provider = MetadataReaderProvider.FromMetadataImage(metadataImage.ToImmutableArray());
+        return new MetadataFixture(
+            provider,
+            currentConstructor,
+            BuildConstructorIl(MetadataTokens.GetToken(baseConstructor), parameterCount: 1));
+
+        AssemblyReferenceHandle AddAssemblyReference(string name) =>
+            metadata.AddAssemblyReference(
+                metadata.GetOrAddString(name),
+                new Version(10, 0, 0, 0),
+                culture: default,
+                publicKeyOrToken: default,
+                flags: (AssemblyFlags)0,
+                hashValue: default);
+
+        BlobHandle AddClosedGenericConstructorSignature(
+            TypeReferenceHandle genericType,
+            TypeReferenceHandle argumentType,
+            byte genericKind,
+            byte argumentKind,
+            bool openArgument,
+            int depth)
+        {
+            var signature = new BlobBuilder();
+            signature.WriteByte(0x20); // HASTHIS | DEFAULT
+            signature.WriteCompressedInteger(1);
+            signature.WriteByte(0x01); // VOID
+            WriteConstructedType(signature, depth);
+            return metadata.GetOrAddBlob(signature);
+
+            void WriteConstructedType(BlobBuilder builder, int remainingDepth)
+            {
+                builder.WriteByte(0x15); // GENERICINST
+                WriteNamedType(builder, genericKind, genericType);
+                builder.WriteCompressedInteger(1);
+                if (remainingDepth > 1)
+                {
+                    WriteConstructedType(builder, remainingDepth - 1);
+                }
+                else if (openArgument)
+                {
+                    builder.WriteByte(0x13); // VAR
+                    builder.WriteCompressedInteger(0);
+                }
+                else
+                {
+                    WriteNamedType(builder, argumentKind, argumentType);
+                }
+            }
+        }
+    }
+
     private static BlobHandle AddConstructorSignature(
         MetadataBuilder metadata,
         SignatureShape shape,
@@ -420,6 +619,18 @@ public sealed class ConstructorMetadataSafetyTests
         TypeSpecificationBase,
         UnrelatedLocalDefinition,
         SameNameWrongTypeReferenceHandle
+    }
+
+    public enum ClosedGenericArgumentMutation
+    {
+        None,
+        DifferentGenericDefinitionHandle,
+        DifferentArgumentHandle,
+        DifferentGenericDefinitionKind,
+        DifferentArgumentKind,
+        OpenGenericArgument,
+        NonCanonicalGenericDefinitionName,
+        ExcessiveNesting
     }
 
     private enum SignatureShape
