@@ -2,7 +2,9 @@ using System.Collections.Immutable;
 using System.Reflection;
 using System.Reflection.Metadata;
 using System.Reflection.Metadata.Ecma335;
+using System.Text.Json;
 using ExeBlueprint.Analysis;
+using ExeBlueprint.Models;
 
 namespace ExeBlueprint.Core.Tests;
 
@@ -75,6 +77,329 @@ public sealed class GenericAttributeMetadataTests
         Assert.True(result.Found);
         Assert.False(result.Complete);
         Assert.Contains("重複", result.Error, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void LegacyJsonDefaultsNewGenericEvidenceToUnknown()
+    {
+        var type = JsonSerializer.Deserialize<TypeModel>(
+            """
+            {
+              "FullName": "Tests.Legacy",
+              "Namespace": "Tests",
+              "Name": "Legacy",
+              "Kind": "class",
+              "Accessibility": "internal",
+              "GenericParameterDetails": [
+                {
+                  "Position": 0,
+                  "Name": "T",
+                  "Variance": "none",
+                  "Nullability": "oblivious"
+                }
+              ]
+            }
+            """);
+        var method = JsonSerializer.Deserialize<MethodModel>(
+            """
+            {
+              "Name": "Method",
+              "Signature": "void Method<T>()",
+              "ReturnType": "void",
+              "Accessibility": "internal"
+            }
+            """);
+
+        Assert.NotNull(type);
+        Assert.False(type.GenericParameterDomainComplete);
+        Assert.Null(Assert.Single(type.GenericParameterDetails).ProvenPrimaryConstraintKind);
+        Assert.NotNull(method);
+        Assert.False(method.GenericParameterDomainComplete);
+    }
+
+    [Fact]
+    public void ProvesOnlyPlainStructPrimaryFromCompleteRawEvidence()
+    {
+        var metadata = CreateMetadata(out var module);
+        var fixtureType = metadata.AddTypeDefinition(
+            TypeAttributes.NotPublic,
+            metadata.GetOrAddString("Tests"),
+            metadata.GetOrAddString("EvidenceFixture`7"),
+            baseType: default,
+            MetadataTokens.FieldDefinitionHandle(1),
+            MetadataTokens.MethodDefinitionHandle(1));
+        var valueType = metadata.AddTypeReference(
+            module,
+            metadata.GetOrAddString("System"),
+            metadata.GetOrAddString("ValueType"));
+        var unknownInterface = metadata.AddTypeReference(
+            module,
+            metadata.GetOrAddString("Tests"),
+            metadata.GetOrAddString("IExternal`1"));
+        var requiredModifier = metadata.AddTypeReference(
+            module,
+            metadata.GetOrAddString("Tests"),
+            metadata.GetOrAddString("RequiredModifier"));
+        var unmanagedModifier = metadata.AddTypeReference(
+            module,
+            metadata.GetOrAddString("System.Runtime.InteropServices"),
+            metadata.GetOrAddString("UnmanagedType"));
+        var unmanagedAttribute = metadata.AddTypeReference(
+            module,
+            metadata.GetOrAddString("System.Runtime.CompilerServices"),
+            metadata.GetOrAddString("IsUnmanagedAttribute"));
+        var unmanagedConstructor = metadata.AddMemberReference(
+            unmanagedAttribute,
+            metadata.GetOrAddString(".ctor"),
+            metadata.GetOrAddBlob(Array.Empty<byte>()));
+        var unmanagedAttributeValue = new BlobBuilder();
+        unmanagedAttributeValue.WriteUInt16(1);
+        unmanagedAttributeValue.WriteUInt16(0);
+
+        const GenericParameterAttributes structAttributes =
+            GenericParameterAttributes.NotNullableValueTypeConstraint |
+            GenericParameterAttributes.DefaultConstructorConstraint;
+        var plain = metadata.AddGenericParameter(
+            fixtureType,
+            structAttributes,
+            metadata.GetOrAddString("TPlain"),
+            index: 0);
+        metadata.AddGenericParameterConstraint(plain, valueType);
+        metadata.AddGenericParameterConstraint(
+            plain,
+            AddGenericConstraintSpecification(metadata, unknownInterface, genericParameterIndex: 0));
+
+        var unmanaged = metadata.AddGenericParameter(
+            fixtureType,
+            structAttributes,
+            metadata.GetOrAddString("TUnmanaged"),
+            index: 1);
+        metadata.AddGenericParameterConstraint(
+            unmanaged,
+            AddModifiedConstraintSpecification(metadata, unmanagedModifier, valueType));
+        metadata.AddCustomAttribute(
+            unmanaged,
+            unmanagedConstructor,
+            metadata.GetOrAddBlob(unmanagedAttributeValue));
+
+        var allowsRefStruct = metadata.AddGenericParameter(
+            fixtureType,
+            structAttributes | GenericParameterAttributes.AllowByRefLike,
+            metadata.GetOrAddString("TAllowsRefStruct"),
+            index: 2);
+        metadata.AddGenericParameterConstraint(allowsRefStruct, valueType);
+
+        var duplicateMarker = metadata.AddGenericParameter(
+            fixtureType,
+            structAttributes,
+            metadata.GetOrAddString("TDuplicateMarker"),
+            index: 3);
+        metadata.AddGenericParameterConstraint(duplicateMarker, valueType);
+        metadata.AddGenericParameterConstraint(duplicateMarker, valueType);
+
+        var modifiedMarker = metadata.AddGenericParameter(
+            fixtureType,
+            structAttributes,
+            metadata.GetOrAddString("TModifiedMarker"),
+            index: 4);
+        metadata.AddGenericParameterConstraint(
+            modifiedMarker,
+            AddModifiedConstraintSpecification(metadata, requiredModifier, valueType));
+
+        metadata.AddGenericParameter(
+            fixtureType,
+            structAttributes,
+            metadata.GetOrAddString("TMissingMarker"),
+            index: 5);
+        metadata.AddGenericParameter(
+            fixtureType,
+            GenericParameterAttributes.None,
+            metadata.GetOrAddString("TNone"),
+            index: 6);
+
+        using var fixture = Serialize(metadata);
+        var result = ManagedSymbolReader.ReadGenericParametersWithEvidence(
+            fixture.Reader,
+            fixture.Reader.GetTypeDefinition(fixtureType).GetGenericParameters(),
+            fixtureType,
+            new ManagedSymbolReader.GenericMetadataBudget(),
+            inheritedParameterCount: 0,
+            inheritedParameters: null,
+            inheritedDomainParameters: null);
+        var parameters = result.Parameters.ToDictionary(parameter => parameter.Name);
+
+        Assert.True(result.DomainComplete);
+        Assert.False(parameters["TPlain"].Complete);
+        Assert.Equal("struct", parameters["TPlain"].ProvenPrimaryConstraintKind);
+        Assert.Null(parameters["TUnmanaged"].ProvenPrimaryConstraintKind);
+        Assert.Null(parameters["TAllowsRefStruct"].ProvenPrimaryConstraintKind);
+        Assert.Null(parameters["TDuplicateMarker"].ProvenPrimaryConstraintKind);
+        Assert.Null(parameters["TModifiedMarker"].ProvenPrimaryConstraintKind);
+        Assert.Null(parameters["TMissingMarker"].ProvenPrimaryConstraintKind);
+        Assert.Equal("none", parameters["TNone"].ProvenPrimaryConstraintKind);
+    }
+
+    [Fact]
+    public void KeepsDomainAndPrimaryProofFailClosedAcrossIndependentTruncation()
+    {
+        var metadata = CreateMetadata(out var module);
+        var fixtureType = metadata.AddTypeDefinition(
+            TypeAttributes.NotPublic,
+            metadata.GetOrAddString("Tests"),
+            metadata.GetOrAddString("TruncatedEvidenceFixture`2"),
+            baseType: default,
+            MetadataTokens.FieldDefinitionHandle(1),
+            MetadataTokens.MethodDefinitionHandle(1));
+        var valueType = metadata.AddTypeReference(
+            module,
+            metadata.GetOrAddString("System"),
+            metadata.GetOrAddString("ValueType"));
+        var unknownInterface = metadata.AddTypeReference(
+            module,
+            metadata.GetOrAddString("Tests"),
+            metadata.GetOrAddString("IExternal`1"));
+        var constrained = metadata.AddGenericParameter(
+            fixtureType,
+            GenericParameterAttributes.NotNullableValueTypeConstraint |
+            GenericParameterAttributes.DefaultConstructorConstraint,
+            metadata.GetOrAddString("TStruct"),
+            index: 0);
+        metadata.AddGenericParameterConstraint(constrained, valueType);
+        metadata.AddGenericParameterConstraint(
+            constrained,
+            AddGenericConstraintSpecification(metadata, unknownInterface, genericParameterIndex: 0));
+        metadata.AddGenericParameter(
+            fixtureType,
+            GenericParameterAttributes.None,
+            metadata.GetOrAddString("TPeer"),
+            index: 1);
+
+        var gappedPositionType = metadata.AddTypeDefinition(
+            TypeAttributes.NotPublic,
+            metadata.GetOrAddString("Tests"),
+            metadata.GetOrAddString("GappedPosition`2"),
+            baseType: default,
+            MetadataTokens.FieldDefinitionHandle(1),
+            MetadataTokens.MethodDefinitionHandle(1));
+        metadata.AddGenericParameter(
+            gappedPositionType,
+            GenericParameterAttributes.None,
+            metadata.GetOrAddString("TFirst"),
+            index: 0);
+        metadata.AddGenericParameter(
+            gappedPositionType,
+            GenericParameterAttributes.None,
+            metadata.GetOrAddString("TSecond"),
+            index: 2);
+
+        var emptyNameType = metadata.AddTypeDefinition(
+            TypeAttributes.NotPublic,
+            metadata.GetOrAddString("Tests"),
+            metadata.GetOrAddString("EmptyName`1"),
+            baseType: default,
+            MetadataTokens.FieldDefinitionHandle(1),
+            MetadataTokens.MethodDefinitionHandle(1));
+        metadata.AddGenericParameter(
+            emptyNameType,
+            GenericParameterAttributes.None,
+            name: default,
+            index: 0);
+
+        using var fixture = Serialize(metadata);
+        var handles = fixture.Reader.GetTypeDefinition(fixtureType).GetGenericParameters();
+        var parameterBudget = new ManagedSymbolReader.GenericMetadataBudget(
+            parameterRows: 1,
+            constraintRows: 8,
+            characters: 1_024,
+            ownerConstraintRows: 8,
+            ownerCharacters: 1_024);
+        var truncatedDomain = ManagedSymbolReader.ReadGenericParametersWithEvidence(
+            fixture.Reader,
+            handles,
+            fixtureType,
+            parameterBudget,
+            inheritedParameterCount: 0,
+            inheritedParameters: null,
+            inheritedDomainParameters: null);
+
+        Assert.False(truncatedDomain.DomainComplete);
+        Assert.Equal("struct", Assert.Single(truncatedDomain.Parameters).ProvenPrimaryConstraintKind);
+        Assert.True(parameterBudget.Truncated);
+
+        var constraintBudget = new ManagedSymbolReader.GenericMetadataBudget(
+            parameterRows: 2,
+            constraintRows: 1,
+            characters: 1_024,
+            ownerConstraintRows: 1,
+            ownerCharacters: 1_024);
+        var truncatedPrimary = ManagedSymbolReader.ReadGenericParametersWithEvidence(
+            fixture.Reader,
+            handles,
+            fixtureType,
+            constraintBudget,
+            inheritedParameterCount: 0,
+            inheritedParameters: null,
+            inheritedDomainParameters: null);
+
+        Assert.True(truncatedPrimary.DomainComplete);
+        Assert.Null(truncatedPrimary.Parameters[0].ProvenPrimaryConstraintKind);
+        Assert.True(constraintBudget.Truncated);
+
+        var gappedDomain = ManagedSymbolReader.ReadGenericParametersWithEvidence(
+            fixture.Reader,
+            fixture.Reader.GetTypeDefinition(gappedPositionType).GetGenericParameters(),
+            gappedPositionType,
+            new ManagedSymbolReader.GenericMetadataBudget(),
+            inheritedParameterCount: 0,
+            inheritedParameters: null,
+            inheritedDomainParameters: null);
+        Assert.False(gappedDomain.DomainComplete);
+
+        var emptyNameDomain = ManagedSymbolReader.ReadGenericParametersWithEvidence(
+            fixture.Reader,
+            fixture.Reader.GetTypeDefinition(emptyNameType).GetGenericParameters(),
+            emptyNameType,
+            new ManagedSymbolReader.GenericMetadataBudget(),
+            inheritedParameterCount: 0,
+            inheritedParameters: null,
+            inheritedDomainParameters: null);
+        Assert.False(emptyNameDomain.DomainComplete);
+        Assert.Null(Assert.Single(emptyNameDomain.Parameters).ProvenPrimaryConstraintKind);
+    }
+
+    [Fact]
+    public async Task PublishesDomainEvidenceWithoutDowngradingUnmanagedOrRefStruct()
+    {
+        var assemblyPath = typeof(GenericConstraintFixture<,,,,,>).Assembly.Location;
+        var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
+        var types = document.Files[0].Code!.Types;
+        var constrainedType = Assert.Single(
+            types,
+            type => type.FullName == "ExeBlueprint.Core.Tests.GenericConstraintFixture");
+        var parameters = constrainedType.GenericParameterDetails.ToDictionary(parameter => parameter.Name);
+
+        Assert.True(constrainedType.GenericParameterDomainComplete);
+        Assert.Equal("struct", parameters["TStruct"].ProvenPrimaryConstraintKind);
+        Assert.Null(parameters["TUnmanaged"].ProvenPrimaryConstraintKind);
+        Assert.True(Assert.Single(
+            constrainedType.Methods,
+            method => method.Name == "Method").GenericParameterDomainComplete);
+        Assert.True(Assert.Single(
+            types,
+            type => type.FullName == "ExeBlueprint.Core.Tests.GenericConstraintFixture.Nested")
+            .GenericParameterDomainComplete);
+
+        var allowsRefStruct = Assert.Single(
+            types,
+            type => type.FullName == "ExeBlueprint.Core.Tests.IAllowsRefStructFixture");
+        Assert.True(allowsRefStruct.GenericParameterDomainComplete);
+        Assert.Null(Assert.Single(allowsRefStruct.GenericParameterDetails).ProvenPrimaryConstraintKind);
+
+        var incompleteSecondary = Assert.Single(
+            types,
+            type => type.FullName == "ExeBlueprint.Core.Tests.NullableTypeConstraintFixture");
+        Assert.False(incompleteSecondary.GenericParametersComplete);
+        Assert.True(incompleteSecondary.GenericParameterDomainComplete);
     }
 
     [Fact]
@@ -256,6 +581,8 @@ public sealed class GenericAttributeMetadataTests
 
         Assert.True(nestedResult.Complete);
         Assert.True(declaringResult.Complete);
+        Assert.True(nestedResult.DomainComplete);
+        Assert.True(declaringResult.DomainComplete);
         Assert.True(Assert.Single(nestedResult.Parameters).Complete);
         Assert.True(Assert.Single(declaringResult.Parameters).Complete);
         Assert.False(budget.Truncated);
@@ -308,9 +635,12 @@ public sealed class GenericAttributeMetadataTests
         var childResult = resolver.Read(childType);
 
         Assert.True(outerResult.Complete);
+        Assert.True(outerResult.DomainComplete);
         Assert.False(middleResult.Complete);
+        Assert.False(middleResult.DomainComplete);
         Assert.Empty(middleResult.Parameters);
         Assert.False(childResult.Complete);
+        Assert.False(childResult.DomainComplete);
         Assert.True(Assert.Single(childResult.Parameters).Complete);
         Assert.False(budget.Truncated);
     }
@@ -378,6 +708,7 @@ public sealed class GenericAttributeMetadataTests
         var overflow = resolver.Read(types[64]);
 
         Assert.False(overflow.Complete);
+        Assert.False(overflow.DomainComplete);
         Assert.Equal(64, overflow.DeclaringTypeDepth);
         Assert.True(budget.Truncated);
 
@@ -393,6 +724,7 @@ public sealed class GenericAttributeMetadataTests
 
         var reverseOverflow = reverseResolver.Read(types[64]);
         Assert.False(reverseOverflow.Complete);
+        Assert.False(reverseOverflow.DomainComplete);
         for (var index = 0; index < 64; index++)
         {
             var result = reverseResolver.Read(types[index]);
@@ -401,6 +733,32 @@ public sealed class GenericAttributeMetadataTests
         }
 
         Assert.True(reverseBudget.Truncated);
+    }
+
+    private static TypeSpecificationHandle AddGenericConstraintSpecification(
+        MetadataBuilder metadata,
+        EntityHandle genericType,
+        int genericParameterIndex)
+    {
+        var signature = new BlobBuilder();
+        var type = new BlobEncoder(signature).TypeSpecificationSignature();
+        type.GenericInstantiation(genericType, genericArgumentCount: 1, isValueType: false)
+            .AddArgument()
+            .GenericTypeParameter(genericParameterIndex);
+        return metadata.AddTypeSpecification(metadata.GetOrAddBlob(signature));
+    }
+
+    private static TypeSpecificationHandle AddModifiedConstraintSpecification(
+        MetadataBuilder metadata,
+        EntityHandle modifier,
+        EntityHandle unmodifiedType)
+    {
+        var signature = new BlobBuilder();
+        signature.WriteByte(0x1F); // ELEMENT_TYPE_CMOD_REQD
+        signature.WriteCompressedInteger(CodedIndex.TypeDefOrRef(modifier));
+        signature.WriteByte(0x12); // ELEMENT_TYPE_CLASS
+        signature.WriteCompressedInteger(CodedIndex.TypeDefOrRef(unmodifiedType));
+        return metadata.AddTypeSpecification(metadata.GetOrAddBlob(signature));
     }
 
     private static MetadataBuilder CreateMetadata(out ModuleDefinitionHandle module)

@@ -373,6 +373,10 @@ public sealed record TypeModel
 
     public bool GenericParametersComplete { get; init; } = true;
 
+    // 只證明 owner 的 raw arity、row owner、position/name 與 inherited prefix 完整；
+    // 不代表每個 constraint 都能表示。舊 blueprint 缺少此欄位時維持 false，避免猜測 domain。
+    public bool GenericParameterDomainComplete { get; init; }
+
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     public string? GenericParametersError { get; init; }
 
@@ -499,6 +503,9 @@ public sealed record MethodModel
 
     public bool GenericParametersComplete { get; init; } = true;
 
+    // 與 type owner 相同，只保存 generic parameter declaration domain 的獨立證據。
+    public bool GenericParameterDomainComplete { get; init; }
+
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     public string? GenericParametersError { get; init; }
 
@@ -551,6 +558,10 @@ public sealed record GenericParameterModel
     public bool HasUnmanagedAttribute { get; init; }
 
     public IReadOnlyList<GenericTypeConstraintModel> TypeConstraints { get; init; } = [];
+
+    // null 代表 primary constraint 無法獨立證明；目前 reader 只輸出 none 或 struct。
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? ProvenPrimaryConstraintKind { get; init; }
 
     public bool Complete { get; init; }
 

@@ -253,6 +253,7 @@ internal static class ManagedSymbolReader
                 GenericParameters = genericParameterDetails.Select(parameter => parameter.Name).ToArray(),
                 GenericParameterDetails = genericParameterDetails,
                 GenericParametersComplete = genericParametersComplete,
+                GenericParameterDomainComplete = genericParameterResult.DomainComplete,
                 GenericParametersError = genericParametersComplete
                     ? null
                     : "泛型參數 metadata 不完整；請檢查 genericParameterDetails 與 code.truncated",
@@ -6364,13 +6365,15 @@ internal static class ManagedSymbolReader
         var parameters = new List<ParameterModel>();
         var signatureText = $"{methodName}(...)";
         var genericParameterHandles = method.GetGenericParameters();
-        var genericParameterDetails = ReadGenericParameters(
+        var genericParameterResult = ReadGenericParametersWithEvidence(
             metadata,
             genericParameterHandles,
             methodHandle,
             genericMetadataBudget,
             inheritedParameterCount: 0,
-            inheritedParameters: null);
+            inheritedParameters: null,
+            inheritedDomainParameters: null);
+        var genericParameterDetails = genericParameterResult.Parameters;
         var genericParametersComplete =
             genericParameterDetails.Count == genericParameterHandles.Count &&
             genericParameterDetails.All(parameter => parameter.Complete);
@@ -6434,6 +6437,7 @@ internal static class ManagedSymbolReader
             GenericParameters = genericParameterDetails.Select(parameter => parameter.Name).ToArray(),
             GenericParameterDetails = genericParameterDetails,
             GenericParametersComplete = genericParametersComplete,
+            GenericParameterDomainComplete = genericParameterResult.DomainComplete,
             GenericParametersError = genericParametersComplete
                 ? null
                 : "泛型參數 metadata 不完整；請檢查 genericParameterDetails 與 code.truncated",
@@ -6592,6 +6596,7 @@ internal static class ManagedSymbolReader
     internal sealed record TypeGenericParameterReadResult(
         IReadOnlyList<GenericParameterModel> Parameters,
         bool Complete,
+        bool DomainComplete,
         int DeclaringTypeDepth);
 
     internal sealed class TypeGenericParameterResolver(
@@ -6648,26 +6653,32 @@ internal static class ManagedSymbolReader
                         (declaringResult?.DeclaringTypeDepth ?? MaxGenericDeclaringTypeDepth) + 1);
                 var declaringContextComplete = declaringType.IsNil ||
                                                declaringResult?.Complete == true;
+                var declaringDomainComplete = declaringType.IsNil ||
+                                              declaringResult?.DomainComplete == true;
                 if (declaringTypeDepth >= MaxGenericDeclaringTypeDepth)
                 {
                     sharedBudget.MarkTruncated();
                     declaringContextComplete = false;
+                    declaringDomainComplete = false;
                 }
 
                 var handles = definition.GetGenericParameters();
-                var parameters = ReadGenericParameters(
+                var parameterResult = ReadGenericParametersWithEvidence(
                     metadata,
                     handles,
                     owner,
                     sharedBudget,
                     inheritedParameterCount,
-                    declaringContextComplete ? declaringResult?.Parameters : null);
+                    declaringContextComplete ? declaringResult?.Parameters : null,
+                    declaringDomainComplete ? declaringResult?.Parameters : null);
+                var parameters = parameterResult.Parameters;
                 var result = new TypeGenericParameterReadResult(
                     parameters,
                     declaringContextComplete &&
                     parameters.Count == handles.Count &&
                     parameters.Count >= inheritedParameterCount &&
                     parameters.All(parameter => parameter.Complete),
+                    declaringDomainComplete && parameterResult.DomainComplete,
                     declaringTypeDepth);
                 _cache[owner] = result;
                 declaringResult = result;
@@ -6684,21 +6695,31 @@ internal static class ManagedSymbolReader
             var inheritedParameterCount = declaringType.IsNil
                 ? 0
                 : metadata.GetTypeDefinition(declaringType).GetGenericParameters().Count;
-            var parameters = ReadGenericParameters(
+            var parameterResult = ReadGenericParametersWithEvidence(
                 metadata,
                 definition.GetGenericParameters(),
                 handle,
                 sharedBudget,
                 inheritedParameterCount,
-                inheritedParameters: null);
+                inheritedParameters: null,
+                inheritedDomainParameters: null);
             var result = new TypeGenericParameterReadResult(
-                parameters,
+                parameterResult.Parameters,
                 Complete: false,
+                DomainComplete: false,
                 DeclaringTypeDepth: MaxGenericDeclaringTypeDepth);
             _cache[handle] = result;
             return result;
         }
     }
+
+    internal sealed record GenericParameterOwnerReadResult(
+        IReadOnlyList<GenericParameterModel> Parameters,
+        bool DomainComplete);
+
+    private readonly record struct GenericParameterReadEvidence(
+        GenericParameterModel Parameter,
+        bool DeclarationComplete);
 
     internal static IReadOnlyList<GenericParameterModel> ReadGenericParameters(
         MetadataReader metadata,
@@ -6706,82 +6727,143 @@ internal static class ManagedSymbolReader
         EntityHandle expectedOwner,
         GenericMetadataBudget sharedBudget,
         int inheritedParameterCount,
-        IReadOnlyList<GenericParameterModel>? inheritedParameters)
-    {
-        if (handles.Count == 0)
-        {
-            return [];
-        }
+        IReadOnlyList<GenericParameterModel>? inheritedParameters) =>
+        ReadGenericParametersWithEvidence(
+            metadata,
+            handles,
+            expectedOwner,
+            sharedBudget,
+            inheritedParameterCount,
+            inheritedParameters,
+            inheritedParameters).Parameters;
 
+    internal static GenericParameterOwnerReadResult ReadGenericParametersWithEvidence(
+        MetadataReader metadata,
+        GenericParameterHandleCollection handles,
+        EntityHandle expectedOwner,
+        GenericMetadataBudget sharedBudget,
+        int inheritedParameterCount,
+        IReadOnlyList<GenericParameterModel>? inheritedParameters,
+        IReadOnlyList<GenericParameterModel>? inheritedDomainParameters)
+    {
+        var rawDomain = ReadGenericParameterDomain(metadata, handles, expectedOwner);
         var genericContext = CreateConstraintGenericContext(metadata, expectedOwner, handles);
         var budget = sharedBudget.BeginOwner();
-        var parameters = new List<GenericParameterModel>(Math.Min(handles.Count, MaxGenericParametersPerOwner));
+        var entries = new List<GenericParameterReadEvidence>(Math.Min(handles.Count, MaxGenericParametersPerOwner));
+        var domainComplete = rawDomain.Complete &&
+                             inheritedParameterCount >= 0 &&
+                             inheritedParameterCount <= handles.Count;
         var ordinal = 0;
         foreach (var handle in handles)
         {
-            if (parameters.Count >= MaxGenericParametersPerOwner)
+            if (entries.Count >= MaxGenericParametersPerOwner)
             {
+                domainComplete = false;
                 break;
             }
 
             if (!budget.TryConsumeParameterRow())
             {
-                if (parameters.Count > 0)
+                domainComplete = false;
+                if (entries.Count > 0)
                 {
-                    parameters[^1] = MarkGenericParameterIncomplete(
-                        parameters[^1],
-                        "泛型 metadata 的 assembly parameter row 預算已用盡");
+                    entries[^1] = entries[^1] with
+                    {
+                        Parameter = MarkGenericParameterIncomplete(
+                            entries[^1].Parameter,
+                            "泛型 metadata 的 assembly parameter row 預算已用盡")
+                    };
                 }
 
                 break;
             }
 
-            parameters.Add(ReadGenericParameter(
+            var entry = ReadGenericParameter(
                 metadata,
                 handle,
                 expectedOwner,
                 genericContext,
                 budget,
                 inheritedParameterCount,
-                ordinal));
+                ordinal);
+            entries.Add(entry);
+            domainComplete &= entry.DeclarationComplete;
             ordinal++;
         }
 
-        parameters.Sort((left, right) => left.Position.CompareTo(right.Position));
-        for (var index = 0; index < parameters.Count; index++)
+        entries.Sort((left, right) => left.Parameter.Position.CompareTo(right.Parameter.Position));
+        domainComplete &= entries.Count == handles.Count;
+        for (var index = 0; index < entries.Count; index++)
         {
-            if (parameters[index].Position != index)
+            if (entries[index].Parameter.Position != index)
             {
-                parameters[index] = MarkGenericParameterIncomplete(
-                    parameters[index],
-                    "泛型參數 position 不連續或重複");
+                domainComplete = false;
+                entries[index] = entries[index] with
+                {
+                    Parameter = MarkGenericParameterIncomplete(
+                        entries[index].Parameter,
+                        "泛型參數 position 不連續或重複")
+                };
             }
         }
 
-        for (var index = 0; index < parameters.Count && index < inheritedParameterCount; index++)
+        if (inheritedParameterCount > 0 &&
+            (inheritedDomainParameters is null ||
+             inheritedDomainParameters.Count != inheritedParameterCount ||
+             entries.Count < inheritedParameterCount))
         {
-            var parameter = parameters[index];
+            domainComplete = false;
+        }
+
+        for (var index = 0; index < entries.Count && index < inheritedParameterCount; index++)
+        {
+            var parameter = entries[index].Parameter;
+            if (inheritedDomainParameters is null ||
+                inheritedDomainParameters.Count != inheritedParameterCount ||
+                index >= inheritedDomainParameters.Count ||
+                !InheritedGenericParameterDeclarationsMatch(
+                    parameter,
+                    inheritedDomainParameters[index]))
+            {
+                domainComplete = false;
+            }
+
             if (inheritedParameters is null ||
                 inheritedParameters.Count != inheritedParameterCount ||
                 index >= inheritedParameters.Count ||
                 !InheritedGenericParametersMatch(parameter, inheritedParameters[index]))
             {
-                parameters[index] = MarkGenericParameterIncomplete(
-                    parameter,
-                    "inherited 泛型參數與 declaring type 的完整 metadata 不一致或無法取得");
+                entries[index] = entries[index] with
+                {
+                    Parameter = MarkGenericParameterIncomplete(
+                        parameter,
+                        "inherited 泛型參數與 declaring type 的完整 metadata 不一致或無法取得")
+                };
             }
         }
 
-        if (handles.Count > MaxGenericParametersPerOwner && parameters.Count > 0)
+        if (handles.Count > MaxGenericParametersPerOwner && entries.Count > 0)
         {
             budget.MarkTruncated();
-            parameters[^1] = MarkGenericParameterIncomplete(
-                parameters[^1],
-                $"泛型參數超過每個 owner 的 {MaxGenericParametersPerOwner} 筆限制");
+            domainComplete = false;
+            entries[^1] = entries[^1] with
+            {
+                Parameter = MarkGenericParameterIncomplete(
+                    entries[^1].Parameter,
+                    $"泛型參數超過每個 owner 的 {MaxGenericParametersPerOwner} 筆限制")
+            };
         }
 
-        return parameters;
+        return new GenericParameterOwnerReadResult(
+            entries.Select(entry => entry.Parameter).ToArray(),
+            domainComplete);
     }
+
+    private static bool InheritedGenericParameterDeclarationsMatch(
+        GenericParameterModel current,
+        GenericParameterModel declaring) =>
+        current.Position == declaring.Position &&
+        current.Name == declaring.Name;
 
     private static bool InheritedGenericParametersMatch(
         GenericParameterModel current,
@@ -7040,7 +7122,7 @@ internal static class ManagedSymbolReader
         }
     }
 
-    private static GenericParameterModel ReadGenericParameter(
+    private static GenericParameterReadEvidence ReadGenericParameter(
         MetadataReader metadata,
         GenericParameterHandle handle,
         EntityHandle expectedOwner,
@@ -7059,19 +7141,26 @@ internal static class ManagedSymbolReader
             var name = nameComplete
                 ? decodedName
                 : $"!invalid{fallbackPosition}";
+            var declarationComplete = nameComplete && !string.IsNullOrEmpty(decodedName);
             if (!nameComplete)
             {
                 budget.MarkTruncated();
                 AddGenericMetadataError(errors, "泛型參數名稱超過長度限制");
             }
+            else if (string.IsNullOrEmpty(name))
+            {
+                AddGenericMetadataError(errors, "泛型參數名稱不得為空");
+            }
             else if (!budget.TryRetainCharacters((long)name.Length * 2))
             {
                 name = $"!invalid{fallbackPosition}";
+                declarationComplete = false;
                 AddGenericMetadataError(errors, "泛型 metadata 的字元預算已用盡");
             }
 
             if (parameter.Parent != expectedOwner)
             {
+                declarationComplete = false;
                 AddGenericMetadataError(errors, "泛型參數 owner 與宣告不一致");
             }
 
@@ -7080,7 +7169,8 @@ internal static class ManagedSymbolReader
             var knownAttributes = GenericParameterAttributes.VarianceMask |
                                   GenericParameterAttributes.SpecialConstraintMask |
                                   GenericParameterAttributes.AllowByRefLike;
-            if ((attributes & ~knownAttributes) != 0)
+            var primaryFlagsComplete = (attributes & ~knownAttributes) == 0;
+            if (!primaryFlagsComplete)
             {
                 AddGenericMetadataError(errors, $"泛型參數含未知 flags 0x{rawAttributes:X}");
             }
@@ -7094,11 +7184,13 @@ internal static class ManagedSymbolReader
             };
             if (variance == "invalid")
             {
+                primaryFlagsComplete = false;
                 AddGenericMetadataError(errors, "泛型參數 variance flags 衝突");
             }
 
             if (expectedOwner.Kind == HandleKind.MethodDefinition && variance != "none")
             {
+                primaryFlagsComplete = false;
                 AddGenericMetadataError(errors, "方法泛型參數不可宣告 variance");
             }
             else if (!isInheritedParameter &&
@@ -7110,14 +7202,20 @@ internal static class ManagedSymbolReader
                 if (!ownerDefinition.Attributes.HasFlag(TypeAttributes.Interface) &&
                     ownerBaseType is not ("System.Delegate" or "System.MulticastDelegate"))
                 {
+                    primaryFlagsComplete = false;
                     AddGenericMetadataError(errors, "只有 interface 或 delegate 型別可宣告 variance");
                 }
+            }
+            else if (expectedOwner.Kind is not (HandleKind.TypeDefinition or HandleKind.MethodDefinition))
+            {
+                primaryFlagsComplete = false;
             }
 
             var referenceTypeConstraint = attributes.HasFlag(GenericParameterAttributes.ReferenceTypeConstraint);
             var valueTypeConstraint = attributes.HasFlag(GenericParameterAttributes.NotNullableValueTypeConstraint);
             if (referenceTypeConstraint && valueTypeConstraint)
             {
+                primaryFlagsComplete = false;
                 AddGenericMetadataError(errors, "reference 與 value-type special constraints 衝突");
             }
 
@@ -7136,7 +7234,7 @@ internal static class ManagedSymbolReader
                 AddGenericMetadataError(errors, unmanaged.Error);
             }
 
-            var constraints = ReadGenericTypeConstraints(
+            var constraintResult = ReadGenericTypeConstraints(
                 metadata,
                 handle,
                 parameter,
@@ -7144,6 +7242,7 @@ internal static class ManagedSymbolReader
                 genericContext,
                 budget,
                 errors);
+            var constraints = constraintResult.Constraints;
             if (constraints.Any(constraint => !constraint.Complete))
             {
                 AddGenericMetadataError(errors, "一或多個型別 constraint 不完整");
@@ -7168,7 +7267,45 @@ internal static class ManagedSymbolReader
                 AddGenericMetadataError(errors, "unmanaged attribute、ValueType modreq 與 special flags 不一致");
             }
 
-            return new GenericParameterModel
+            var defaultConstructorConstraint = attributes.HasFlag(
+                GenericParameterAttributes.DefaultConstructorConstraint);
+            var allowsRefStruct = attributes.HasFlag(GenericParameterAttributes.AllowByRefLike);
+            var notNullConstraint = !referenceTypeConstraint &&
+                                    !valueTypeConstraint &&
+                                    nullable.FromDirectAttribute &&
+                                    nullable.Complete &&
+                                    nullable.Flags.Count == 1 &&
+                                    nullable.Flags[0] == 1;
+            string? provenPrimaryConstraintKind = null;
+            if (declarationComplete &&
+                primaryFlagsComplete &&
+                unmanaged.Complete &&
+                constraintResult.PrimaryEvidenceComplete)
+            {
+                if (valueTypeConstraint &&
+                    !referenceTypeConstraint &&
+                    defaultConstructorConstraint &&
+                    !unmanaged.Found &&
+                    !allowsRefStruct &&
+                    constraintResult.ValueTypeMarkerCount == 1 &&
+                    constraintResult.AllValueTypeMarkersPlain)
+                {
+                    provenPrimaryConstraintKind = "struct";
+                }
+                else if (!valueTypeConstraint &&
+                         !referenceTypeConstraint &&
+                         !notNullConstraint &&
+                         !unmanaged.Found &&
+                         !allowsRefStruct &&
+                         nullable.Complete &&
+                         constraintResult.ValueTypeMarkerCount == 0 &&
+                         constraints.Count == 0)
+                {
+                    provenPrimaryConstraintKind = "none";
+                }
+            }
+
+            var model = new GenericParameterModel
             {
                 Position = parameter.Index,
                 Name = name,
@@ -7178,36 +7315,50 @@ internal static class ManagedSymbolReader
                 NotNullableValueTypeConstraint = valueTypeConstraint,
                 NotNullConstraint = !referenceTypeConstraint &&
                                     !valueTypeConstraint &&
-                                    nullable.FromDirectAttribute &&
-                                    nullable.Complete &&
-                                    nullable.Flags.Count == 1 &&
-                                    nullable.Flags[0] == 1,
-                DefaultConstructorConstraint = attributes.HasFlag(GenericParameterAttributes.DefaultConstructorConstraint),
-                AllowsRefStruct = attributes.HasFlag(GenericParameterAttributes.AllowByRefLike),
+                                    notNullConstraint,
+                DefaultConstructorConstraint = defaultConstructorConstraint,
+                AllowsRefStruct = allowsRefStruct,
                 Nullability = nullable.Nullability,
                 NullableFlags = nullable.Flags,
                 HasUnmanagedAttribute = unmanaged.Found,
                 TypeConstraints = constraints,
+                ProvenPrimaryConstraintKind = provenPrimaryConstraintKind,
                 Complete = errors.Count == 0 && constraints.All(constraint => constraint.Complete),
                 Error = errors.Count == 0 ? null : string.Join("；", errors)
             };
+            return new GenericParameterReadEvidence(model, declarationComplete);
         }
         catch (Exception exception) when (exception is BadImageFormatException or ArgumentException or InvalidOperationException)
         {
-            return new GenericParameterModel
-            {
-                Position = fallbackPosition,
-                Name = $"!invalid{fallbackPosition}",
-                RawAttributes = 0,
-                Variance = "invalid",
-                Nullability = "invalid",
-                Complete = false,
-                Error = $"無法讀取泛型參數 metadata：{exception.GetType().Name}"
-            };
+            return new GenericParameterReadEvidence(
+                new GenericParameterModel
+                {
+                    Position = fallbackPosition,
+                    Name = $"!invalid{fallbackPosition}",
+                    RawAttributes = 0,
+                    Variance = "invalid",
+                    Nullability = "invalid",
+                    Complete = false,
+                    Error = $"無法讀取泛型參數 metadata：{exception.GetType().Name}"
+                },
+                DeclarationComplete: false);
         }
     }
 
-    private static IReadOnlyList<GenericTypeConstraintModel> ReadGenericTypeConstraints(
+    private sealed record GenericTypeConstraintOwnerReadResult(
+        IReadOnlyList<GenericTypeConstraintModel> Constraints,
+        bool RowsComplete,
+        bool PrimaryEvidenceComplete,
+        int ValueTypeMarkerCount,
+        bool AllValueTypeMarkersPlain);
+
+    private readonly record struct GenericTypeConstraintReadEvidence(
+        GenericTypeConstraintModel Constraint,
+        bool PrimaryEvidenceComplete,
+        bool IsValueTypeMarker,
+        bool IsPlainValueTypeMarker);
+
+    private static GenericTypeConstraintOwnerReadResult ReadGenericTypeConstraints(
         MetadataReader metadata,
         GenericParameterHandle parameterHandle,
         GenericParameter parameter,
@@ -7219,11 +7370,16 @@ internal static class ManagedSymbolReader
         var handles = parameter.GetConstraints();
         var constraints = new List<GenericTypeConstraintModel>(
             Math.Min(handles.Count, MaxGenericConstraintsPerParameter));
+        var rowsComplete = handles.Count <= MaxGenericConstraintsPerParameter;
+        var primaryEvidenceComplete = true;
+        var valueTypeMarkerCount = 0;
+        var allValueTypeMarkersPlain = true;
         foreach (var handle in handles)
         {
             if (constraints.Count >= MaxGenericConstraintsPerParameter)
             {
                 budget.MarkTruncated();
+                rowsComplete = false;
                 AddGenericMetadataError(
                     parameterErrors,
                     $"型別 constraints 超過每個泛型參數的 {MaxGenericConstraintsPerParameter} 筆限制");
@@ -7232,6 +7388,7 @@ internal static class ManagedSymbolReader
 
             if (!budget.TryConsumeConstraintRow())
             {
+                rowsComplete = false;
                 AddGenericMetadataError(
                     parameterErrors,
                     "泛型 metadata 的 constraint row 預算已用盡");
@@ -7244,21 +7401,34 @@ internal static class ManagedSymbolReader
                 parameterHandle,
                 owner,
                 genericContext);
-            if (!budget.TryRetainConstraint(decoded))
+            if (!budget.TryRetainConstraint(decoded.Constraint))
             {
+                rowsComplete = false;
                 AddGenericMetadataError(
                     parameterErrors,
                     "泛型 metadata 的 constraint 字元預算已用盡");
                 break;
             }
 
-            constraints.Add(decoded);
+            constraints.Add(decoded.Constraint);
+            primaryEvidenceComplete &= decoded.PrimaryEvidenceComplete;
+            if (decoded.IsValueTypeMarker)
+            {
+                valueTypeMarkerCount++;
+                allValueTypeMarkersPlain &= decoded.IsPlainValueTypeMarker;
+            }
         }
 
-        return constraints;
+        rowsComplete &= constraints.Count == handles.Count;
+        return new GenericTypeConstraintOwnerReadResult(
+            constraints,
+            rowsComplete,
+            primaryEvidenceComplete && rowsComplete,
+            valueTypeMarkerCount,
+            allValueTypeMarkersPlain);
     }
 
-    private static GenericTypeConstraintModel ReadGenericTypeConstraint(
+    private static GenericTypeConstraintReadEvidence ReadGenericTypeConstraint(
         MetadataReader metadata,
         GenericParameterConstraintHandle handle,
         GenericParameterHandle expectedParameter,
@@ -7295,7 +7465,7 @@ internal static class ManagedSymbolReader
                 AddGenericMetadataError(errors, "constraint kind 無法由目前 assembly metadata 證明");
             }
 
-            return new GenericTypeConstraintModel
+            var model = new GenericTypeConstraintModel
             {
                 Type = decoded.Type,
                 Kind = decoded.Kind,
@@ -7306,17 +7476,49 @@ internal static class ManagedSymbolReader
                 Complete = errors.Count == 0,
                 Error = errors.Count == 0 ? null : string.Join("；", errors)
             };
+            var isValueTypeMarker = decoded.Kind == "value-type-marker";
+            var hasNoModifiers = decoded.RequiredModifiers.IsEmpty &&
+                                 decoded.OptionalModifiers.IsEmpty;
+            var markerNullabilityComplete = !isValueTypeMarker ||
+                                            nullable.Complete &&
+                                            (nullable.Nullability is "oblivious" or "not-annotated") &&
+                                            nullable.Flags.Count <= 1 &&
+                                            nullable.Flags.All(flag => flag <= 2);
+            var kindStructurallyUsable = decoded.Kind is
+                "class" or "interface" or "type-parameter" or "value-type-marker" or "unknown";
+            var disguisesValueTypeMarker = decoded.Type == "System.ValueType" &&
+                                           decoded.Kind != "value-type-marker";
+            var primaryEvidenceComplete =
+                constraint.Parameter == expectedParameter &&
+                decoded.Complete &&
+                hasNoModifiers &&
+                markerNullabilityComplete &&
+                kindStructurallyUsable &&
+                !disguisesValueTypeMarker;
+            var isPlainValueTypeMarker =
+                isValueTypeMarker &&
+                decoded.Type == "System.ValueType" &&
+                primaryEvidenceComplete;
+            return new GenericTypeConstraintReadEvidence(
+                model,
+                primaryEvidenceComplete,
+                isValueTypeMarker,
+                isPlainValueTypeMarker);
         }
         catch (Exception exception) when (exception is BadImageFormatException or ArgumentException or InvalidOperationException)
         {
-            return new GenericTypeConstraintModel
-            {
-                Type = "<invalid>",
-                Kind = "unsupported",
-                Nullability = "invalid",
-                Complete = false,
-                Error = $"無法讀取 constraint metadata：{exception.GetType().Name}"
-            };
+            return new GenericTypeConstraintReadEvidence(
+                new GenericTypeConstraintModel
+                {
+                    Type = "<invalid>",
+                    Kind = "unsupported",
+                    Nullability = "invalid",
+                    Complete = false,
+                    Error = $"無法讀取 constraint metadata：{exception.GetType().Name}"
+                },
+                PrimaryEvidenceComplete: false,
+                IsValueTypeMarker: false,
+                IsPlainValueTypeMarker: false);
         }
     }
 

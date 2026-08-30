@@ -1519,6 +1519,286 @@ public sealed class CSharpSkeletonGeneratorTests
     }
 
     [Fact]
+    public async Task EmitsOnlyProvenStructConstraintsFromIncompleteGenericMetadata()
+    {
+        static GenericTypeConstraintModel ValueTypeMarker(
+            IReadOnlyList<string>? requiredModifiers = null) =>
+            new()
+            {
+                Type = "System.ValueType",
+                Kind = "value-type-marker",
+                Nullability = "oblivious",
+                RequiredModifiers = requiredModifiers ?? [],
+                Complete = true
+            };
+
+        static GenericParameterModel StructParameter(
+            string name,
+            int position,
+            bool complete,
+            bool includeUnknownSecondary = false) =>
+            new()
+            {
+                Position = position,
+                Name = name,
+                RawAttributes = 0x18,
+                Variance = "none",
+                NotNullableValueTypeConstraint = true,
+                DefaultConstructorConstraint = true,
+                Nullability = "oblivious",
+                TypeConstraints = includeUnknownSecondary
+                    ?
+                    [
+                        ValueTypeMarker(),
+                        new GenericTypeConstraintModel
+                        {
+                            Type = "System.IEquatable<!0>",
+                            Kind = "unknown",
+                            Nullability = "oblivious",
+                            Complete = false,
+                            Error = "external generic kind unknown"
+                        }
+                    ]
+                    : [ValueTypeMarker()],
+                ProvenPrimaryConstraintKind = "struct",
+                Complete = complete
+            };
+
+        var consumer = new TypeModel
+        {
+            FullName = "PartialStruct.StructConsumer",
+            Namespace = "PartialStruct",
+            Name = "StructConsumer",
+            Kind = "class",
+            Accessibility = "public",
+            GenericParameters = ["T"],
+            GenericParameterDetails = [StructParameter("T", 0, complete: true)],
+            GenericParametersComplete = true,
+            GenericParameterDomainComplete = true
+        };
+        var partial = new TypeModel
+        {
+            FullName = "PartialStruct.Partial",
+            Namespace = "PartialStruct",
+            Name = "Partial",
+            Kind = "class",
+            Accessibility = "public",
+            GenericParameters = ["TStruct", "TUnknown"],
+            GenericParameterDetails =
+            [
+                StructParameter("TStruct", 0, complete: false, includeUnknownSecondary: true),
+                new GenericParameterModel
+                {
+                    Position = 1,
+                    Name = "TUnknown",
+                    RawAttributes = 0,
+                    Variance = "none",
+                    Nullability = "oblivious",
+                    ProvenPrimaryConstraintKind = "none",
+                    Complete = false,
+                    Error = "secondary constraint unsupported"
+                }
+            ],
+            GenericParametersComplete = false,
+            GenericParameterDomainComplete = true,
+            Fields =
+            [
+                new FieldModel
+                {
+                    Name = "Consumer",
+                    Type = "PartialStruct.StructConsumer<!0>",
+                    Accessibility = "public"
+                }
+            ]
+        };
+        var outer = new TypeModel
+        {
+            FullName = "PartialStruct.Outer",
+            Namespace = "PartialStruct",
+            Name = "Outer",
+            Kind = "class",
+            Accessibility = "public",
+            GenericParameters = ["TOuter"],
+            GenericParameterDetails =
+            [
+                new GenericParameterModel
+                {
+                    Position = 0,
+                    Name = "TOuter",
+                    RawAttributes = 0,
+                    Variance = "none",
+                    Nullability = "oblivious",
+                    ProvenPrimaryConstraintKind = "none",
+                    Complete = true
+                }
+            ],
+            GenericParametersComplete = true,
+            GenericParameterDomainComplete = true
+        };
+        var nested = new TypeModel
+        {
+            FullName = "PartialStruct.Outer.Nested",
+            Namespace = "PartialStruct",
+            Name = "Nested",
+            Kind = "class",
+            Accessibility = "public",
+            IsNested = true,
+            DeclaringType = "PartialStruct.Outer",
+            InheritedGenericParameterCount = 1,
+            GenericParameters = ["TOuter", "TLocal"],
+            GenericParameterDetails =
+            [
+                StructParameter("TOuter", 0, complete: false, includeUnknownSecondary: true),
+                StructParameter("TLocal", 1, complete: false, includeUnknownSecondary: true)
+            ],
+            GenericParametersComplete = false,
+            GenericParameterDomainComplete = true,
+            Fields =
+            [
+                new FieldModel
+                {
+                    Name = "Consumer",
+                    Type = "PartialStruct.StructConsumer<!1>",
+                    Accessibility = "public"
+                }
+            ]
+        };
+        var artifact = CreateManagedArtifact("PartialStruct", []) with
+        {
+            Code = new CodeModel
+            {
+                Kind = "managed",
+                NamespaceCount = 1,
+                TypeCount = 4,
+                Types = [consumer, partial, outer, nested]
+            }
+        };
+        var generated = CSharpSkeletonGenerator.Generate(CreateDocument(artifact));
+        var source = Assert.Single(
+            generated,
+            file => file.RelativePath == "PartialStruct/PartialStruct.cs").Content.ReplaceLineEndings("\n");
+
+        Assert.Contains(
+            "public class Partial<TStruct, TUnknown>\n    where TStruct : struct",
+            source,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("where TUnknown", source, StringComparison.Ordinal);
+        Assert.Contains(
+            "    public class Nested<TLocal>\n        where TLocal : struct",
+            source,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("where TOuter", source, StringComparison.Ordinal);
+        await AssertGeneratedSolutionBuildsAsync(generated);
+    }
+
+    [Fact]
+    public void RejectsUnprovenOrSemanticallyDifferentPartialStructConstraints()
+    {
+        static GenericParameterModel StructParameter(
+            string name,
+            bool unmanaged = false,
+            bool allowsRefStruct = false) =>
+            new()
+            {
+                Position = 0,
+                Name = name,
+                RawAttributes = 0x18 | (allowsRefStruct ? 0x20 : 0),
+                Variance = "none",
+                NotNullableValueTypeConstraint = true,
+                DefaultConstructorConstraint = true,
+                AllowsRefStruct = allowsRefStruct,
+                Nullability = "oblivious",
+                HasUnmanagedAttribute = unmanaged,
+                TypeConstraints =
+                [
+                    new GenericTypeConstraintModel
+                    {
+                        Type = "System.ValueType",
+                        Kind = "value-type-marker",
+                        Nullability = "oblivious",
+                        RequiredModifiers = unmanaged
+                            ? ["System.Runtime.InteropServices.UnmanagedType"]
+                            : [],
+                        Complete = true
+                    }
+                ],
+                ProvenPrimaryConstraintKind = "struct",
+                Complete = false
+            };
+
+        static TypeModel Type(
+            string name,
+            GenericParameterModel parameter,
+            bool domainComplete = true) =>
+            new()
+            {
+                FullName = $"RejectedPartialStruct.{name}",
+                Namespace = "RejectedPartialStruct",
+                Name = name,
+                Kind = "class",
+                Accessibility = "public",
+                GenericParameters = [parameter.Name],
+                GenericParameterDetails = [parameter],
+                GenericParametersComplete = false,
+                GenericParameterDomainComplete = domainComplete
+            };
+
+        var domainIncomplete = Type("DomainIncomplete", StructParameter("T"), domainComplete: false);
+        var unmanaged = Type("Unmanaged", StructParameter("T", unmanaged: true));
+        var allowsRefStruct = Type("AllowsRefStruct", StructParameter("T", allowsRefStruct: true));
+        var dispatchOwner = new TypeModel
+        {
+            FullName = "RejectedPartialStruct.DispatchOwner",
+            Namespace = "RejectedPartialStruct",
+            Name = "DispatchOwner",
+            Kind = "class",
+            Accessibility = "public",
+            Methods =
+            [
+                new MethodModel
+                {
+                    Name = "Override",
+                    Signature = "void Override<T>()",
+                    ReturnType = "void",
+                    Accessibility = "public",
+                    IsVirtual = true,
+                    IsNewSlot = false,
+                    GenericParameters = ["T"],
+                    GenericParameterDetails = [StructParameter("T")],
+                    GenericParametersComplete = false,
+                    GenericParameterDomainComplete = true
+                },
+                new MethodModel
+                {
+                    Name = "Demo.IContract.Explicit",
+                    Signature = "void Demo.IContract.Explicit<T>()",
+                    ReturnType = "void",
+                    Accessibility = "private",
+                    GenericParameters = ["T"],
+                    GenericParameterDetails = [StructParameter("T")],
+                    GenericParametersComplete = false,
+                    GenericParameterDomainComplete = true
+                }
+            ]
+        };
+        var artifact = CreateManagedArtifact("RejectedPartialStruct", []) with
+        {
+            Code = new CodeModel
+            {
+                Kind = "managed",
+                NamespaceCount = 1,
+                TypeCount = 4,
+                Types = [domainIncomplete, unmanaged, allowsRefStruct, dispatchOwner]
+            }
+        };
+        var source = Assert.Single(
+            CSharpSkeletonGenerator.Generate(CreateDocument(artifact)),
+            file => file.RelativePath == "RejectedPartialStruct/RejectedPartialStruct.cs").Content;
+
+        Assert.DoesNotContain("where ", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task GeneratedGenericConstraintSubsetBuildsInRelease()
     {
         var assemblyPath = typeof(GenericConstraintFixture<,,,,,>).Assembly.Location;

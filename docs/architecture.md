@@ -31,13 +31,13 @@ Blueprint 中介資料
 
 ## Blueprint 資料
 
-目前 schema 版本是 `0.10`，主要欄位包括：
+目前 schema 版本是 `0.11`，主要欄位包括：
 
 - `input`：輸入類型、檔案數與總大小
 - `summary`：PE、assembly、型別、方法、資源和相依關係數量
 - `files`：每個檔案的格式、雜湊、來源資訊（provenance）和分析資料，受管組件另含 `code`
 - `files[].origin`：`direct`、`directory`、`zip` 或 `asar` 來源；需要時保存直接容器、容器內項目與展開深度，讓 staging 實體路徑不會外洩或取代邏輯路徑
-- `files[].code`：.NET 型別、同一 artifact 內可精確連結巢狀 owner 的 TypeDef token、ref-like 關係、泛型名稱與 additive constraint 明細、欄位、含 index parameters 的屬性、事件、方法簽章、dispatch 與已還原 body 的 `requiresUnsafeContext` 旗標、入口點、方法層級呼叫圖、manifest 資源與各方法反組譯出的 IL
+- `files[].code`：.NET 型別、同一 artifact 內可精確連結巢狀 owner 的 TypeDef token、ref-like 關係、泛型名稱、owner domain 與可獨立證明 primary constraint 的 additive 明細、欄位、含 index parameters 的屬性、事件、方法簽章、dispatch 與已還原 body 的 `requiresUnsafeContext` 旗標、入口點、方法層級呼叫圖、manifest 資源與各方法反組譯出的 IL
 - `archives`：每次 ASAR 展開的容器路徑、深度、header 大小、節點與 packed／unpacked／link 數量，以及 `complete`／`error` 狀態
 - `dependencies`：PE imports 與 assembly references
 - `technologies`：語言、runtime、框架和工具鏈判斷

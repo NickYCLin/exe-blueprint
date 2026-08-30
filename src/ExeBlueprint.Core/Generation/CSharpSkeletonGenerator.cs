@@ -1014,14 +1014,22 @@ public static class CSharpSkeletonGenerator
     private static IReadOnlyList<string> BuildTypeConstraintClauses(TypeModel type)
     {
         if (type.InheritedGenericParameterCount < 0 ||
-            type.InheritedGenericParameterCount > type.GenericParameters.Count ||
-            !TryGetCompleteGenericParameterDetails(
+            type.InheritedGenericParameterCount > type.GenericParameters.Count)
+        {
+            return [];
+        }
+
+        if (!TryGetCompleteGenericParameterDetails(
                 type.GenericParameters,
                 type.GenericParameterDetails,
                 type.GenericParametersComplete,
                 out var details))
         {
-            return [];
+            return BuildProvenPartialStructConstraintClauses(
+                type.GenericParameters,
+                type.GenericParameterDetails,
+                type.GenericParameterDomainComplete,
+                type.InheritedGenericParameterCount);
         }
 
         return TryBuildConstraintClauses(
@@ -1035,17 +1043,25 @@ public static class CSharpSkeletonGenerator
 
     private static IReadOnlyList<string> BuildMethodConstraintClauses(TypeModel type, MethodModel method)
     {
-        // Override 與 explicit interface implementation 會從原宣告繼承 constraints；
-        // C# 不允許在實作端完整重複，否則會產生 CS0460。
+        // Override 與 explicit interface implementation 會從目標宣告繼承 constraints。
+        // C# 雖允許重述部分 class／struct disambiguator，但模型尚無 target-slot 證據可驗證它。
         if (IsExplicitInterfaceMember(method.Name) ||
-            method.IsVirtual && !method.IsNewSlot ||
-            !TryGetCompleteGenericParameterDetails(
+            method.IsVirtual && !method.IsNewSlot)
+        {
+            return [];
+        }
+
+        if (!TryGetCompleteGenericParameterDetails(
                 method.GenericParameters,
                 method.GenericParameterDetails,
                 method.GenericParametersComplete,
                 out var details))
         {
-            return [];
+            return BuildProvenPartialStructConstraintClauses(
+                method.GenericParameters,
+                method.GenericParameterDetails,
+                method.GenericParameterDomainComplete,
+                inheritedParameterCount: 0);
         }
 
         IReadOnlyList<GenericParameterModel>? typeDetails = null;
@@ -1069,6 +1085,74 @@ public static class CSharpSkeletonGenerator
             out var clauses)
             ? clauses
             : [];
+    }
+
+    private static IReadOnlyList<string> BuildProvenPartialStructConstraintClauses(
+        IReadOnlyList<string> names,
+        IReadOnlyList<GenericParameterModel> details,
+        bool domainComplete,
+        int inheritedParameterCount)
+    {
+        if (!domainComplete ||
+            inheritedParameterCount < 0 ||
+            inheritedParameterCount > names.Count ||
+            names.Count != details.Count)
+        {
+            return [];
+        }
+
+        for (var index = 0; index < details.Count; index++)
+        {
+            if (details[index].Position != index ||
+                string.IsNullOrEmpty(names[index]) ||
+                details[index].Name != names[index] ||
+                details[index].Variance is not ("none" or "out" or "in"))
+            {
+                return [];
+            }
+        }
+
+        return details
+            .Skip(inheritedParameterCount)
+            .Where(HasProvenPlainStructPrimaryConstraint)
+            .Select(parameter =>
+                $"where {FormatGenericParameterIdentifier(parameter.Name)} : struct")
+            .ToArray();
+    }
+
+    private static bool HasProvenPlainStructPrimaryConstraint(GenericParameterModel parameter)
+    {
+        const int ReferenceTypeConstraintFlag = 0x04;
+        const int ValueTypeConstraintFlag = 0x08;
+        const int DefaultConstructorConstraintFlag = 0x10;
+        const int AllowsRefStructFlag = 0x20;
+        const int KnownGenericParameterFlags = 0x3F;
+
+        if (parameter.ProvenPrimaryConstraintKind != "struct" ||
+            parameter.ReferenceTypeConstraint ||
+            !parameter.NotNullableValueTypeConstraint ||
+            parameter.NotNullConstraint ||
+            !parameter.DefaultConstructorConstraint ||
+            parameter.AllowsRefStruct ||
+            parameter.HasUnmanagedAttribute ||
+            (parameter.RawAttributes & ~KnownGenericParameterFlags) != 0 ||
+            (parameter.RawAttributes & ReferenceTypeConstraintFlag) != 0 ||
+            (parameter.RawAttributes & ValueTypeConstraintFlag) == 0 ||
+            (parameter.RawAttributes & DefaultConstructorConstraintFlag) == 0 ||
+            (parameter.RawAttributes & AllowsRefStructFlag) != 0)
+        {
+            return false;
+        }
+
+        var valueTypeMarkers = parameter.TypeConstraints
+            .Where(constraint => constraint.Kind == "value-type-marker")
+            .ToArray();
+        return valueTypeMarkers.Length == 1 &&
+               valueTypeMarkers[0].Complete &&
+               valueTypeMarkers[0].Type == "System.ValueType" &&
+               valueTypeMarkers[0].Nullability is "oblivious" or "not-annotated" &&
+               valueTypeMarkers[0].RequiredModifiers.Count == 0 &&
+               valueTypeMarkers[0].OptionalModifiers.Count == 0;
     }
 
     private static bool TryGetCompleteGenericParameterDetails(
