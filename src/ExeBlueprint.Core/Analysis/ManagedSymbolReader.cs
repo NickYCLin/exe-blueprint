@@ -758,7 +758,9 @@ internal static class ManagedSymbolReader
         CliType Type,
         SignatureTypeName? Signature,
         bool IsFoldedExpression = false,
-        SignatureTypeName? FoldedArrayElementSignature = null);
+        SignatureTypeName? FoldedArrayElementSignature = null,
+        bool RequiresDirectBase = false,
+        bool RequiresExactTargetSignature = false);
 
     private sealed record ConstructorTypeSpecificationContext(
         TypeSpecificationHandle Handle,
@@ -890,6 +892,22 @@ internal static class ManagedSymbolReader
             {
                 callInstruction = rawInstructions[index];
                 break;
+            }
+
+            if (arguments.Count < MaxConstructorInitializerArguments &&
+                TryFoldConstructorConditionalInt32ArrayElementArgument(
+                    il,
+                    rawInstructions,
+                    index,
+                    parameterNames,
+                    signature.ParameterTypes,
+                    currentParameterSignatures,
+                    out var conditionalArgument,
+                    out var nextIndex))
+            {
+                arguments.Add(conditionalArgument);
+                index = nextIndex;
+                continue;
             }
 
             if (name == "newobj")
@@ -1039,7 +1057,10 @@ internal static class ManagedSymbolReader
             return null;
         }
 
-        if ((foldedLocalSlots.Count > 0 || hasFoldedTypeOfArgument) && kind != "base")
+        if ((foldedLocalSlots.Count > 0 ||
+             hasFoldedTypeOfArgument ||
+             arguments.Any(argument => argument.RequiresDirectBase)) &&
+            kind != "base")
         {
             return null;
         }
@@ -1054,6 +1075,7 @@ internal static class ManagedSymbolReader
                     argument.Type,
                     argument.Signature,
                     argument.FoldedArrayElementSignature,
+                    argument.RequiresExactTargetSignature,
                     target.Parameters[argumentIndex],
                     allowVerifiedDirectBaseConversion: kind == "base",
                     out renderedArguments[argumentIndex]))
@@ -1657,16 +1679,7 @@ internal static class ManagedSymbolReader
         IReadOnlyList<SignatureTypeName> parameterSignatures,
         out ConstructorArgument argument)
     {
-        var slot = name switch
-        {
-            "ldarg.1" => 1,
-            "ldarg.2" => 2,
-            "ldarg.3" => 3,
-            "ldarg.s" => il[instruction.OperandOffset],
-            "ldarg" => BinaryPrimitives.ReadUInt16LittleEndian(il.AsSpan(instruction.OperandOffset, 2)),
-            _ => -1
-        };
-        if (slot > 0)
+        if (TryReadConstructorParameterSlot(il, instruction, name, out var slot))
         {
             var parameterIndex = slot - 1;
             if (parameterIndex >= parameterTypes.Count ||
@@ -1767,6 +1780,269 @@ internal static class ManagedSymbolReader
                 argument = default;
                 return false;
         }
+    }
+
+    private static bool TryFoldConstructorConditionalInt32ArrayElementArgument(
+        byte[] il,
+        IReadOnlyList<IlInstruction> instructions,
+        int index,
+        IReadOnlyDictionary<int, string> parameterNames,
+        IReadOnlyList<CliType> parameterTypes,
+        IReadOnlyList<SignatureTypeName> parameterSignatures,
+        out ConstructorArgument argument,
+        out int nextIndex)
+    {
+        argument = default;
+        nextIndex = index;
+        const int consumedInstructionCount = 11;
+        if (index < 0 ||
+            index + consumedInstructionCount >= instructions.Count ||
+            !TryGetInstructionName(instructions[index], out var conditionLoadName) ||
+            !TryReadConstructorParameterSlot(
+                il,
+                instructions[index],
+                conditionLoadName,
+                out var conditionSlot) ||
+            !TryGetConstructorParameter(
+                conditionSlot,
+                parameterTypes,
+                parameterSignatures,
+                out var conditionType,
+                out var conditionSignature) ||
+            !IsCanonicalConstructorInt32(conditionType, conditionSignature) ||
+            !TryGetInstructionName(instructions[index + 1], out var conditionBranchName) ||
+            !TryReadConstructorForwardBranchTarget(
+                il,
+                instructions[index + 1],
+                conditionBranchName,
+                "brfalse.s",
+                "brfalse",
+                out var falseTarget) ||
+            !TryGetInstructionName(instructions[index + 2], out var arrayLoadName) ||
+            !TryReadConstructorParameterSlot(
+                il,
+                instructions[index + 2],
+                arrayLoadName,
+                out var arraySlot) ||
+            !TryGetConstructorParameter(
+                arraySlot,
+                parameterTypes,
+                parameterSignatures,
+                out var arrayType,
+                out var arraySignature) ||
+            !IsCanonicalConstructorInt32Array(arrayType, arraySignature) ||
+            !TryGetInstructionName(instructions[index + 3], out var indexLoadName) ||
+            !TryReadConstructorParameterSlot(
+                il,
+                instructions[index + 3],
+                indexLoadName,
+                out var indexSlot) ||
+            indexSlot != conditionSlot ||
+            !TryGetInstructionName(instructions[index + 4], out var firstConstantName) ||
+            !TryGetInstructionName(instructions[index + 5], out var firstOperatorName) ||
+            !TryGetInstructionName(instructions[index + 6], out var secondConstantName) ||
+            !TryGetInstructionName(instructions[index + 7], out var secondOperatorName) ||
+            !TryGetInstructionName(instructions[index + 8], out var elementLoadName) ||
+            elementLoadName != "ldelem.i4" ||
+            instructions[index + 8].OperandSize != 0 ||
+            !TryGetInstructionName(instructions[index + 9], out var joinBranchName) ||
+            !TryReadConstructorForwardBranchTarget(
+                il,
+                instructions[index + 9],
+                joinBranchName,
+                "br.s",
+                "br",
+                out var joinTarget) ||
+            !TryGetInstructionName(instructions[index + 10], out var falseValueName) ||
+            falseValueName != "ldc.i4.0" ||
+            instructions[index + 10].OperandSize != 0 ||
+            falseTarget != instructions[index + 10].Offset ||
+            joinTarget != instructions[index + consumedInstructionCount].Offset)
+        {
+            return false;
+        }
+
+        string indexExpression;
+        if (firstConstantName == "ldc.i4.1" &&
+            firstOperatorName == "sub" &&
+            secondConstantName == "ldc.i4.2" &&
+            secondOperatorName == "mul")
+        {
+            indexExpression =
+                $"({GetConstructorParameterName(parameterNames, conditionSlot)} - 1) * 2";
+        }
+        else if (firstConstantName == "ldc.i4.2" &&
+                 firstOperatorName == "mul" &&
+                 secondConstantName == "ldc.i4.1" &&
+                 secondOperatorName == "sub")
+        {
+            indexExpression =
+                $"{GetConstructorParameterName(parameterNames, conditionSlot)} * 2 - 1";
+        }
+        else
+        {
+            return false;
+        }
+
+        var conditionName = GetConstructorParameterName(parameterNames, conditionSlot);
+        var arrayName = GetConstructorParameterName(parameterNames, arraySlot);
+        argument = new ConstructorArgument(
+            $"{conditionName} != 0 ? {arrayName}[{indexExpression}] : 0",
+            conditionType,
+            conditionSignature,
+            IsFoldedExpression: true,
+            RequiresDirectBase: true,
+            RequiresExactTargetSignature: true);
+        nextIndex = index + consumedInstructionCount;
+        return true;
+    }
+
+    private static bool TryReadConstructorParameterSlot(
+        byte[] il,
+        IlInstruction instruction,
+        string name,
+        out int slot)
+    {
+        slot = name switch
+        {
+            "ldarg.1" when instruction.OperandSize == 0 => 1,
+            "ldarg.2" when instruction.OperandSize == 0 => 2,
+            "ldarg.3" when instruction.OperandSize == 0 => 3,
+            "ldarg.s" when instruction.OperandSize == 1 => il[instruction.OperandOffset],
+            "ldarg" when instruction.OperandSize == 2 =>
+                BinaryPrimitives.ReadUInt16LittleEndian(
+                    il.AsSpan(instruction.OperandOffset, 2)),
+            _ => -1
+        };
+        return slot > 0;
+    }
+
+    private static bool TryGetConstructorParameter(
+        int slot,
+        IReadOnlyList<CliType> parameterTypes,
+        IReadOnlyList<SignatureTypeName> parameterSignatures,
+        out CliType type,
+        out SignatureTypeName signature)
+    {
+        var index = slot - 1;
+        if (index < 0 ||
+            index >= parameterTypes.Count ||
+            index >= parameterSignatures.Count)
+        {
+            type = new CliType(string.Empty);
+            signature = new SignatureTypeName(string.Empty);
+            return false;
+        }
+
+        type = parameterTypes[index];
+        signature = parameterSignatures[index];
+        return true;
+    }
+
+    private static string GetConstructorParameterName(
+        IReadOnlyDictionary<int, string> parameterNames,
+        int slot) =>
+        parameterNames.TryGetValue(slot, out var name) && !string.IsNullOrEmpty(name)
+            ? name
+            : $"arg{slot - 1}";
+
+    private static bool IsCanonicalConstructorInt32(
+        CliType type,
+        SignatureTypeName signature) =>
+        type.Text == "int" &&
+        type.EnumUnderlyingType is null &&
+        type.NominalHandle.IsNil &&
+        type.RawTypeKind == 0 &&
+        !type.IsExactNamedType &&
+        type.SignatureKind == SignatureTypeKind.Unknown &&
+        type.PrimitiveType == PrimitiveTypeCode.Int32 &&
+        !type.IsByReference &&
+        signature.Text == "int" &&
+        signature.PrimitiveType == PrimitiveTypeCode.Int32 &&
+        signature.OuterCustomModifiers.Length == 0 &&
+        !signature.HasNestedCustomModifiers &&
+        !signature.IsRestrictedGenericArgument &&
+        signature.NominalHandle.IsNil &&
+        signature.RawTypeKind == 0 &&
+        signature.SignatureKind == SignatureTypeKind.Unknown &&
+        !signature.IsExactNamedType &&
+        !signature.IsByReference &&
+        signature.GenericArguments.IsDefaultOrEmpty &&
+        !signature.IsCanonicalGenericInstantiation &&
+        signature.GenericDefinitionHandle.IsNil &&
+        signature.GenericDefinitionRawTypeKind == 0 &&
+        signature.GenericDefinitionSignatureKind == SignatureTypeKind.Unknown &&
+        signature.GenericDefinitionText is null &&
+        signature.TypeParameterSlot is null &&
+        signature.SzArrayElementType is null;
+
+    private static bool IsCanonicalConstructorInt32Array(
+        CliType type,
+        SignatureTypeName signature) =>
+        type.Text == "int[]" &&
+        type.EnumUnderlyingType is null &&
+        type.NominalHandle.IsNil &&
+        type.RawTypeKind == 0 &&
+        !type.IsExactNamedType &&
+        type.SignatureKind == SignatureTypeKind.Unknown &&
+        type.PrimitiveType is null &&
+        !type.IsByReference &&
+        signature.Text == "int[]" &&
+        signature.PrimitiveType is null &&
+        signature.OuterCustomModifiers.Length == 0 &&
+        !signature.HasNestedCustomModifiers &&
+        !signature.IsRestrictedGenericArgument &&
+        signature.NominalHandle.IsNil &&
+        signature.RawTypeKind == 0 &&
+        signature.SignatureKind == SignatureTypeKind.Unknown &&
+        !signature.IsExactNamedType &&
+        !signature.IsByReference &&
+        signature.GenericArguments.IsDefaultOrEmpty &&
+        !signature.IsCanonicalGenericInstantiation &&
+        signature.GenericDefinitionHandle.IsNil &&
+        signature.GenericDefinitionRawTypeKind == 0 &&
+        signature.GenericDefinitionSignatureKind == SignatureTypeKind.Unknown &&
+        signature.GenericDefinitionText is null &&
+        signature.TypeParameterSlot is null &&
+        signature.SzArrayElementType is { } elementType &&
+        IsCanonicalConstructorInt32(
+            new CliType("int", PrimitiveType: PrimitiveTypeCode.Int32),
+            elementType);
+
+    private static bool TryReadConstructorForwardBranchTarget(
+        byte[] il,
+        IlInstruction instruction,
+        string name,
+        string shortName,
+        string longName,
+        out int target)
+    {
+        long candidate;
+        if (name == shortName && instruction.OperandSize == 1)
+        {
+            candidate = (long)instruction.OperandOffset + 1 +
+                        (sbyte)il[instruction.OperandOffset];
+        }
+        else if (name == longName && instruction.OperandSize == 4)
+        {
+            candidate = (long)instruction.OperandOffset + 4 +
+                        BinaryPrimitives.ReadInt32LittleEndian(
+                            il.AsSpan(instruction.OperandOffset, 4));
+        }
+        else
+        {
+            target = -1;
+            return false;
+        }
+
+        if (candidate <= instruction.Offset || candidate > int.MaxValue)
+        {
+            target = -1;
+            return false;
+        }
+
+        target = (int)candidate;
+        return true;
     }
 
     private static bool TryFoldInt32ArrayConstructorArgument(
@@ -2518,6 +2794,7 @@ internal static class ManagedSymbolReader
         CliType sourceType,
         SignatureTypeName? sourceSignature,
         SignatureTypeName? foldedArrayElementSignature,
+        bool requiresExactTargetSignature,
         ConstructorParameter target,
         bool allowVerifiedDirectBaseConversion,
         out string rendered)
@@ -2544,6 +2821,17 @@ internal static class ManagedSymbolReader
                    !target.Signature.IsByReference &&
                    target.Signature.SzArrayElementType is { } targetElement &&
                    AreSameConstructorSignature(foldedArrayElementSignature, targetElement);
+        }
+
+        if (requiresExactTargetSignature)
+        {
+            return sourceSignature is not null &&
+                   AreSameConstructorSignature(sourceSignature, target.Signature) &&
+                   IsExactConstructorAssignment(
+                       sourceType,
+                       targetType,
+                       sourceSignature,
+                       target.Signature);
         }
 
         if (IsExactConstructorAssignment(
