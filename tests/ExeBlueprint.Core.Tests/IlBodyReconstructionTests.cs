@@ -353,6 +353,43 @@ public sealed class IlBodyReconstructionTests
     }
 
     [Fact]
+    public void NormalizesOnlyMetadataProvenEnumEqualityOperands()
+    {
+        byte[] equalsOne = [0x02, 0x17, 0xFE, 0x01, 0x2A];
+        byte[] reverseEqualsOne = [0x17, 0x02, 0xFE, 0x01, 0x2A];
+        byte[] branchEqualsOne = [0x02, 0x17, 0x33, 0x02, 0x17, 0x2A, 0x16, 0x2A];
+        byte[] equalsOtherEnum = [0x02, 0x03, 0xFE, 0x01, 0x2A];
+        var enumType = typeof(Int32StackCoercionEnum).FullName!;
+        var otherEnumType = typeof(ByteStackCoercionEnum).FullName!;
+
+        Assert.Equal(
+            [$"return (arg0 == unchecked(({enumType})1));"],
+            Reconstruct(equalsOne, isInstance: false, returnType: "bool", parameterTypes: [enumType]));
+        Assert.Equal(
+            [$"return (unchecked(({enumType})1) == arg0);"],
+            Reconstruct(reverseEqualsOne, isInstance: false, returnType: "bool", parameterTypes: [enumType]));
+        Assert.Equal(
+            [
+                $"if (arg0 == unchecked(({enumType})1))",
+                "{",
+                "    return true;",
+                "}",
+                "return false;"
+            ],
+            Reconstruct(branchEqualsOne, isInstance: false, returnType: "bool", parameterTypes: [enumType]));
+        Assert.Null(Reconstruct(
+            equalsOtherEnum,
+            isInstance: false,
+            returnType: "bool",
+            parameterTypes: [enumType, otherEnumType]));
+        Assert.Null(Reconstruct(
+            equalsOne,
+            isInstance: false,
+            returnType: "bool",
+            parameterTypes: ["Example.EnumLookingValue"]));
+    }
+
+    [Fact]
     public void RejectsIntegerExpressionsReturnedAsUnverifiedEnums()
     {
         byte[] il = [0x19, 0x2A]; // ldc.i4.3; ret

@@ -3632,6 +3632,12 @@ internal static class ManagedSymbolReader
                 out condition);
         }
 
+        if (name is "beq" or "beq.s" or "bne.un" or "bne.un.s" &&
+            !TryNormalizeEqualityOperands(context, ref left, ref right))
+        {
+            return false;
+        }
+
         condition = name switch
         {
             "beq" or "beq.s" => $"{left} != {right}",
@@ -3799,6 +3805,12 @@ internal static class ManagedSymbolReader
                 right,
                 branchTaken: true,
                 out condition);
+        }
+
+        if (name is "beq" or "beq.s" or "bne.un" or "bne.un.s" &&
+            !TryNormalizeEqualityOperands(context, ref left, ref right))
+        {
+            return false;
         }
 
         condition = name switch
@@ -4421,6 +4433,11 @@ internal static class ManagedSymbolReader
             return true;
         }
 
+        if (op == "==" && !TryNormalizeEqualityOperands(context, ref left, ref right))
+        {
+            return false;
+        }
+
         if (op is "&" or "|" or "^")
         {
             if (leftType is not null && IsPotentialEnumType(leftType.Text) && IsIntegerLiteral(right))
@@ -4442,6 +4459,43 @@ internal static class ManagedSymbolReader
 
         PushExpression(context, stack, $"({left} {op} {right})", resultType);
         return true;
+    }
+
+    // CLI equality compares integral stack values, while C# does not permit enum/integer equality.
+    // Only cast toward an enum whose TypeDef identity and underlying type were proven by the catalog;
+    // an enum-looking external or malformed named value instead fails the whole reconstruction.
+    private static bool TryNormalizeEqualityOperands(
+        ReconContext context,
+        ref string left,
+        ref string right)
+    {
+        if (!context.ExpressionTypes.TryGetValue(left, out var leftType) ||
+            !context.ExpressionTypes.TryGetValue(right, out var rightType))
+        {
+            return true;
+        }
+
+        var leftIsEnum = TryGetKnownEnumUnderlyingType(leftType, out _);
+        var rightIsEnum = TryGetKnownEnumUnderlyingType(rightType, out _);
+        if (leftIsEnum && rightIsEnum)
+        {
+            return IsSameCliType(leftType, rightType);
+        }
+
+        if (leftIsEnum)
+        {
+            return TryRenderTargetExpression(context, right, leftType, out right);
+        }
+
+        if (rightIsEnum)
+        {
+            return TryRenderTargetExpression(context, left, rightType, out left);
+        }
+
+        var leftIsIntegral = IntegralStackFamily(leftType.Text) >= 0;
+        var rightIsIntegral = IntegralStackFamily(rightType.Text) >= 0;
+        return !(leftIsIntegral && IsPotentialEnumType(rightType.Text) ||
+                 rightIsIntegral && IsPotentialEnumType(leftType.Text));
     }
 
     private static bool TryShift(
