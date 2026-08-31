@@ -641,7 +641,10 @@ public static class MarkdownReportWriter
     {
         if (resource.Key is { } key)
         {
-            return $"`{EscapeInline(EscapeCell(key))}`（{resource.KeyKind}）";
+            var kind = resource.ComplexKey?.Type is { } complexType
+                ? $"{EscapeCell(resource.KeyKind)} / `{EscapeInline(EscapeCell(complexType))}`"
+                : EscapeCell(resource.KeyKind);
+            return $"`{EscapeInline(EscapeCell(key))}`（{kind}）";
         }
 
         return $"{EscapeCell(resource.KeyKind)} ID {resource.KeyId}";

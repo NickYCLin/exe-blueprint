@@ -279,7 +279,7 @@ public sealed record BamlDeferredResourceModel
 {
     public required int Id { get; init; }
 
-    // string 或 type；不執行 complex key 的 markup extension。
+    // string、type 或 complex；complex key 不執行 markup extension。
     public required string KeyKind { get; init; }
 
     public required int KeyId { get; init; }
@@ -309,6 +309,9 @@ public sealed record BamlDeferredResourceModel
 
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     public string? ElementType { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public BamlComplexKeyModel? ComplexKey { get; init; }
 
     // ID 是 key-local 0-based index，供 value 內的 StaticResourceId record 對照。
     public IReadOnlyList<BamlStaticResourceModel> StaticResources { get; init; } = [];
@@ -349,6 +352,66 @@ public sealed record BamlStaticResourceModel
 
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     public string? Error { get; init; }
+}
+
+public sealed record BamlComplexKeyModel
+{
+    public required int StartOffset { get; init; }
+
+    // Exclusive end offset；範圍包含 KeyElementEnd record。
+    public required int EndOffset { get; init; }
+
+    public required int TypeId { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? Type { get; init; }
+
+    public bool IsInjected { get; init; }
+
+    public bool CreateUsingTypeConverter { get; init; }
+
+    public required int ValueCount { get; init; }
+
+    public IReadOnlyList<BamlComplexKeyValueModel> Values { get; init; } = [];
+
+    public bool ValuesTruncated { get; init; }
+
+    public bool Complete { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? Error { get; init; }
+}
+
+public sealed record BamlComplexKeyValueModel
+{
+    // constructor-parameter、content 或 property。
+    public required string Role { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public int? PropertyId { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? PropertyName { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? PropertyOwnerType { get; init; }
+
+    // literal、string-reference、type-reference、property-reference、markup-extension 或 converted。
+    public required string Kind { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? Value { get; init; }
+
+    public bool ValueTruncated { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public int? ReferenceId { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public int? RelatedTypeId { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? RelatedType { get; init; }
 }
 
 public sealed record TypeModel

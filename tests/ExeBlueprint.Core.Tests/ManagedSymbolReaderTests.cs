@@ -828,7 +828,7 @@ public sealed class ManagedSymbolReaderTests
         var outputPath = Path.Combine(temp.Path, "blueprint.json");
         await BlueprintJsonWriter.WriteAsync(document, outputPath);
         using var json = JsonDocument.Parse(await File.ReadAllTextAsync(outputPath));
-        Assert.Equal("0.12", json.RootElement.GetProperty("schemaVersion").GetString());
+        Assert.Equal("0.13", json.RootElement.GetProperty("schemaVersion").GetString());
         var constraintTypeJson = json.RootElement
             .GetProperty("files")[0]
             .GetProperty("code")
@@ -1243,7 +1243,7 @@ public sealed class ManagedSymbolReaderTests
 
         Assert.Null(resource.EntriesError);
         Assert.False(resource.EntriesTruncated);
-        Assert.Equal(4, resource.Entries.Count);
+        Assert.Equal(5, resource.Entries.Count);
         AssertResourceEntry(resource, "Greeting", "String", "哈囉 ExeBlueprint");
 
         var bamlEntry = Assert.Single(resource.Entries, entry => entry.Name == "mainwindow.baml");
@@ -1361,6 +1361,54 @@ public sealed class ManagedSymbolReaderTests
             verboseEntry.Baml.PropertyValues,
             item => item.PropertyName == "ResourceKey");
 
+        var complexKeyEntry = Assert.Single(resource.Entries, entry => entry.Name == "complex-key.baml");
+        Assert.Equal(1_298, complexKeyEntry.DataSize);
+        Assert.Equal("parsed", complexKeyEntry.Baml!.Status);
+        Assert.True(complexKeyEntry.Baml.DeferredResourcesComplete);
+        Assert.Equal(2, complexKeyEntry.Baml.DeferredResourceCount);
+        Assert.Equal(5, complexKeyEntry.Baml.ElementCount);
+        Assert.Equal(5, complexKeyEntry.Baml.PropertyValueCount);
+        var staticKey = Assert.Single(
+            complexKeyEntry.Baml.DeferredResources,
+            item => item.KeyKind == "complex-static");
+        Assert.Equal(-602, staticKey.KeyId);
+        Assert.Equal("SystemColors.ControlBrushKey", staticKey.Key);
+        Assert.Equal(0, staticKey.ValuePosition);
+        Assert.Equal(1_236, staticKey.ValueStartOffset);
+        Assert.Equal(1_262, staticKey.ValueEndOffset);
+        Assert.Equal("StaticExtension", staticKey.ComplexKey!.Type);
+        Assert.Equal(1_158, staticKey.ComplexKey.StartOffset);
+        Assert.Equal(1_202, staticKey.ComplexKey.EndOffset);
+        Assert.True(staticKey.ComplexKey.Complete);
+        var staticArgument = Assert.Single(staticKey.ComplexKey.Values);
+        Assert.Equal("constructor-parameter", staticArgument.Role);
+        Assert.Equal("literal", staticArgument.Kind);
+        Assert.Equal("SystemColors.ControlBrushKey", staticArgument.Value);
+
+        var componentKey = Assert.Single(
+            complexKeyEntry.Baml.DeferredResources,
+            item => item.KeyKind == "complex-resource");
+        Assert.Equal(-95, componentKey.KeyId);
+        Assert.Equal("ComplexKeyFixture.MainWindow:AccentBrush", componentKey.Key);
+        Assert.Equal(26, componentKey.ValuePosition);
+        Assert.Equal("ComponentResourceKey", componentKey.ComplexKey!.Type);
+        Assert.Equal(2, componentKey.ComplexKey.ValueCount);
+        Assert.Equal(2, componentKey.ComplexKey.Values.Count);
+        Assert.Contains(
+            componentKey.ComplexKey.Values,
+            value => value.PropertyName == "TypeInTargetAssembly"
+                     && value.Kind == "type-reference"
+                     && value.Value == "ComplexKeyFixture.MainWindow");
+        Assert.Contains(
+            componentKey.ComplexKey.Values,
+            value => value.PropertyName == "ResourceId"
+                     && value.Kind == "converted"
+                     && value.Value == "AccentBrush"
+                     && value.RelatedType == "StringConverter");
+        Assert.DoesNotContain(
+            complexKeyEntry.Baml.PropertyValues,
+            item => item.PropertyName is "TypeInTargetAssembly" or "ResourceId");
+
         await using var temp = new TemporaryDirectory();
         var outputPath = Path.Combine(temp.Path, "blueprint.json");
         await BlueprintJsonWriter.WriteAsync(document, outputPath);
@@ -1371,7 +1419,7 @@ public sealed class ManagedSymbolReaderTests
             .GetProperty("resources")
             .EnumerateArray()
             .Single(item => item.GetProperty("name").GetString() == resource.Name);
-        Assert.Equal(4, resourceJson.GetProperty("entries").GetArrayLength());
+        Assert.Equal(5, resourceJson.GetProperty("entries").GetArrayLength());
         Assert.False(resourceJson.GetProperty("entriesTruncated").GetBoolean());
         var bamlJson = resourceJson
             .GetProperty("entries")
@@ -1433,6 +1481,22 @@ public sealed class ManagedSymbolReaderTests
         Assert.Equal("AccentBrush", verboseStaticJson.GetProperty("value").GetString());
         Assert.False(verboseStaticJson.TryGetProperty("referenceId", out _));
         Assert.True(verboseStaticJson.GetProperty("complete").GetBoolean());
+        var complexKeyJson = resourceJson
+            .GetProperty("entries")
+            .EnumerateArray()
+            .Single(item => item.GetProperty("name").GetString() == "complex-key.baml")
+            .GetProperty("baml");
+        Assert.True(complexKeyJson.GetProperty("deferredResourcesComplete").GetBoolean());
+        var componentKeyJson = complexKeyJson
+            .GetProperty("deferredResources")
+            .EnumerateArray()
+            .Single(item => item.GetProperty("keyKind").GetString() == "complex-resource");
+        Assert.Equal(
+            "ComponentResourceKey",
+            componentKeyJson.GetProperty("complexKey").GetProperty("type").GetString());
+        Assert.Equal(
+            "AccentBrush",
+            componentKeyJson.GetProperty("complexKey").GetProperty("values")[1].GetProperty("value").GetString());
     }
 
     [Fact]
@@ -2067,7 +2131,7 @@ public sealed class ManagedSymbolReaderTests
 
         var complexKey = ReadMutatedDeferredBaml(bytes => bytes[60] = 40);
         AssertIncompleteDeferredResources(complexKey);
-        Assert.Contains("KeyElementStart", complexKey.DeferredResourcesError);
+        Assert.Contains("KeyElementEnd", complexKey.DeferredResourcesError);
 
         var verboseStaticResource = ReadMutatedDeferredBaml(bytes => bytes[70] = 48);
         AssertIncompleteDeferredResources(verboseStaticResource);
@@ -2080,6 +2144,37 @@ public sealed class ManagedSymbolReaderTests
         var nestedStaticResource = BamlSummaryReader.Read(CreateDeferredBamlWithNestedStaticResourceId());
         AssertIncompleteDeferredResources(nestedStaticResource);
         Assert.Contains("property scope", nestedStaticResource.DeferredResourcesError);
+    }
+
+    [Fact]
+    public void RejectsUnknownComplexKeyTypesAndBoundsRetainedValues()
+    {
+        var unknownType = BamlSummaryReader.Read(
+            CreateComplexKeyBaml(typeId: -254, complexValueCount: 1));
+
+        Assert.Equal("parsed", unknownType.Status);
+        Assert.Equal(1, unknownType.DeferredResourceCount);
+        AssertIncompleteDeferredResources(unknownType);
+        var unknownResource = Assert.Single(unknownType.DeferredResources);
+        Assert.Equal("complex", unknownResource.KeyKind);
+        Assert.Null(unknownResource.Key);
+        Assert.Equal("Grid", unknownResource.ComplexKey!.Type);
+        Assert.False(unknownResource.ComplexKey.Complete);
+        Assert.Contains("安全摘要白名單", unknownResource.ComplexKey.Error);
+
+        var manyValues = BamlSummaryReader.Read(
+            CreateComplexKeyBaml(
+                typeId: (short)-FindKnownWpfTypeId("StaticExtension"),
+                complexValueCount: 2_001));
+
+        Assert.Equal(1, manyValues.DeferredResourceCount);
+        Assert.True(manyValues.DeferredResourcesTruncated);
+        AssertIncompleteDeferredResources(manyValues);
+        var boundedKey = Assert.Single(manyValues.DeferredResources).ComplexKey!;
+        Assert.Equal(2_001, boundedKey.ValueCount);
+        Assert.Equal(2_000, boundedKey.Values.Count);
+        Assert.True(boundedKey.ValuesTruncated);
+        Assert.False(boundedKey.Complete);
     }
 
     [Fact]
@@ -2106,7 +2201,7 @@ public sealed class ManagedSymbolReaderTests
         var assemblyPath = typeof(BlueprintAnalyzer).Assembly.Location;
         var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
 
-        Assert.Equal("0.12", document.SchemaVersion);
+        Assert.Equal("0.13", document.SchemaVersion);
         Assert.True(document.Summary.TypeCount > 0);
         Assert.True(document.Summary.MethodCount > 0);
         Assert.Equal(document.Files[0].Code!.TypeCount, document.Summary.TypeCount);
@@ -2240,6 +2335,47 @@ public sealed class ManagedSymbolReaderTests
             writer.Write((byte)0);
             writer.Write((byte)4);
         }
+
+        var contentEnd = stream.Position;
+        stream.Position = contentSizeOffset;
+        writer.Write(checked((int)(contentEnd - contentStart)));
+        stream.Position = contentEnd;
+        writer.Write((byte)4);
+        writer.Write((byte)2);
+        return stream.ToArray();
+    }
+
+    private static byte[] CreateComplexKeyBaml(short typeId, int complexValueCount)
+    {
+        using var stream = new MemoryStream();
+        stream.Write(CreateBamlHeader());
+        using var writer = new BinaryWriter(stream, System.Text.Encoding.UTF8, leaveOpen: true);
+        writer.Write((byte)3);
+        writer.Write((short)-254);
+        writer.Write((byte)0);
+        writer.Write((byte)37);
+        var contentSizeOffset = stream.Position;
+        writer.Write(0);
+        var contentStart = stream.Position;
+
+        writer.Write((byte)40);
+        writer.Write(typeId);
+        writer.Write((byte)0);
+        writer.Write(0);
+        writer.Write(false);
+        writer.Write(false);
+        writer.Write((byte)42);
+        for (var index = 0; index < complexValueCount; index++)
+        {
+            WriteBamlVariableRecord(writer, 16, payload => payload.Write(string.Empty));
+        }
+
+        writer.Write((byte)43);
+        writer.Write((byte)41);
+        writer.Write((byte)3);
+        writer.Write((short)-1);
+        writer.Write((byte)0);
+        writer.Write((byte)4);
 
         var contentEnd = stream.Position;
         stream.Position = contentSizeOffset;

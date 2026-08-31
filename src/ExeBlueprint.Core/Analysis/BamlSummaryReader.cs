@@ -17,6 +17,7 @@ internal static class BamlSummaryReader
     private const int MaxPropertyValueChars = 4_096;
     private const int MaxDeferredResources = 2_000;
     private const int MaxDeferredStaticResources = 2_000;
+    private const int MaxDeferredComplexKeyValues = 2_000;
     private const int VariableRecord = -1;
     private const int UnsupportedRecord = -2;
 
@@ -543,11 +544,11 @@ internal static class BamlSummaryReader
                 _activeDeferredContentEnd = null;
             }
 
-            // verbose StaticResource 是 deferred header 內的物件子樹，不應污染實際 UI
-            // element/property 統計；關係由第二階段以 record 範圍安全解析。
+            // complex key 與 verbose StaticResource 是 deferred header 內的物件子樹，
+            // 不應污染實際 UI element/property 統計；關係由第二階段以 record 範圍安全解析。
             if (_deferredHeaderScopes.TryPeek(out var expectedEndRecord))
             {
-                if (recordType == 48)
+                if (recordType is 40 or 48)
                 {
                     _deferredHeaderScopes.Push((byte)(recordType + 1));
                 }
@@ -559,7 +560,7 @@ internal static class BamlSummaryReader
                 return true;
             }
 
-            if (recordType == 48 && _activeDeferredContentEnd is not null)
+            if ((recordType is 40 or 48) && _activeDeferredContentEnd is not null)
             {
                 _deferredHeaderScopes.Push((byte)(recordType + 1));
                 return true;
@@ -742,6 +743,7 @@ internal static class BamlSummaryReader
 
             var resourceCount = 0;
             var staticResourceCount = 0;
+            var complexKeyValueCount = 0;
             var truncated = false;
             var complete = true;
             string? firstError = null;
@@ -910,6 +912,69 @@ internal static class BamlSummaryReader
                         continue;
                     }
 
+                    if (headerRecord.Type == 40)
+                    {
+                        var remainingComplexKeyValues = Math.Max(
+                            0,
+                            MaxDeferredComplexKeyValues - complexKeyValueCount);
+                        var complexKey = ReadComplexKey(
+                            data,
+                            records,
+                            headerIndex,
+                            contentEnd,
+                            remainingComplexKeyValues);
+                        if (complexKey.EndRecordIndex <= headerIndex || complexKey.Model is null)
+                        {
+                            SetError(complexKey.Error ??
+                                $"offset {headerRecord.StartOffset} 的 complex key 範圍無效。");
+                            sectionSupported = false;
+                            break;
+                        }
+
+                        complexKeyValueCount += complexKey.Model.ValueCount;
+                        if (!complexKey.Model.Complete)
+                        {
+                            SetError(complexKey.Model.Error ??
+                                $"offset {headerRecord.StartOffset} 的 complex key 關係不完整。");
+                        }
+
+                        if (complexKey.Model.ValuesTruncated)
+                        {
+                            truncated = true;
+                            SetError(
+                                $"BAML complex key 值超過 {MaxDeferredComplexKeyValues:N0} 筆安全保留上限。");
+                        }
+
+                        var resourceId = resourceCount++;
+                        sectionKeyCount++;
+                        currentKeyExists = true;
+                        if (resourceId < MaxDeferredResources)
+                        {
+                            currentResource = new DeferredResourceData(
+                                resourceId,
+                                complexKey.KeyKind,
+                                (short)complexKey.Model.TypeId,
+                                complexKey.Key,
+                                headerRecord.StartOffset,
+                                complexKey.ValuePosition,
+                                complexKey.Shared,
+                                complexKey.SharedSet)
+                            {
+                                ComplexKey = complexKey.Model
+                            };
+                            sectionResources.Add(currentResource);
+                        }
+                        else
+                        {
+                            currentResource = null;
+                            truncated = true;
+                            SetError($"BAML deferred resource 超過 {MaxDeferredResources:N0} 筆安全保留上限。");
+                        }
+
+                        headerIndex = complexKey.EndRecordIndex;
+                        continue;
+                    }
+
                     if (headerRecord.Type == 55)
                     {
                         if (!currentKeyExists)
@@ -1048,7 +1113,7 @@ internal static class BamlSummaryReader
                         continue;
                     }
 
-                    if (headerRecord.Type is 40 or 41 or 49 or 50)
+                    if (headerRecord.Type is 41 or 49 or 50)
                     {
                         SetError(
                             $"deferred header 的 {GetRecordName(headerRecord.Type)} ({headerRecord.Type}) 關係目前不受支援。");
@@ -1273,6 +1338,7 @@ internal static class BamlSummaryReader
                     ElementType = resource.Element is { } element
                         ? ResolveTypeName(element.TypeId)
                         : null,
+                    ComplexKey = resource.ComplexKey,
                     StaticResources = resource.StaticResources.ToArray(),
                     StaticResourcesTruncated = resource.StaticResourcesTruncated
                 })
@@ -1388,6 +1454,345 @@ internal static class BamlSummaryReader
             }
 
             return ownerType is null ? name : $"{ownerType}.{name}";
+        }
+
+        private ComplexKeyData ReadComplexKey(
+            ReadOnlySpan<byte> data,
+            IReadOnlyList<BamlRecordSpan> records,
+            int startIndex,
+            int contentEnd,
+            int retentionLimit)
+        {
+            var startRecord = records[startIndex];
+            var payload = data[startRecord.PayloadOffset..startRecord.EndOffset];
+            if (payload.Length != 9)
+            {
+                return ComplexKeyData.Invalid(
+                    startIndex,
+                    $"offset {startRecord.StartOffset} 的 KeyElementStart payload 長度不正確。");
+            }
+
+            var typeId = BinaryPrimitives.ReadInt16LittleEndian(payload);
+            var flags = payload[2];
+            var valuePosition = BinaryPrimitives.ReadInt32LittleEndian(payload[3..]);
+            var shared = payload[7] != 0;
+            var sharedSet = payload[8] != 0;
+            var type = ResolveTypeName(typeId);
+            var values = new List<BamlComplexKeyValueModel>();
+            var valueCount = 0;
+            var valuesTruncated = false;
+            string? firstError = null;
+            var depth = 1;
+            var insideConstructorParameters = false;
+
+            void AddValue(BamlComplexKeyValueModel value)
+            {
+                valueCount++;
+                if (values.Count < retentionLimit)
+                {
+                    values.Add(value);
+                }
+                else
+                {
+                    valuesTruncated = true;
+                }
+            }
+
+            for (var index = startIndex + 1; index < records.Count; index++)
+            {
+                var record = records[index];
+                if (record.StartOffset >= contentEnd || record.EndOffset > contentEnd)
+                {
+                    break;
+                }
+
+                if (record.Type == 40)
+                {
+                    depth++;
+                    firstError ??= $"offset {record.StartOffset} 的巢狀 complex key 目前不受支援。";
+                    continue;
+                }
+
+                if (record.Type == 41)
+                {
+                    depth--;
+                    if (depth == 0)
+                    {
+                        if (insideConstructorParameters)
+                        {
+                            firstError ??= $"offset {startRecord.StartOffset} 的 complex key constructor parameters 未關閉。";
+                        }
+
+                        var summary = SummarizeComplexKey(type, values);
+                        firstError ??= summary.Error;
+                        if (valuesTruncated)
+                        {
+                            firstError ??= $"offset {startRecord.StartOffset} 的 complex key 值已達安全保留上限。";
+                        }
+
+                        var model = new BamlComplexKeyModel
+                        {
+                            StartOffset = startRecord.StartOffset,
+                            EndOffset = record.EndOffset,
+                            TypeId = typeId,
+                            Type = type,
+                            IsInjected = (flags & 2) != 0,
+                            CreateUsingTypeConverter = (flags & 1) != 0,
+                            ValueCount = valueCount,
+                            Values = values.ToArray(),
+                            ValuesTruncated = valuesTruncated,
+                            Complete = firstError is null,
+                            Error = firstError
+                        };
+                        return new ComplexKeyData(
+                            index,
+                            valuePosition,
+                            shared,
+                            sharedSet,
+                            summary.Kind,
+                            summary.Value,
+                            model,
+                            null);
+                    }
+
+                    continue;
+                }
+
+                if (depth != 1)
+                {
+                    continue;
+                }
+
+                if (record.Type == 42)
+                {
+                    if (insideConstructorParameters)
+                    {
+                        firstError ??= $"offset {record.StartOffset} 出現巢狀 ConstructorParametersStart。";
+                    }
+
+                    insideConstructorParameters = true;
+                    continue;
+                }
+
+                if (record.Type == 43)
+                {
+                    if (!insideConstructorParameters)
+                    {
+                        firstError ??= $"offset {record.StartOffset} 出現沒有 start 的 ConstructorParametersEnd。";
+                    }
+
+                    insideConstructorParameters = false;
+                    continue;
+                }
+
+                var role = insideConstructorParameters ? "constructor-parameter" : "content";
+                if (record.Type is 16 or 17)
+                {
+                    var textPayload = data[record.PayloadOffset..record.EndOffset];
+                    var textPosition = 0;
+                    if (!TryReadPropertyValueString(
+                            textPayload,
+                            ref textPosition,
+                            out var text,
+                            out var textTruncated))
+                    {
+                        firstError ??= $"offset {record.StartOffset} 的 complex key 文字格式錯誤。";
+                        continue;
+                    }
+
+                    short? converterTypeId = null;
+                    if (record.Type == 17)
+                    {
+                        if (!TryReadInt16(textPayload, ref textPosition, out var converterId))
+                        {
+                            firstError ??= $"offset {record.StartOffset} 的 complex key converter type ID 已截斷。";
+                            continue;
+                        }
+
+                        converterTypeId = converterId;
+                    }
+
+                    AddValue(new BamlComplexKeyValueModel
+                    {
+                        Role = role,
+                        Kind = record.Type == 16 ? "literal" : "converted",
+                        Value = text,
+                        ValueTruncated = textTruncated,
+                        RelatedTypeId = converterTypeId,
+                        RelatedType = converterTypeId is { } converter
+                            ? ResolveTypeName(converter)
+                            : null
+                    });
+                    if (textTruncated)
+                    {
+                        firstError ??= $"offset {record.StartOffset} 的 complex key 文字已達安全截斷上限。";
+                    }
+
+                    continue;
+                }
+
+                if (record.Type == 51)
+                {
+                    var textPayload = data[record.PayloadOffset..record.EndOffset];
+                    var textPosition = 0;
+                    if (!TryReadInt16(textPayload, ref textPosition, out var textId))
+                    {
+                        firstError ??= $"offset {record.StartOffset} 的 TextWithId reference 已截斷。";
+                        continue;
+                    }
+
+                    _strings.TryGetValue(textId, out var textReference);
+                    AddValue(new BamlComplexKeyValueModel
+                    {
+                        Role = role,
+                        Kind = "string-reference",
+                        Value = textReference?.Value,
+                        ValueTruncated = textReference?.Truncated ?? false,
+                        ReferenceId = textId
+                    });
+                    if (textReference is null)
+                    {
+                        firstError ??= $"offset {record.StartOffset} 的 complex key string ID {textId} 無法解析。";
+                    }
+
+                    continue;
+                }
+
+                if (record.Type == 44)
+                {
+                    var typePayload = data[record.PayloadOffset..record.EndOffset];
+                    if (typePayload.Length != sizeof(short))
+                    {
+                        firstError ??= $"offset {record.StartOffset} 的 ConstructorParameterType payload 長度不正確。";
+                        continue;
+                    }
+
+                    var referenceId = BinaryPrimitives.ReadInt16LittleEndian(typePayload);
+                    var referenceValue = ResolveTypeName(referenceId);
+                    AddValue(new BamlComplexKeyValueModel
+                    {
+                        Role = role,
+                        Kind = "type-reference",
+                        Value = referenceValue,
+                        ReferenceId = referenceId
+                    });
+                    if (referenceValue is null)
+                    {
+                        firstError ??= $"offset {record.StartOffset} 的 complex key type ID {referenceId} 無法解析。";
+                    }
+
+                    continue;
+                }
+
+                if (record.Type is 5 or 33 or 34 or 35 or 36)
+                {
+                    if (!TryReadSafePropertyValue(
+                            data[record.PayloadOffset..record.EndOffset],
+                            record.Type,
+                            out var propertyValue,
+                            out var propertyError))
+                    {
+                        firstError ??= $"offset {record.StartOffset} 的 complex key property 無法安全解析：{propertyError}";
+                        continue;
+                    }
+
+                    var (propertyName, propertyOwnerType) = ResolveProperty(propertyValue.PropertyId);
+                    var resolvedValue = propertyValue.Value ?? ResolveReference(propertyValue);
+                    var resolvedTruncated = propertyValue.ValueTruncated || IsReferencedStringTruncated(propertyValue);
+                    AddValue(new BamlComplexKeyValueModel
+                    {
+                        Role = "property",
+                        PropertyId = propertyValue.PropertyId,
+                        PropertyName = propertyName,
+                        PropertyOwnerType = propertyOwnerType,
+                        Kind = propertyValue.Kind,
+                        Value = resolvedValue,
+                        ValueTruncated = resolvedTruncated,
+                        ReferenceId = propertyValue.ReferenceId,
+                        RelatedTypeId = propertyValue.RelatedTypeId,
+                        RelatedType = ResolveRelatedType(propertyValue)
+                    });
+                    if (propertyName is null || resolvedValue is null || resolvedTruncated)
+                    {
+                        firstError ??= $"offset {record.StartOffset} 的 complex key property 無法完整解析。";
+                    }
+
+                    continue;
+                }
+
+                if (record.Type is not 53 and not 54)
+                {
+                    firstError ??=
+                        $"offset {record.StartOffset} 的 complex key 內含不受支援的 {GetRecordName(record.Type)} ({record.Type})。";
+                }
+            }
+
+            return ComplexKeyData.Invalid(
+                startIndex,
+                $"offset {startRecord.StartOffset} 的 KeyElementStart 找不到對應的 KeyElementEnd。");
+        }
+
+        private static ComplexKeySummary SummarizeComplexKey(
+            string? type,
+            IReadOnlyList<BamlComplexKeyValueModel> values)
+        {
+            BamlComplexKeyValueModel? FindArgument(params string[] propertyNames)
+            {
+                if (propertyNames.Length > 0)
+                {
+                    var namedArgument = values.FirstOrDefault(value =>
+                        value.Role == "property"
+                        && value.PropertyName is { } propertyName
+                        && propertyNames.Contains(propertyName));
+                    if (namedArgument is not null)
+                    {
+                        return namedArgument;
+                    }
+                }
+
+                return values.FirstOrDefault(value => value.Role != "property");
+            }
+
+            if (type == "StaticExtension")
+            {
+                var member = FindArgument("Member");
+                return member?.Value is { } value
+                    ? new ComplexKeySummary("complex-static", value, null)
+                    : new ComplexKeySummary("complex-static", null, "StaticExtension key 缺少可安全讀取的 member。");
+            }
+
+            if (type == "TypeExtension")
+            {
+                var targetType = FindArgument("Type", "TypeName");
+                return targetType?.Value is { } value
+                    ? new ComplexKeySummary("complex-type", value, null)
+                    : new ComplexKeySummary("complex-type", null, "TypeExtension key 缺少可安全讀取的 type。");
+            }
+
+            if (type == "String")
+            {
+                var text = FindArgument();
+                return text?.Value is { } value
+                    ? new ComplexKeySummary("complex-string", value, null)
+                    : new ComplexKeySummary("complex-string", null, "String complex key 缺少可安全讀取的文字。");
+            }
+
+            if (type == "ComponentResourceKey")
+            {
+                var targetType = values.FirstOrDefault(value => value.PropertyName == "TypeInTargetAssembly");
+                var resourceId = values.FirstOrDefault(value => value.PropertyName == "ResourceId");
+                return targetType?.Value is { } typeValue && resourceId?.Value is { } resourceValue
+                    ? new ComplexKeySummary("complex-resource", $"{typeValue}:{resourceValue}", null)
+                    : new ComplexKeySummary(
+                        "complex-resource",
+                        null,
+                        "ComponentResourceKey 缺少可安全讀取的 TypeInTargetAssembly 或 ResourceId。");
+            }
+
+            return new ComplexKeySummary(
+                "complex",
+                null,
+                $"complex key 型別 {type ?? "unknown"} 不在安全摘要白名單。");
         }
 
         private VerboseStaticResourceData ReadVerboseStaticResource(
@@ -1530,6 +1935,27 @@ internal static class BamlSummaryReader
             referenceId = null;
             value = null;
             valueTruncated = false;
+            if (!TryReadSafePropertyValue(payload, recordType, out var propertyValue, out error))
+            {
+                return false;
+            }
+
+            var (propertyName, _) = ResolveProperty(propertyValue.PropertyId);
+            isResourceKey = propertyName == "ResourceKey";
+            kind = propertyValue.Kind;
+            referenceId = propertyValue.ReferenceId;
+            value = propertyValue.Value ?? ResolveReference(propertyValue);
+            valueTruncated = propertyValue.ValueTruncated || IsReferencedStringTruncated(propertyValue);
+            return true;
+        }
+
+        private static bool TryReadSafePropertyValue(
+            ReadOnlySpan<byte> payload,
+            byte recordType,
+            out PropertyValueData propertyValue,
+            out string? error)
+        {
+            propertyValue = null!;
             var position = 0;
             if (!TryReadInt16(payload, ref position, out var attributeId))
             {
@@ -1537,27 +1963,37 @@ internal static class BamlSummaryReader
                 return false;
             }
 
-            var (propertyName, _) = ResolveProperty(attributeId);
-            isResourceKey = propertyName == "ResourceKey";
-
             switch (recordType)
             {
                 case 5:
                 case 36:
-                    if (!TryReadPropertyValueString(payload, ref position, out var text, out valueTruncated))
+                    if (!TryReadPropertyValueString(payload, ref position, out var text, out var valueTruncated))
                     {
                         error = "字串值已截斷或格式錯誤。";
                         return false;
                     }
 
-                    if (recordType == 36 && !TryReadInt16(payload, ref position, out _))
+                    short? converterTypeId = null;
+                    if (recordType == 36)
                     {
-                        error = "converter type ID 已截斷。";
-                        return false;
+                        if (!TryReadInt16(payload, ref position, out var converterId))
+                        {
+                            error = "converter type ID 已截斷。";
+                            return false;
+                        }
+
+                        converterTypeId = converterId;
                     }
 
-                    kind = recordType == 5 ? "literal" : "converted";
-                    value = text;
+                    propertyValue = new PropertyValueData(
+                        attributeId,
+                        null,
+                        recordType == 5 ? "literal" : "converted")
+                    {
+                        Value = text,
+                        ValueTruncated = valueTruncated,
+                        RelatedTypeId = converterTypeId
+                    };
                     break;
                 case 33:
                 case 34:
@@ -1567,21 +2003,14 @@ internal static class BamlSummaryReader
                         return false;
                     }
 
-                    referenceId = simpleReferenceId;
-                    kind = recordType == 33 ? "string-reference" : "type-reference";
-                    if (recordType == 33)
+                    propertyValue = new PropertyValueData(
+                        attributeId,
+                        null,
+                        recordType == 33 ? "string-reference" : "type-reference")
                     {
-                        if (_strings.TryGetValue(simpleReferenceId, out var textReference))
-                        {
-                            value = textReference.Value;
-                            valueTruncated = textReference.Truncated;
-                        }
-                    }
-                    else
-                    {
-                        value = ResolveTypeName(simpleReferenceId);
-                    }
-
+                        ReferenceId = simpleReferenceId,
+                        ReferenceKind = recordType == 33 ? ReferenceKind.String : ReferenceKind.Type
+                    };
                     break;
                 case 35:
                     if (!TryReadInt16(payload, ref position, out var extensionAndFlags)
@@ -1596,17 +2025,13 @@ internal static class BamlSummaryReader
                         : (extensionAndFlags & 0x2000) != 0
                             ? ReferenceKind.Property
                             : ReferenceKind.ExtensionArgument;
-                    var propertyValue = new PropertyValueData(attributeId, null, "markup-extension")
+                    propertyValue = new PropertyValueData(attributeId, null, "markup-extension")
                     {
                         ReferenceId = extensionReferenceId,
                         ReferenceKind = referenceKind,
                         RelatedTypeId = (short)(extensionAndFlags & 0x0FFF),
                         RelatedTypeIsKnownElementId = true
                     };
-                    kind = "markup-extension";
-                    referenceId = extensionReferenceId;
-                    value = ResolveReference(propertyValue);
-                    valueTruncated = IsReferencedStringTruncated(propertyValue);
                     break;
                 default:
                     error = $"record {recordType} 不受支援。";
@@ -2170,6 +2595,8 @@ internal static class BamlSummaryReader
 
             public ElementData? Element { get; set; }
 
+            public BamlComplexKeyModel? ComplexKey { get; set; }
+
             public List<BamlStaticResourceModel> StaticResources { get; } = [];
 
             public int StaticResourceCount { get; private set; }
@@ -2220,6 +2647,22 @@ internal static class BamlSummaryReader
                 string error) =>
                 new(startIndex, endOffset, 0, null, null, null, null, false, false, error);
         }
+
+        private sealed record ComplexKeyData(
+            int EndRecordIndex,
+            int ValuePosition,
+            bool Shared,
+            bool SharedSet,
+            string KeyKind,
+            string? Key,
+            BamlComplexKeyModel? Model,
+            string? Error)
+        {
+            public static ComplexKeyData Invalid(int startIndex, string error) =>
+                new(startIndex, 0, false, false, "complex", null, null, error);
+        }
+
+        private sealed record ComplexKeySummary(string Kind, string? Value, string? Error);
 
         private enum ReferenceKind
         {
