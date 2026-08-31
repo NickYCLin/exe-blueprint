@@ -828,7 +828,7 @@ public sealed class ManagedSymbolReaderTests
         var outputPath = Path.Combine(temp.Path, "blueprint.json");
         await BlueprintJsonWriter.WriteAsync(document, outputPath);
         using var json = JsonDocument.Parse(await File.ReadAllTextAsync(outputPath));
-        Assert.Equal("0.11", json.RootElement.GetProperty("schemaVersion").GetString());
+        Assert.Equal("0.12", json.RootElement.GetProperty("schemaVersion").GetString());
         var constraintTypeJson = json.RootElement
             .GetProperty("files")[0]
             .GetProperty("code")
@@ -1243,7 +1243,7 @@ public sealed class ManagedSymbolReaderTests
 
         Assert.Null(resource.EntriesError);
         Assert.False(resource.EntriesTruncated);
-        Assert.Equal(3, resource.Entries.Count);
+        Assert.Equal(4, resource.Entries.Count);
         AssertResourceEntry(resource, "Greeting", "String", "哈囉 ExeBlueprint");
 
         var bamlEntry = Assert.Single(resource.Entries, entry => entry.Name == "mainwindow.baml");
@@ -1327,6 +1327,40 @@ public sealed class ManagedSymbolReaderTests
         Assert.Equal(2, deferredEntry.Baml.DeferredResourceCount);
         Assert.Equal(["primary", "Grid"], deferredEntry.Baml.DeferredResources.Select(item => item.Key));
 
+        var verboseEntry = Assert.Single(
+            resource.Entries,
+            entry => entry.Name == "verbose-static-resource.baml");
+        Assert.Equal(1_014, verboseEntry.DataSize);
+        Assert.Equal("parsed", verboseEntry.Baml!.Status);
+        Assert.True(verboseEntry.Baml.DeferredResourcesComplete);
+        Assert.Equal(2, verboseEntry.Baml.DeferredResourceCount);
+        Assert.Equal(7, verboseEntry.Baml.ElementCount);
+        Assert.Equal(8, verboseEntry.Baml.PropertyValueCount);
+        var verboseResource = Assert.Single(
+            verboseEntry.Baml.DeferredResources,
+            item => item.Key == "VerboseStyle");
+        var verboseStaticResource = Assert.Single(verboseResource.StaticResources);
+        Assert.Equal(0, verboseStaticResource.Id);
+        Assert.Equal("verbose", verboseStaticResource.Kind);
+        Assert.Equal(895, verboseStaticResource.StartOffset);
+        Assert.Equal(918, verboseStaticResource.EndOffset);
+        Assert.Null(verboseStaticResource.ReferenceId);
+        Assert.Equal(-603, verboseStaticResource.TypeId);
+        Assert.Equal("StaticResourceExtension", verboseStaticResource.Type);
+        Assert.Equal("converted", verboseStaticResource.ValueKind);
+        Assert.Equal("AccentBrush", verboseStaticResource.Value);
+        Assert.False(verboseStaticResource.ValueTruncated);
+        Assert.True(verboseStaticResource.Complete);
+        Assert.Null(verboseStaticResource.Error);
+        var setterValue = Assert.Single(
+            verboseEntry.Baml.PropertyValues,
+            item => item.PropertyName == "Value" && item.Kind == "static-resource");
+        Assert.Equal("AccentBrush", setterValue.Value);
+        Assert.Equal(verboseResource.Id, setterValue.DeferredResourceId);
+        Assert.DoesNotContain(
+            verboseEntry.Baml.PropertyValues,
+            item => item.PropertyName == "ResourceKey");
+
         await using var temp = new TemporaryDirectory();
         var outputPath = Path.Combine(temp.Path, "blueprint.json");
         await BlueprintJsonWriter.WriteAsync(document, outputPath);
@@ -1337,7 +1371,7 @@ public sealed class ManagedSymbolReaderTests
             .GetProperty("resources")
             .EnumerateArray()
             .Single(item => item.GetProperty("name").GetString() == resource.Name);
-        Assert.Equal(3, resourceJson.GetProperty("entries").GetArrayLength());
+        Assert.Equal(4, resourceJson.GetProperty("entries").GetArrayLength());
         Assert.False(resourceJson.GetProperty("entriesTruncated").GetBoolean());
         var bamlJson = resourceJson
             .GetProperty("entries")
@@ -1382,6 +1416,23 @@ public sealed class ManagedSymbolReaderTests
         Assert.Equal(
             "accent",
             deferredJson.GetProperty("propertyValues")[0].GetProperty("value").GetString());
+        var verboseJson = resourceJson
+            .GetProperty("entries")
+            .EnumerateArray()
+            .Single(item => item.GetProperty("name").GetString() == "verbose-static-resource.baml")
+            .GetProperty("baml");
+        Assert.True(verboseJson.GetProperty("deferredResourcesComplete").GetBoolean());
+        var verboseStaticJson = verboseJson
+            .GetProperty("deferredResources")
+            .EnumerateArray()
+            .Single(item => item.GetProperty("key").GetString() == "VerboseStyle")
+            .GetProperty("staticResources")[0];
+        Assert.Equal("verbose", verboseStaticJson.GetProperty("kind").GetString());
+        Assert.Equal("StaticResourceExtension", verboseStaticJson.GetProperty("type").GetString());
+        Assert.Equal("converted", verboseStaticJson.GetProperty("valueKind").GetString());
+        Assert.Equal("AccentBrush", verboseStaticJson.GetProperty("value").GetString());
+        Assert.False(verboseStaticJson.TryGetProperty("referenceId", out _));
+        Assert.True(verboseStaticJson.GetProperty("complete").GetBoolean());
     }
 
     [Fact]
@@ -1884,6 +1935,8 @@ public sealed class ManagedSymbolReaderTests
         Assert.Equal("string-reference", accent.Kind);
         Assert.Equal(11, accent.ReferenceId);
         Assert.Equal("accent", accent.Value);
+        Assert.True(accent.Complete);
+        Assert.Null(accent.Error);
 
         var typeKey = Assert.Single(summary.DeferredResources, resource => resource.Id == 1);
         Assert.Equal("type", typeKey.KeyKind);
@@ -1904,6 +1957,8 @@ public sealed class ManagedSymbolReaderTests
         Assert.Equal("type-reference", accessText.Kind);
         Assert.Equal(-1, accessText.ReferenceId);
         Assert.Equal("AccessText", accessText.Value);
+        Assert.True(accessText.Complete);
+        Assert.Null(accessText.Error);
 
         var width = Assert.Single(summary.PropertyValues, value => value.PropertyName == "Width");
         Assert.Equal("static-resource", width.Kind);
@@ -1998,7 +2053,7 @@ public sealed class ManagedSymbolReaderTests
     }
 
     [Fact]
-    public void ResolvesStaticMemberOptimizedResourceAndRejectsUnsupportedDeferredHeaders()
+    public void ResolvesStaticMemberOptimizedResourceAndRejectsInvalidDeferredHeaders()
     {
         var staticMember = ReadMutatedDeferredBaml(bytes => bytes[85] = 2);
         Assert.True(staticMember.DeferredResourcesComplete);
@@ -2016,7 +2071,7 @@ public sealed class ManagedSymbolReaderTests
 
         var verboseStaticResource = ReadMutatedDeferredBaml(bytes => bytes[70] = 48);
         AssertIncompleteDeferredResources(verboseStaticResource);
-        Assert.Contains("StaticResourceStart", verboseStaticResource.DeferredResourcesError);
+        Assert.Contains("StaticResourceEnd", verboseStaticResource.DeferredResourcesError);
 
         var keylessContent = ReadMutatedDeferredBaml(bytes => bytes[60] = 51);
         AssertIncompleteDeferredResources(keylessContent);
@@ -2024,7 +2079,7 @@ public sealed class ManagedSymbolReaderTests
 
         var nestedStaticResource = BamlSummaryReader.Read(CreateDeferredBamlWithNestedStaticResourceId());
         AssertIncompleteDeferredResources(nestedStaticResource);
-        Assert.Contains("nested indirection", nestedStaticResource.DeferredResourcesError);
+        Assert.Contains("property scope", nestedStaticResource.DeferredResourcesError);
     }
 
     [Fact]
@@ -2051,7 +2106,7 @@ public sealed class ManagedSymbolReaderTests
         var assemblyPath = typeof(BlueprintAnalyzer).Assembly.Location;
         var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
 
-        Assert.Equal("0.11", document.SchemaVersion);
+        Assert.Equal("0.12", document.SchemaVersion);
         Assert.True(document.Summary.TypeCount > 0);
         Assert.True(document.Summary.MethodCount > 0);
         Assert.Equal(document.Files[0].Code!.TypeCount, document.Summary.TypeCount);

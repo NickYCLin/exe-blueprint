@@ -270,7 +270,7 @@ public sealed record BamlPropertyValueModel
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     public int? DataSize { get; init; }
 
-    // record 56 的 local StaticResource ID 所屬 deferred resource，可與 DeferredResources.Id 對接。
+    // record 50／56 的 local StaticResource ID 所屬 deferred resource，可與 DeferredResources.Id 對接。
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     public int? DeferredResourceId { get; init; }
 }
@@ -320,13 +320,35 @@ public sealed record BamlStaticResourceModel
 {
     public required int Id { get; init; }
 
-    // string-reference、type-reference 或 property-reference。
+    // optimized record 使用 string/type/property-reference；verbose record 使用 verbose。
     public required string Kind { get; init; }
 
-    public required int ReferenceId { get; init; }
+    public required int StartOffset { get; init; }
+
+    // Exclusive end offset；verbose 範圍包含 StaticResourceEnd record。
+    public required int EndOffset { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public int? ReferenceId { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public int? TypeId { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? Type { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? ValueKind { get; init; }
 
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     public string? Value { get; init; }
+
+    public bool ValueTruncated { get; init; }
+
+    public bool Complete { get; init; } = true;
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? Error { get; init; }
 }
 
 public sealed record TypeModel

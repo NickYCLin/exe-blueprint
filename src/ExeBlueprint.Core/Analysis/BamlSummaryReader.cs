@@ -497,7 +497,9 @@ internal static class BamlSummaryReader
         private readonly List<PropertyValueData> _propertyValues = [];
         private readonly Stack<ElementContext> _elementStack = [];
         private readonly Stack<PropertyScope> _propertyScopes = [];
+        private readonly Stack<byte> _deferredHeaderScopes = [];
         private readonly Dictionary<int, int?> _deferredSectionOwners = [];
+        private int? _activeDeferredContentEnd;
         private string? _elementTreeError;
 
         public int ElementCount { get; private set; }
@@ -533,6 +535,36 @@ internal static class BamlSummaryReader
             out string? error)
         {
             error = null;
+
+            if (_activeDeferredContentEnd is { } deferredContentEnd
+                && recordOffset >= deferredContentEnd)
+            {
+                _deferredHeaderScopes.Clear();
+                _activeDeferredContentEnd = null;
+            }
+
+            // verbose StaticResource 是 deferred header 內的物件子樹，不應污染實際 UI
+            // element/property 統計；關係由第二階段以 record 範圍安全解析。
+            if (_deferredHeaderScopes.TryPeek(out var expectedEndRecord))
+            {
+                if (recordType == 48)
+                {
+                    _deferredHeaderScopes.Push((byte)(recordType + 1));
+                }
+                else if (recordType == expectedEndRecord)
+                {
+                    _deferredHeaderScopes.Pop();
+                }
+
+                return true;
+            }
+
+            if (recordType == 48 && _activeDeferredContentEnd is not null)
+            {
+                _deferredHeaderScopes.Push((byte)(recordType + 1));
+                return true;
+            }
+
             return recordType switch
             {
                 3 => TryReadElement(payload, recordOffset, out error),
@@ -548,7 +580,8 @@ internal static class BamlSummaryReader
                 34 => TryReadReferencedProperty(payload, "type-reference", ReferenceKind.Type, out error),
                 35 => TryReadMarkupExtensionProperty(payload, out error),
                 36 => TryReadConvertedProperty(payload, out error),
-                37 => TryReadDeferableContentStart(recordOffset, out error),
+                37 => TryReadDeferableContentStart(payload, recordOffset, out error),
+                50 => TryReadStaticResourceId(payload, recordOffset, out error),
                 56 => TryReadReferencedProperty(
                     payload,
                     "static-resource",
@@ -935,7 +968,10 @@ internal static class BamlSummaryReader
                                 {
                                     Id = localId,
                                     Kind = kind,
+                                    StartOffset = headerRecord.StartOffset,
+                                    EndOffset = headerRecord.EndOffset,
                                     ReferenceId = referenceId,
+                                    ValueKind = kind,
                                     Value = value
                                 });
                             }
@@ -951,7 +987,68 @@ internal static class BamlSummaryReader
                         continue;
                     }
 
-                    if (headerRecord.Type is 40 or 41 or 48 or 49 or 50)
+                    if (headerRecord.Type == 48)
+                    {
+                        if (!currentKeyExists)
+                        {
+                            SetError(
+                                $"offset {headerRecord.StartOffset} 的 StaticResourceStart 前沒有 deferred key。");
+                            sectionSupported = false;
+                            break;
+                        }
+
+                        var verbose = ReadVerboseStaticResource(data, records, headerIndex, contentEnd);
+                        if (verbose.EndRecordIndex <= headerIndex)
+                        {
+                            SetError(verbose.Error ??
+                                $"offset {headerRecord.StartOffset} 的 verbose StaticResource 範圍無效。");
+                            sectionSupported = false;
+                            break;
+                        }
+
+                        var localId = currentResource?.StaticResourceCount ?? 0;
+                        currentResource?.IncrementStaticResourceCount();
+                        staticResourceCount++;
+                        if (!verbose.Complete)
+                        {
+                            SetError(verbose.Error ??
+                                $"offset {headerRecord.StartOffset} 的 verbose StaticResource 關係不完整。");
+                        }
+
+                        if (currentResource is not null)
+                        {
+                            if (staticResourceCount <= MaxDeferredStaticResources)
+                            {
+                                currentResource.StaticResources.Add(new BamlStaticResourceModel
+                                {
+                                    Id = localId,
+                                    Kind = "verbose",
+                                    StartOffset = headerRecord.StartOffset,
+                                    EndOffset = verbose.EndOffset,
+                                    ReferenceId = verbose.ReferenceId,
+                                    TypeId = verbose.TypeId,
+                                    Type = verbose.Type,
+                                    ValueKind = verbose.ValueKind,
+                                    Value = verbose.Value,
+                                    ValueTruncated = verbose.ValueTruncated,
+                                    Complete = verbose.Complete,
+                                    Error = verbose.Error
+                                });
+                            }
+                            else
+                            {
+                                currentResource.StaticResourcesTruncated = true;
+                                truncated = true;
+                                SetError(
+                                    $"BAML deferred StaticResource 超過 {MaxDeferredStaticResources:N0} 筆安全保留上限。");
+                            }
+                        }
+
+                        headerIndex = verbose.EndRecordIndex;
+                        continue;
+                    }
+
+                    if (headerRecord.Type is 40 or 41 or 49 or 50)
                     {
                         SetError(
                             $"deferred header 的 {GetRecordName(headerRecord.Type)} ({headerRecord.Type}) 關係目前不受支援。");
@@ -1072,6 +1169,11 @@ internal static class BamlSummaryReader
                 }
             }
 
+            var scopedStaticResourceOffsets = _propertyValues
+                .Where(value => value.ReferenceKind == ReferenceKind.StaticResource
+                                && value.RecordOffset is not null)
+                .Select(value => value.RecordOffset!.Value)
+                .ToHashSet();
             var resourceRangeIndex = 0;
             foreach (var record in records)
             {
@@ -1097,9 +1199,11 @@ internal static class BamlSummaryReader
                     continue;
                 }
 
-                SetError(
-                    $"deferred value 內的 StaticResourceId ({record.Type}) nested indirection 目前不受支援。");
-                break;
+                if (!scopedStaticResourceOffsets.Contains(record.StartOffset))
+                {
+                    SetError(
+                        $"offset {record.StartOffset} 的 StaticResourceId 無法安全對應到 value element 的 property scope。");
+                }
             }
 
             foreach (var propertyValue in _propertyValues)
@@ -1284,6 +1388,233 @@ internal static class BamlSummaryReader
             }
 
             return ownerType is null ? name : $"{ownerType}.{name}";
+        }
+
+        private VerboseStaticResourceData ReadVerboseStaticResource(
+            ReadOnlySpan<byte> data,
+            IReadOnlyList<BamlRecordSpan> records,
+            int startIndex,
+            int contentEnd)
+        {
+            var startRecord = records[startIndex];
+            var payload = data[startRecord.PayloadOffset..startRecord.EndOffset];
+            if (payload.Length != 3)
+            {
+                return VerboseStaticResourceData.Invalid(
+                    startIndex,
+                    startRecord.EndOffset,
+                    $"offset {startRecord.StartOffset} 的 StaticResourceStart payload 長度不正確。");
+            }
+
+            var typeId = BinaryPrimitives.ReadInt16LittleEndian(payload);
+            var type = ResolveTypeName(typeId);
+            string? firstError = type == "StaticResourceExtension"
+                ? null
+                : $"offset {startRecord.StartOffset} 的 verbose StaticResource 型別 {type ?? typeId.ToString()} 不受支援。";
+            string? valueKind = null;
+            short? referenceId = null;
+            string? value = null;
+            var valueTruncated = false;
+            var resourceKeyCount = 0;
+            var depth = 1;
+
+            for (var index = startIndex + 1; index < records.Count; index++)
+            {
+                var record = records[index];
+                if (record.StartOffset >= contentEnd || record.EndOffset > contentEnd)
+                {
+                    break;
+                }
+
+                if (record.Type == 48)
+                {
+                    depth++;
+                    firstError ??= $"offset {record.StartOffset} 的巢狀 verbose StaticResource 目前不受支援。";
+                    continue;
+                }
+
+                if (record.Type == 49)
+                {
+                    depth--;
+                    if (depth == 0)
+                    {
+                        if (resourceKeyCount == 0)
+                        {
+                            firstError ??= $"offset {startRecord.StartOffset} 的 verbose StaticResource 沒有可安全讀取的 ResourceKey。";
+                        }
+
+                        return new VerboseStaticResourceData(
+                            index,
+                            record.EndOffset,
+                            typeId,
+                            type,
+                            valueKind,
+                            referenceId,
+                            value,
+                            valueTruncated,
+                            firstError is null,
+                            firstError);
+                    }
+
+                    continue;
+                }
+
+                if (depth != 1)
+                {
+                    continue;
+                }
+
+                if (record.Type is 5 or 33 or 34 or 35 or 36)
+                {
+                    if (!TryReadVerboseResourceKey(
+                            data[record.PayloadOffset..record.EndOffset],
+                            record.Type,
+                            out var isResourceKey,
+                            out var candidateKind,
+                            out var candidateReferenceId,
+                            out var candidateValue,
+                            out var candidateTruncated,
+                            out var propertyError))
+                    {
+                        firstError ??= $"offset {record.StartOffset} 的 verbose StaticResource property 無法安全解析：{propertyError}";
+                        continue;
+                    }
+
+                    if (!isResourceKey)
+                    {
+                        firstError ??= $"offset {record.StartOffset} 的 verbose StaticResource 含有非 ResourceKey property。";
+                        continue;
+                    }
+
+                    resourceKeyCount++;
+                    if (resourceKeyCount > 1)
+                    {
+                        firstError ??= $"offset {startRecord.StartOffset} 的 verbose StaticResource 含有重複 ResourceKey。";
+                        continue;
+                    }
+
+                    valueKind = candidateKind;
+                    referenceId = candidateReferenceId;
+                    value = candidateValue;
+                    valueTruncated = candidateTruncated;
+                    if (candidateTruncated)
+                    {
+                        firstError ??= $"offset {record.StartOffset} 的 verbose StaticResource ResourceKey 已達安全截斷上限。";
+                    }
+
+                    continue;
+                }
+
+                firstError ??=
+                    $"offset {record.StartOffset} 的 verbose StaticResource 內含不受支援的 {GetRecordName(record.Type)} ({record.Type})。";
+            }
+
+            return VerboseStaticResourceData.Invalid(
+                startIndex,
+                startRecord.EndOffset,
+                $"offset {startRecord.StartOffset} 的 StaticResourceStart 找不到對應的 StaticResourceEnd。");
+        }
+
+        private bool TryReadVerboseResourceKey(
+            ReadOnlySpan<byte> payload,
+            byte recordType,
+            out bool isResourceKey,
+            out string? kind,
+            out short? referenceId,
+            out string? value,
+            out bool valueTruncated,
+            out string? error)
+        {
+            isResourceKey = false;
+            kind = null;
+            referenceId = null;
+            value = null;
+            valueTruncated = false;
+            var position = 0;
+            if (!TryReadInt16(payload, ref position, out var attributeId))
+            {
+                error = "attribute ID 已截斷。";
+                return false;
+            }
+
+            var (propertyName, _) = ResolveProperty(attributeId);
+            isResourceKey = propertyName == "ResourceKey";
+
+            switch (recordType)
+            {
+                case 5:
+                case 36:
+                    if (!TryReadPropertyValueString(payload, ref position, out var text, out valueTruncated))
+                    {
+                        error = "字串值已截斷或格式錯誤。";
+                        return false;
+                    }
+
+                    if (recordType == 36 && !TryReadInt16(payload, ref position, out _))
+                    {
+                        error = "converter type ID 已截斷。";
+                        return false;
+                    }
+
+                    kind = recordType == 5 ? "literal" : "converted";
+                    value = text;
+                    break;
+                case 33:
+                case 34:
+                    if (!TryReadInt16(payload, ref position, out var simpleReferenceId))
+                    {
+                        error = "reference ID 已截斷。";
+                        return false;
+                    }
+
+                    referenceId = simpleReferenceId;
+                    kind = recordType == 33 ? "string-reference" : "type-reference";
+                    if (recordType == 33)
+                    {
+                        if (_strings.TryGetValue(simpleReferenceId, out var textReference))
+                        {
+                            value = textReference.Value;
+                            valueTruncated = textReference.Truncated;
+                        }
+                    }
+                    else
+                    {
+                        value = ResolveTypeName(simpleReferenceId);
+                    }
+
+                    break;
+                case 35:
+                    if (!TryReadInt16(payload, ref position, out var extensionAndFlags)
+                        || !TryReadInt16(payload, ref position, out var extensionReferenceId))
+                    {
+                        error = "markup extension type 或 value ID 已截斷。";
+                        return false;
+                    }
+
+                    var referenceKind = (extensionAndFlags & 0x4000) != 0
+                        ? ReferenceKind.Type
+                        : (extensionAndFlags & 0x2000) != 0
+                            ? ReferenceKind.Property
+                            : ReferenceKind.ExtensionArgument;
+                    var propertyValue = new PropertyValueData(attributeId, null, "markup-extension")
+                    {
+                        ReferenceId = extensionReferenceId,
+                        ReferenceKind = referenceKind,
+                        RelatedTypeId = (short)(extensionAndFlags & 0x0FFF),
+                        RelatedTypeIsKnownElementId = true
+                    };
+                    kind = "markup-extension";
+                    referenceId = extensionReferenceId;
+                    value = ResolveReference(propertyValue);
+                    valueTruncated = IsReferencedStringTruncated(propertyValue);
+                    break;
+                default:
+                    error = $"record {recordType} 不受支援。";
+                    return false;
+            }
+
+            error = null;
+            return true;
         }
 
         private bool TryReadAssembly(ReadOnlySpan<byte> payload, out string? error)
@@ -1484,9 +1815,52 @@ internal static class BamlSummaryReader
         private void SetElementTreeError(string error) =>
             _elementTreeError ??= error.TrimEnd();
 
-        private bool TryReadDeferableContentStart(int recordOffset, out string? error)
+        private bool TryReadDeferableContentStart(
+            ReadOnlySpan<byte> payload,
+            int recordOffset,
+            out string? error)
         {
             _deferredSectionOwners[recordOffset] = CurrentElementId;
+            if (payload.Length == sizeof(int))
+            {
+                var contentSize = BinaryPrimitives.ReadInt32LittleEndian(payload);
+                var contentEnd = (long)recordOffset + 1 + payload.Length + contentSize;
+                _activeDeferredContentEnd = contentSize >= 0 && contentEnd <= int.MaxValue
+                    ? (int)contentEnd
+                    : null;
+            }
+
+            error = null;
+            return true;
+        }
+
+        private bool TryReadStaticResourceId(
+            ReadOnlySpan<byte> payload,
+            int recordOffset,
+            out string? error)
+        {
+            var position = 0;
+            if (!TryReadInt16(payload, ref position, out var referenceId))
+            {
+                error = "StaticResourceId 的 local ID 已截斷。";
+                return false;
+            }
+
+            if (!_propertyScopes.TryPeek(out var propertyScope)
+                || propertyScope.ElementId != CurrentElementId)
+            {
+                // record 50 也可能出現在 collection/object 位置；沒有 property scope 時
+                // 先保留原始 record，第二階段會將無法安全連結的關係標成不完整。
+                error = null;
+                return true;
+            }
+
+            AddPropertyValue(new PropertyValueData(propertyScope.PropertyId, CurrentElementTypeId, "static-resource")
+            {
+                ReferenceId = referenceId,
+                ReferenceKind = ReferenceKind.StaticResource,
+                RecordOffset = recordOffset
+            });
             error = null;
             return true;
         }
@@ -1826,6 +2200,25 @@ internal static class BamlSummaryReader
             public int? DataSize { get; init; }
 
             public int? RecordOffset { get; init; }
+        }
+
+        private sealed record VerboseStaticResourceData(
+            int EndRecordIndex,
+            int EndOffset,
+            short TypeId,
+            string? Type,
+            string? ValueKind,
+            short? ReferenceId,
+            string? Value,
+            bool ValueTruncated,
+            bool Complete,
+            string? Error)
+        {
+            public static VerboseStaticResourceData Invalid(
+                int startIndex,
+                int endOffset,
+                string error) =>
+                new(startIndex, endOffset, 0, null, null, null, null, false, false, error);
         }
 
         private enum ReferenceKind

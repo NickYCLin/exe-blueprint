@@ -661,9 +661,18 @@ public static class MarkdownReportWriter
     {
         var values = resource.StaticResources
             .Take(MaxStaticResourcesPerDeferredResource)
-            .Select(item => item.Value is { } value
-                ? $"{item.Id}: `{EscapeInline(EscapeCell(TruncateReportValue(value, 100)))}`"
-                : $"{item.Id}: reference ID {item.ReferenceId}")
+            .Select(item =>
+            {
+                var kind = item.Kind == "verbose" && item.Type is { } type
+                    ? $"verbose `{EscapeInline(EscapeCell(type))}`"
+                    : EscapeCell(item.Kind);
+                var resolved = item.Value is { } value
+                    ? $"`{EscapeInline(EscapeCell(TruncateReportValue(value, 100)))}`"
+                    : item.ReferenceId is { } referenceId
+                        ? $"reference ID {referenceId}"
+                        : "未解析";
+                return $"{item.Id} ({kind}): {resolved}";
+            })
             .ToArray();
         if (values.Length == 0)
         {
