@@ -58,7 +58,7 @@ public sealed record ManagedResourceEntryModel
     // ResourceReader 回傳的 ResourceTypeCode 或自訂型別完整名稱。
     public required string Type { get; init; }
 
-    // decoded、binary、unsupported 或 invalid。
+    // decoded、binary、encoded、unsupported 或 invalid。
     public required string Status { get; init; }
 
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
@@ -73,9 +73,29 @@ public sealed record ManagedResourceEntryModel
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     public string? Error { get; init; }
 
+    // 自訂型別的預序列化 envelope；只保存輸入摘要，不載入型別或建立物件。
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public ManagedResourceSerializationModel? Serialization { get; init; }
+
     // 僅做靜態位元組摘要，不載入 WPF 型別，也不建立任何 UI 物件。
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     public BamlSummaryModel? Baml { get; init; }
+}
+
+public sealed record ManagedResourceSerializationModel
+{
+    // binary-formatter、type-converter-byte-array、type-converter-string 或 activator-stream。
+    public required string Format { get; init; }
+
+    public required int PayloadSize { get; init; }
+
+    // text、nrbf、png、jpeg、gif、bmp、ico、zip、pe、pdf 或 binary。
+    public required string PayloadKind { get; init; }
+
+    public bool Complete { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? Error { get; init; }
 }
 
 public sealed record BamlSummaryModel

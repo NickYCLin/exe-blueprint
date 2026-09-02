@@ -531,6 +531,21 @@ public static class MarkdownReportWriter
             return $"`{EscapeInline(EscapeCell(entry.Value))}`{suffix}";
         }
 
+        if (entry.Status == "encoded" && entry.Serialization is { } serialization)
+        {
+            var format = EscapeCell(serialization.Format);
+            var payload = $"{EscapeCell(serialization.PayloadKind)}，payload {FormatBytes(serialization.PayloadSize)}";
+            var completeness = serialization.Complete ? string.Empty : "（摘要不完整）";
+
+            if (entry.Value is { Length: > 0 } value)
+            {
+                var suffix = entry.ValueTruncated ? "…（已截斷）" : string.Empty;
+                return $"預序列化 {format}，原始文字 `{EscapeInline(EscapeCell(value))}`{suffix}，{payload}{completeness}";
+            }
+
+            return $"預序列化 {format}，{payload}{completeness}";
+        }
+
         if (entry.Status == "binary")
         {
             if (entry.Baml is { } baml)

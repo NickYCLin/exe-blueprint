@@ -1,6 +1,7 @@
 using ExeBlueprint.Models;
 using ExeBlueprint.Reporting;
 using ExeBlueprint.Analysis;
+using System.Text.Json;
 
 namespace ExeBlueprint.Core.Tests;
 
@@ -57,6 +58,98 @@ public sealed class MarkdownReportWriterTests
         Assert.Contains("`accent`", report);
         Assert.Contains("`AccessText`", report);
         Assert.Contains("[88, 98)", report);
+    }
+
+    [Fact]
+    public async Task BuildDescribesPreserializedResourceEnvelopeWithoutPretendingToDecodeIt()
+    {
+        var document = new BlueprintDocument
+        {
+            Input = new InputDescriptor
+            {
+                Name = "fixture.dll",
+                Kind = "file",
+                SourcePath = "fixture.dll",
+                FileCount = 1,
+                TotalBytes = 1
+            },
+            Summary = new BlueprintSummary(),
+            Files =
+            [
+                new FileArtifact
+                {
+                    Id = "fixture.dll",
+                    RelativePath = "fixture.dll",
+                    FileName = "fixture.dll",
+                    Size = 1,
+                    Sha256 = new string('0', 64),
+                    Category = "library",
+                    Format = ".NET assembly",
+                    IsManaged = true,
+                    Code = new CodeModel
+                    {
+                        Kind = "managed",
+                        TypeCount = 1,
+                        Resources =
+                        [
+                            new ManagedResourceModel
+                            {
+                                Name = "Fixture.resources",
+                                Visibility = "private",
+                                Location = "embedded",
+                                Kind = ".NET 資源表",
+                                Entries =
+                                [
+                                    new ManagedResourceEntryModel
+                                    {
+                                        Name = "accent-color",
+                                        Type = "System.Drawing.Color, System.Drawing.Primitives",
+                                        Status = "encoded",
+                                        Value = "CornflowerBlue",
+                                        DataSize = 16,
+                                        Serialization = new ManagedResourceSerializationModel
+                                        {
+                                            Format = "type-converter-string",
+                                            PayloadSize = 14,
+                                            PayloadKind = "text",
+                                            Complete = true
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            ]
+        };
+
+        var report = MarkdownReportWriter.Build(document);
+
+        Assert.Contains("預序列化 type-converter-string", report);
+        Assert.Contains("原始文字 `CornflowerBlue`", report);
+        Assert.Contains("text，payload 14 B", report);
+
+        var outputPath = Path.Combine(
+            Path.GetTempPath(),
+            $"exe-blueprint-report-{Guid.NewGuid():N}.json");
+        try
+        {
+            await BlueprintJsonWriter.WriteAsync(document, outputPath);
+            using var json = JsonDocument.Parse(await File.ReadAllTextAsync(outputPath));
+            var serialization = json.RootElement
+                .GetProperty("files")[0]
+                .GetProperty("code")
+                .GetProperty("resources")[0]
+                .GetProperty("entries")[0]
+                .GetProperty("serialization");
+            Assert.Equal("type-converter-string", serialization.GetProperty("format").GetString());
+            Assert.Equal("text", serialization.GetProperty("payloadKind").GetString());
+            Assert.True(serialization.GetProperty("complete").GetBoolean());
+        }
+        finally
+        {
+            File.Delete(outputPath);
+        }
     }
 
     [Fact]

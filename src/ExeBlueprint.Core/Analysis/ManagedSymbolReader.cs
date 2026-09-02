@@ -485,6 +485,11 @@ internal static class ManagedSymbolReader
             return new([], false, "找不到完整的內嵌資源資料。");
         }
 
+        return ReadResourceTable(data, entryLimit);
+    }
+
+    internal static ResourceTableReadResult ReadResourceTable(byte[] data, int entryLimit)
+    {
         try
         {
             using var stream = new MemoryStream(data, writable: false);
@@ -526,6 +531,27 @@ internal static class ManagedSymbolReader
             return new(
                 entries.OrderBy(entry => entry.Name, StringComparer.Ordinal).ToArray(),
                 truncated,
+                null);
+        }
+        catch (NotSupportedException)
+        {
+            var preserialized = PreserializedResourceTableReader.TryRead(data, entryLimit);
+            if (!preserialized.Matched)
+            {
+                return new([], false, "資源表使用不受支援的 resource reader。");
+            }
+
+            if (preserialized.Error is { } error)
+            {
+                return new([], false, error);
+            }
+
+            return new(
+                preserialized.Entries
+                    .Select(entry => DecodePreserializedResourceEntry(entry.Name, entry.Type, entry.Data))
+                    .OrderBy(entry => entry.Name, StringComparer.Ordinal)
+                    .ToArray(),
+                preserialized.Truncated,
                 null);
         }
         catch (Exception exception) when (exception is ArgumentException or BadImageFormatException or FormatException or InvalidOperationException or IOException or OverflowException)
@@ -634,6 +660,257 @@ internal static class ManagedSymbolReader
         }
     }
 
+    internal static ManagedResourceEntryModel DecodePreserializedResourceEntry(
+        string name,
+        string type,
+        byte[] data)
+    {
+        const string resourceTypePrefix = "ResourceTypeCode.";
+        if (type.StartsWith(resourceTypePrefix, StringComparison.Ordinal))
+        {
+            return DecodeResourceEntry(name, type, data);
+        }
+
+        var position = 0;
+        if (!TryRead7BitEncodedInt(data, ref position, out var formatCode))
+        {
+            return InvalidPreserializedResourceEntry(name, type, data, "找不到預序列化格式代碼。");
+        }
+
+        return formatCode switch
+        {
+            1 => DecodeLengthPrefixedPreserializedResource(
+                name,
+                type,
+                data,
+                position,
+                "binary-formatter"),
+            2 => DecodeLengthPrefixedPreserializedResource(
+                name,
+                type,
+                data,
+                position,
+                "type-converter-byte-array"),
+            3 => DecodeTypeConverterStringResource(name, type, data, position),
+            4 => DecodeLengthPrefixedPreserializedResource(
+                name,
+                type,
+                data,
+                position,
+                "activator-stream"),
+            _ => InvalidPreserializedResourceEntry(name, type, data, "預序列化格式代碼不受支援。")
+        };
+    }
+
+    private static ManagedResourceEntryModel DecodeLengthPrefixedPreserializedResource(
+        string name,
+        string type,
+        byte[] data,
+        int position,
+        string format)
+    {
+        if (!TryRead7BitEncodedInt(data, ref position, out var payloadLength)
+            || payloadLength > data.Length - position
+            || payloadLength != data.Length - position)
+        {
+            return InvalidPreserializedResourceEntry(name, type, data, "預序列化 payload 長度不正確。", format);
+        }
+
+        var payload = data.AsSpan(position, payloadLength);
+        return new ManagedResourceEntryModel
+        {
+            Name = name,
+            Type = type,
+            Status = "encoded",
+            DataSize = data.Length,
+            Serialization = new ManagedResourceSerializationModel
+            {
+                Format = format,
+                PayloadSize = payload.Length,
+                PayloadKind = ClassifySerializedPayload(payload),
+                Complete = true
+            }
+        };
+    }
+
+    private static ManagedResourceEntryModel DecodeTypeConverterStringResource(
+        string name,
+        string type,
+        byte[] data,
+        int position)
+    {
+        if (!TryReadResourceString(data, ref position, out var value)
+            || position != data.Length)
+        {
+            return InvalidPreserializedResourceEntry(
+                name,
+                type,
+                data,
+                "TypeConverterString payload 格式不正確。",
+                "type-converter-string");
+        }
+
+        var truncated = value.Length > MaxResourceValueLength;
+        return new ManagedResourceEntryModel
+        {
+            Name = name,
+            Type = type,
+            Status = "encoded",
+            Value = truncated ? value[..MaxResourceValueLength] : value,
+            ValueTruncated = truncated,
+            DataSize = data.Length,
+            Serialization = new ManagedResourceSerializationModel
+            {
+                Format = "type-converter-string",
+                PayloadSize = Encoding.UTF8.GetByteCount(value),
+                PayloadKind = "text",
+                Complete = true
+            }
+        };
+    }
+
+    private static ManagedResourceEntryModel InvalidPreserializedResourceEntry(
+        string name,
+        string type,
+        byte[] data,
+        string error,
+        string? format = null) =>
+        new()
+        {
+            Name = name,
+            Type = type,
+            Status = "invalid",
+            DataSize = data.Length,
+            Error = error,
+            Serialization = format is null
+                ? null
+                : new ManagedResourceSerializationModel
+                {
+                    Format = format,
+                    PayloadSize = 0,
+                    PayloadKind = "binary",
+                    Complete = false,
+                    Error = error
+                }
+        };
+
+    private static bool TryReadResourceString(byte[] data, ref int position, out string value)
+    {
+        value = string.Empty;
+        if (!TryRead7BitEncodedInt(data, ref position, out var byteLength)
+            || byteLength > MaxResourceValueLength * 4
+            || byteLength > data.Length - position)
+        {
+            return false;
+        }
+
+        try
+        {
+            value = new UTF8Encoding(false, true).GetString(data, position, byteLength);
+            position += byteLength;
+            return true;
+        }
+        catch (DecoderFallbackException)
+        {
+            return false;
+        }
+    }
+
+    private static bool TryRead7BitEncodedInt(byte[] data, ref int position, out int value)
+    {
+        value = 0;
+        uint result = 0;
+        for (var index = 0; index < 5; index++)
+        {
+            if (position >= data.Length)
+            {
+                return false;
+            }
+
+            var current = data[position++];
+            if (index == 4 && current > 0x07)
+            {
+                return false;
+            }
+
+            result |= (uint)(current & 0x7F) << (index * 7);
+            if ((current & 0x80) == 0)
+            {
+                if ((index > 0 && result < 1u << (index * 7)) || result > int.MaxValue)
+                {
+                    return false;
+                }
+
+                value = (int)result;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static string ClassifySerializedPayload(ReadOnlySpan<byte> payload)
+    {
+        if (payload.Length >= 17
+            && payload[0] == 0
+            && payload[9] == 1
+            && payload[10] == 0
+            && payload[11] == 0
+            && payload[12] == 0
+            && payload[13] == 0
+            && payload[14] == 0
+            && payload[15] == 0
+            && payload[16] == 0)
+        {
+            return "nrbf";
+        }
+
+        if (HasPrefix(payload, [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]))
+        {
+            return "png";
+        }
+
+        if (HasPrefix(payload, [0xFF, 0xD8, 0xFF]))
+        {
+            return "jpeg";
+        }
+
+        if (HasPrefix(payload, "GIF8"u8))
+        {
+            return "gif";
+        }
+
+        if (HasPrefix(payload, "BM"u8))
+        {
+            return "bmp";
+        }
+
+        if (HasPrefix(payload, [0, 0, 1, 0]) || HasPrefix(payload, [0, 0, 2, 0]))
+        {
+            return "ico";
+        }
+
+        if (HasPrefix(payload, "PK\x03\x04"u8))
+        {
+            return "zip";
+        }
+
+        if (HasPrefix(payload, "MZ"u8))
+        {
+            return "pe";
+        }
+
+        if (HasPrefix(payload, "%PDF-"u8))
+        {
+            return "pdf";
+        }
+
+        return "binary";
+    }
+
+    private static bool HasPrefix(ReadOnlySpan<byte> payload, ReadOnlySpan<byte> prefix) =>
+        payload.Length >= prefix.Length && payload[..prefix.Length].SequenceEqual(prefix);
+
     private static ManagedResourceEntryModel CreateDecodedResourceEntry(string name, string type, string? value)
     {
         var truncated = value is { Length: > MaxResourceValueLength };
@@ -683,7 +960,7 @@ internal static class ManagedSymbolReader
     private static string FormatResourceChar(char value) =>
         char.IsControl(value) ? $"\\u{(int)value:X4}" : value.ToString();
 
-    private readonly record struct ResourceTableReadResult(
+    internal readonly record struct ResourceTableReadResult(
         IReadOnlyList<ManagedResourceEntryModel> Entries,
         bool Truncated,
         string? Error);

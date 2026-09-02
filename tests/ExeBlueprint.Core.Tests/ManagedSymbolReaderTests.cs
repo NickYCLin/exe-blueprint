@@ -828,7 +828,7 @@ public sealed class ManagedSymbolReaderTests
         var outputPath = Path.Combine(temp.Path, "blueprint.json");
         await BlueprintJsonWriter.WriteAsync(document, outputPath);
         using var json = JsonDocument.Parse(await File.ReadAllTextAsync(outputPath));
-        Assert.Equal("0.13", json.RootElement.GetProperty("schemaVersion").GetString());
+        Assert.Equal("0.14", json.RootElement.GetProperty("schemaVersion").GetString());
         var constraintTypeJson = json.RootElement
             .GetProperty("files")[0]
             .GetProperty("code")
@@ -1552,6 +1552,53 @@ public sealed class ManagedSymbolReaderTests
     }
 
     [Fact]
+    public void ReadsPreserializedCustomResourceEnvelopesWithoutLoadingTypes()
+    {
+        var data = Convert.FromBase64String(
+            "zsrvvgEAAAApAQAAlwFTeXN0ZW0uUmVzb3VyY2VzLkV4dGVuc2lvbnMuRGVzZXJpYWxpemluZ1Jlc291cmNlUmVhZGVyLCBTeXN0ZW0uUmVzb3VyY2VzLkV4dGVuc2lvbnMsIFZlcnNpb249NC4wLjAuMCwgQ3VsdHVyZT1uZXV0cmFsLCBQdWJsaWNLZXlUb2tlbj1jYzdiMTNmZmNkMmRkZDUxjgFTeXN0ZW0uUmVzb3VyY2VzLkV4dGVuc2lvbnMuUnVudGltZVJlc291cmNlU2V0LCBTeXN0ZW0uUmVzb3VyY2VzLkV4dGVuc2lvbnMsIFZlcnNpb249NC4wLjAuMCwgQ3VsdHVyZT1uZXV0cmFsLCBQdWJsaWNLZXlUb2tlbj1jYzdiMTNmZmNkMmRkZDUxAgAAAAMAAAADAAAAL1N5c3RlbS5EcmF3aW5nLkNvbG9yLCBTeXN0ZW0uRHJhd2luZy5QcmltaXRpdmVzGUZpeHR1cmUuSWNvbkRhdGEsIEZpeHR1cmUcRml4dHVyZS5TdHJlYW1WYWx1ZSwgRml4dHVyZbqIbuirvnPsP8IkER0AAAAAAAAANgAAABcCAAAYYQBjAGMAZQBuAHQALQBjAG8AbABvAHIAAAAAABRpAGMAbwBuAC0AYgB5AHQAZQBzABEAAAAYcwB0AHIAZQBhAG0ALQB2AGEAbAB1AGUAHAAAAEADDkNvcm5mbG93ZXJCbHVlQQIIAAABAAEAEBBCBARQSwME");
+
+        var table = ManagedSymbolReader.ReadResourceTable(data, entryLimit: 10);
+
+        Assert.Null(table.Error);
+        Assert.False(table.Truncated);
+        Assert.Equal(3, table.Entries.Count);
+
+        var color = Assert.Single(table.Entries, entry => entry.Name == "accent-color");
+        Assert.Equal("System.Drawing.Color, System.Drawing.Primitives", color.Type);
+        Assert.Equal("encoded", color.Status);
+        Assert.Equal("CornflowerBlue", color.Value);
+        Assert.Equal("type-converter-string", color.Serialization!.Format);
+        Assert.Equal("text", color.Serialization.PayloadKind);
+        Assert.True(color.Serialization.Complete);
+
+        var icon = Assert.Single(table.Entries, entry => entry.Name == "icon-bytes");
+        Assert.Equal("Fixture.IconData, Fixture", icon.Type);
+        Assert.Equal("encoded", icon.Status);
+        Assert.Null(icon.Value);
+        Assert.Equal("type-converter-byte-array", icon.Serialization!.Format);
+        Assert.Equal(8, icon.Serialization.PayloadSize);
+        Assert.Equal("ico", icon.Serialization.PayloadKind);
+
+        var stream = Assert.Single(table.Entries, entry => entry.Name == "stream-value");
+        Assert.Equal("Fixture.StreamValue, Fixture", stream.Type);
+        Assert.Equal("encoded", stream.Status);
+        Assert.Equal("activator-stream", stream.Serialization!.Format);
+        Assert.Equal(4, stream.Serialization.PayloadSize);
+        Assert.Equal("zip", stream.Serialization.PayloadKind);
+
+        var truncated = ManagedSymbolReader.ReadResourceTable(data, entryLimit: 2);
+        Assert.True(truncated.Truncated);
+        Assert.Equal(2, truncated.Entries.Count);
+
+        var malformed = data.ToArray();
+        malformed[^5] = 5;
+        var malformedTable = ManagedSymbolReader.ReadResourceTable(malformed, entryLimit: 10);
+        var malformedStream = Assert.Single(malformedTable.Entries, entry => entry.Name == "stream-value");
+        Assert.Equal("invalid", malformedStream.Status);
+        Assert.Contains("payload 長度", malformedStream.Error);
+    }
+
+    [Fact]
     public void KeepsInvalidAndUnsupportedBamlSummariesBounded()
     {
         var invalidHeader = ManagedSymbolReader.DecodeResourceEntry(
@@ -2201,7 +2248,7 @@ public sealed class ManagedSymbolReaderTests
         var assemblyPath = typeof(BlueprintAnalyzer).Assembly.Location;
         var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
 
-        Assert.Equal("0.13", document.SchemaVersion);
+        Assert.Equal("0.14", document.SchemaVersion);
         Assert.True(document.Summary.TypeCount > 0);
         Assert.True(document.Summary.MethodCount > 0);
         Assert.Equal(document.Files[0].Code!.TypeCount, document.Summary.TypeCount);
