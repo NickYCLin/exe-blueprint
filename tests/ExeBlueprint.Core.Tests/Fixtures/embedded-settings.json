@@ -1,0 +1,9 @@
+{
+  "application": {
+    "displayName": "Demo Console",
+    "features": ["analyze", "export"]
+  },
+  "logging": {
+    "level": "Information"
+  }
+}

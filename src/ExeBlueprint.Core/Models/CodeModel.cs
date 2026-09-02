@@ -49,6 +49,33 @@ public sealed record ManagedResourceModel
 
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     public string? EntriesError { get; init; }
+
+    // 內嵌 JSON 設定檔的安全結構摘要；只保留欄位路徑，不保存設定值。
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public ManagedResourceConfigurationModel? Configuration { get; init; }
+}
+
+public sealed record ManagedResourceConfigurationModel
+{
+    // 目前為 json，保留為欄位以便未來擴充 XML 等設定格式。
+    public required string Format { get; init; }
+
+    // parsed、partial 或 invalid。
+    public required string Status { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? RootKind { get; init; }
+
+    // 已走訪的 JSON object 欄位數；partial 時是已讀上限，而非總數。
+    public int PropertyCount { get; init; }
+
+    // 只保留 key path，例如 logging.level 或 features[]；永不保存 value。
+    public IReadOnlyList<string> PropertyPaths { get; init; } = [];
+
+    public bool PropertyPathsTruncated { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? Error { get; init; }
 }
 
 public sealed record ManagedResourceEntryModel

@@ -376,6 +376,7 @@ internal static class ManagedSymbolReader
             var entries = Array.Empty<ManagedResourceEntryModel>();
             var entriesTruncated = false;
             string? entriesError = null;
+            ManagedResourceConfigurationModel? configuration = null;
             if (location == "embedded" && name.EndsWith(".resources", StringComparison.OrdinalIgnoreCase))
             {
                 var table = ReadEmbeddedResourceTable(
@@ -389,6 +390,14 @@ internal static class ManagedSymbolReader
                 entriesError = table.Error;
                 remainingResourceEntries -= entries.Length;
             }
+            else if (location == "embedded" && name.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+            {
+                configuration = ReadEmbeddedJsonConfiguration(
+                    peReader,
+                    resource.Offset,
+                    size,
+                    resourcesDirectory);
+            }
 
             resources.Add(new ManagedResourceModel
             {
@@ -399,7 +408,8 @@ internal static class ManagedSymbolReader
                 Size = size,
                 Entries = entries,
                 EntriesTruncated = entriesTruncated,
-                EntriesError = entriesError
+                EntriesError = entriesError,
+                Configuration = configuration
             });
         }
 
@@ -486,6 +496,32 @@ internal static class ManagedSymbolReader
         }
 
         return ReadResourceTable(data, entryLimit);
+    }
+
+    private static ManagedResourceConfigurationModel ReadEmbeddedJsonConfiguration(
+        PEReader peReader,
+        long offset,
+        long? size,
+        DirectoryEntry? resourcesDirectory)
+    {
+        if (size is not { } resourceSize)
+        {
+            return EmbeddedJsonConfigurationReader.Unavailable("找不到完整的內嵌 JSON 設定資料。");
+        }
+
+        if (resourceSize > EmbeddedJsonConfigurationReader.MaxBytes)
+        {
+            return EmbeddedJsonConfigurationReader.Unavailable("內嵌 JSON 設定超過 1 MB 安全解析上限。");
+        }
+
+        var data = TryReadEmbeddedResourceData(
+            peReader,
+            offset,
+            (int)resourceSize,
+            resourcesDirectory);
+        return data is null
+            ? EmbeddedJsonConfigurationReader.Unavailable("找不到完整的內嵌 JSON 設定資料。")
+            : EmbeddedJsonConfigurationReader.Read(data);
     }
 
     internal static ResourceTableReadResult ReadResourceTable(byte[] data, int entryLimit)

@@ -42,7 +42,7 @@ ExeBlueprint 不是動態沙箱，也不是能完整還原所有原始碼的反�
 - 分辨 .NET assembly 與原生 PE
 - 讀取 PE imports 與 .NET assembly references
 - 讀出 .NET assembly 的命名空間、型別、巢狀宣告關係、ref-like 旗標、欄位、屬性、事件、方法簽章、virtual／override／sealed dispatch 旗標、enum 常值與繼承關係
-- 列出 .NET assembly 的內嵌 manifest 資源（.resources、WPF BAML、內嵌設定檔或組件），標出用途、位置與大小；`.resources` 會再列出鍵名、型別及可安全解碼的標準值；對 System.Resources.Extensions 預序列化的自訂型別，會讀出封裝格式、payload 大小／magic 與 TypeConverterString 的原始文字，不載入型別或執行轉換器；`.baml` 會整理檔頭版本、record 類型數量、element／property 使用次數、可重建 parent/child 與 content/complex property 關係的 flat element tree、檔案內宣告與 WPF 內建的型別／屬性 ID 對照、安全的 property 值，以及 deferred ResourceDictionary 的 string/type/complex key、value 範圍和 key-local optimized／verbose StaticResource 關係
+- 列出 .NET assembly 的內嵌 manifest 資源（.resources、WPF BAML、內嵌設定檔或組件），標出用途、位置與大小；`.resources` 會再列出鍵名、型別及可安全解碼的標準值；對 System.Resources.Extensions 預序列化的自訂型別，會讀出封裝格式、payload 大小／magic 與 TypeConverterString 的原始文字，不載入型別或執行轉換器；內嵌 `.json` 設定檔只會列出欄位結構，不會輸出設定值；`.baml` 會整理檔頭版本、record 類型數量、element／property 使用次數、可重建 parent/child 與 content/complex property 關係的 flat element tree、檔案內宣告與 WPF 內建的型別／屬性 ID 對照、安全的 property 值，以及 deferred ResourceDictionary 的 string/type/complex key、value 範圍和 key-local optimized／verbose StaticResource 關係
 - 掃描 IL 建立方法層級呼叫圖，看得出程式流程怎麼串
 - 把每個方法的 IL 反組譯成可讀指令（呼叫、字串、分支目標都解析出來）
 - 用堆疊模擬把方法 IL 還原成 C# 陳述式，把條件分支還原成 if／if-else，迴圈還原成 while／do-while（可巢狀），並還原標準 try/catch、含混合巢狀 `&&`／`||` 短路條件的 catch filter、try/finally、fault 與複合 try/catch/finally，也支援保護區直接拋出例外的 terminal try
@@ -139,7 +139,7 @@ src/ExeBlueprint.Desktop/bin/Release/net10.0/win-x64/publish/ExeBlueprint.exe
 
 ## 報告內容
 
-`blueprint.json` 目前使用 schema `0.14`，是後續專案重建和轉語言要共用的資料格式，內容包含：
+`blueprint.json` 目前使用 schema `0.15`，是後續專案重建和轉語言要共用的資料格式，內容包含：
 
 - 輸入套件摘要
 - 每個檔案的格式、雜湊與來源資訊（provenance；直接輸入、資料夾、ZIP 或 ASAR，以及直接容器、項目和深度）
@@ -147,6 +147,7 @@ src/ExeBlueprint.Desktop/bin/Release/net10.0/win-x64/publish/ExeBlueprint.exe
 - PE 與 .NET metadata
 - .NET 型別、同一 artifact 內的 TypeDef／declaring TypeDef identity、泛型參數與 constraint metadata（含獨立的 owner domain／primary constraint 證據）、欄位、屬性、事件、方法簽章、方法層級呼叫圖與各方法反組譯出的 IL
 - `.resources` 的標準鍵值，以及預序列化自訂型別的 `serialization` 格式、payload 大小、辨識出的資料種類與完整性；只會保留原始 TypeConverterString 文字
+- 內嵌 JSON 設定檔的 `configuration` 結構摘要（根類型、欄位數和欄位路徑），不保存任何設定值
 - 語言、框架和工具鏈判斷
 - 套件內與外部相依關係
 - 分析警告
@@ -157,7 +158,7 @@ src/ExeBlueprint.Desktop/bin/Release/net10.0/win-x64/publish/ExeBlueprint.exe
 
 - 解開 Inno Setup、NSIS、MSI、PyInstaller 與 Electron 外層安裝封裝（Electron ASAR 已支援）
 - 深化原生 PE 分析：把 Ghidra 的函式進一步還原成呼叫圖與程式碼（目前先列出函式清單）
-- 擴充中介模型，補上 UI 與設定（函式、型別、欄位、屬性、事件、呼叫圖、內嵌 manifest 資源清單、`.resources` 標準鍵值與預序列化自訂型別的安全 envelope 摘要，以及 WPF BAML record、flat element tree、檔內與內建型別／屬性 ID、可安全讀取的 property 值、deferred complex key 與 verbose StaticResource 關係已完成 .NET 部分；接著可深化型別專屬的靜態摘要）
+- 擴充中介模型，補上 UI 與設定（函式、型別、欄位、屬性、事件、呼叫圖、內嵌 manifest 資源清單、`.resources` 標準鍵值與預序列化自訂型別的安全 envelope 摘要、內嵌 JSON 設定的安全欄位結構，以及 WPF BAML record、flat element tree、檔內與內建型別／屬性 ID、可安全讀取的 property 值、deferred complex key 與 verbose StaticResource 關係已完成 .NET 部分；接著可支援 XML 設定或深化型別專屬的靜態摘要）
 - 補齊例外處理與型別引用，讓骨架能直接編譯成多專案 solution（目前會產生 `.slnx` 與套件內的 `ProjectReference`，class 與具 instance constructor 的 struct skeleton 成員會有 `default!` initializer，已保留完整命名空間、泛型巢狀型別、interface／delegate variance、可安全表示的 type／method／delegate `where` constraints、ref struct、managed／unmanaged 函式指標簽章、pointer 成員與已還原方法體所需的 scoped `unsafe` context、方法與運算式的 nullable 語意及欄位／屬性／事件修飾詞，能區分 virtual、override、sealed override 與 final 介面實作，並還原 canonical `base(...)`／`this(...)` constructor initializer、直線欄位初始化、exact direct-base nonvirtual dispatch、terminal void return、if／if-else、while／do-while、標準 switch、try/catch、含混合巢狀短路條件的 catch filter、try/finally、以 catch/rethrow 等價表示的 fault、複合 try/catch/finally、terminal try、indexer、具區塊 setter 的唯寫屬性、參考型別 null 分支、bool／char／enum 呼叫常值、enum 位元運算、位移與 switch case、enum 成員常值、區域變數型別、bool／enum typed target 的 CLI stack-family 轉型，以及具已知整數 stack family 的 `div.un`／`rem.un`／`cgt.un`／`clt.un` 與四種 `.un` 關係分支）
 - 優先支援易語言、VB6、Delphi 到 C# 的轉換
 - 讓 C++／Rust／Go 產生器也還原方法體、支援易語言（目前這三個語言只還原結構）

@@ -36,7 +36,7 @@ Each archive also includes the `exe-blueprint-cli` command-line tool and checksu
 - PE architecture, subsystem, sections, signature metadata, and imports
 - .NET assembly references, namespaces, types, fields, properties, events, methods, enum values, and inheritance
 - IL instructions, method-level call graphs, and reconstructable C# control flow
-- Embedded manifest resources, safe decoding of standard `.resources` values, and bounded summaries of pre-serialized custom-resource envelopes
+- Embedded manifest resources, safe decoding of standard `.resources` values, bounded summaries of pre-serialized custom-resource envelopes, and value-free embedded JSON configuration structure
 - WPF `.baml` header versions, record summaries, element/property usage, a bounded flat element tree with parent/content/complex-property links, file-declared or built-in WPF type/property ID mappings, safe property strings/references, and deferred resources with string, type, or bounded complex keys plus key-local optimized or verbose `StaticResource` links
 - Common runtime, framework, language, installer, and toolchain fingerprints
 - Optional Ghidra headless results for native PE functions
@@ -53,7 +53,7 @@ exe-blueprint-output/<input-name>-<timestamp>/
 └─ REPORT.md
 ```
 
-`blueprint.json` schema 0.14 records each file's direct, directory, ZIP, or ASAR provenance, generic parameter and constraint metadata for managed code, BAML deferred-resource relationships, pre-serialized custom-resource envelope summaries, and an `archives` list with ASAR expansion counts, completeness, and errors. `REPORT.md` is a Traditional Chinese summary for human review.
+`blueprint.json` schema 0.15 records each file's direct, directory, ZIP, or ASAR provenance, generic parameter and constraint metadata for managed code, BAML deferred-resource relationships, pre-serialized custom-resource envelope summaries, embedded JSON configuration structure without values, and an `archives` list with ASAR expansion counts, completeness, and errors. `REPORT.md` is a Traditional Chinese summary for human review.
 
 Optional generators can also create structural starting points under:
 
@@ -106,6 +106,7 @@ If Ghidra is unavailable, the rest of the analysis continues and the report reco
 - ASAR handling strictly validates the Chromium Pickle header, bounded JSON tree, portable paths, offsets, sizes, and data ranges before copying entries into a private staging directory. `.asar.unpacked` files must not be reparse points and must match the declared size; ASAR links are validated but never materialized as operating-system links.
 - File, byte, nesting-depth, archive-count, cumulative-header, node, and retained-path budgets apply across nested ASAR expansion. Invalid or partial archives remain visible with explicit completeness and error data instead of being reported as fully expanded.
 - `System.Resources.Extensions` custom-resource tables are parsed as bounded byte tables. The four documented envelopes are catalogued without loading a type or invoking a converter, activator, or BinaryFormatter; only the raw `TypeConverterString` text is retained. WPF objects are not instantiated during BAML inspection. BAML output includes record counts, element/property usage, file-declared mappings, WPF 10 built-in ID names, bounded property-value samples, and safe deferred complex-key and `StaticResource` summaries; converters, serializers, and markup-extension `ProvideValue` methods are never executed, while unknown or reserved IDs remain numeric.
+- Embedded JSON configuration resources are bounded to 1 MB, 32 levels, 20,000 nodes, and 10,000 properties. Their report and JSON output contain only root shape and property paths, never setting values.
 - Detection and reconstructed code must be reviewed by an engineer before use.
 
 See the [architecture notes](docs/architecture.md), [contribution guide](CONTRIBUTING.md), and [security policy](SECURITY.md) for more details.

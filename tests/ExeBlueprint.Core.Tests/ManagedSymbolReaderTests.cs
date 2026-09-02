@@ -828,7 +828,7 @@ public sealed class ManagedSymbolReaderTests
         var outputPath = Path.Combine(temp.Path, "blueprint.json");
         await BlueprintJsonWriter.WriteAsync(document, outputPath);
         using var json = JsonDocument.Parse(await File.ReadAllTextAsync(outputPath));
-        Assert.Equal("0.14", json.RootElement.GetProperty("schemaVersion").GetString());
+        Assert.Equal("0.15", json.RootElement.GetProperty("schemaVersion").GetString());
         var constraintTypeJson = json.RootElement
             .GetProperty("files")[0]
             .GetProperty("code")
@@ -1228,6 +1228,39 @@ public sealed class ManagedSymbolReaderTests
         // Fixtures\settings.json 內容固定為 27 個 ASCII 位元組。
         Assert.Equal(27, resource.Size);
         Assert.Contains(resource.Visibility, new[] { "public", "private" });
+
+        var jsonResource = Assert.Single(
+            code.Resources,
+            resource => resource.Name == "ExeBlueprint.Core.Tests.Fixtures.embedded-settings.json");
+        var configuration = Assert.IsType<ManagedResourceConfigurationModel>(jsonResource.Configuration);
+        Assert.Equal("json", configuration.Format);
+        Assert.Equal("parsed", configuration.Status);
+        Assert.Equal("object", configuration.RootKind);
+        Assert.Equal(5, configuration.PropertyCount);
+        Assert.Equal(
+            ["application", "application.displayName", "application.features", "application.features[]", "logging", "logging.level"],
+            configuration.PropertyPaths);
+        Assert.False(configuration.PropertyPathsTruncated);
+        Assert.Null(configuration.Error);
+        Assert.DoesNotContain("Demo Console", configuration.PropertyPaths);
+        Assert.DoesNotContain("Information", configuration.PropertyPaths);
+
+        await using var temp = new TemporaryDirectory();
+        var outputPath = Path.Combine(temp.Path, "embedded-settings.json");
+        await BlueprintJsonWriter.WriteAsync(document, outputPath);
+        using var json = JsonDocument.Parse(await File.ReadAllTextAsync(outputPath));
+        var configurationJson = json.RootElement
+            .GetProperty("files")[0]
+            .GetProperty("code")
+            .GetProperty("resources")
+            .EnumerateArray()
+            .Single(resource => resource.GetProperty("name").GetString() == jsonResource.Name)
+            .GetProperty("configuration");
+        Assert.Equal("parsed", configurationJson.GetProperty("status").GetString());
+        Assert.Contains(
+            configurationJson.GetProperty("propertyPaths").EnumerateArray(),
+            path => path.GetString() == "logging.level");
+        Assert.DoesNotContain("Demo Console", configurationJson.GetRawText());
     }
 
     [Fact]
@@ -2248,7 +2281,7 @@ public sealed class ManagedSymbolReaderTests
         var assemblyPath = typeof(BlueprintAnalyzer).Assembly.Location;
         var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
 
-        Assert.Equal("0.14", document.SchemaVersion);
+        Assert.Equal("0.15", document.SchemaVersion);
         Assert.True(document.Summary.TypeCount > 0);
         Assert.True(document.Summary.MethodCount > 0);
         Assert.Equal(document.Files[0].Code!.TypeCount, document.Summary.TypeCount);

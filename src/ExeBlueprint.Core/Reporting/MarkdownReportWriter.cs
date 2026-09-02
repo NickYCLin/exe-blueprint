@@ -139,6 +139,7 @@ public static class MarkdownReportWriter
     private const int MaxArchiveExpansions = 50;
     private const int MaxResourcesPerFile = 30;
     private const int MaxResourceEntriesPerFile = 50;
+    private const int MaxConfigurationPathsPerFile = 50;
     private const int MaxBamlElementsPerFile = 50;
     private const int MaxBamlDeferredResourcesPerFile = 50;
     private const int MaxStaticResourcesPerDeferredResource = 5;
@@ -338,6 +339,43 @@ public static class MarkdownReportWriter
                 {
                     builder.AppendLine();
                     builder.AppendLine($"（報告最多列出 {MaxResourceEntriesPerFile} 筆資源鍵值，完整內容與截斷狀態請看 blueprint.json）");
+                }
+
+                var configurationPaths = code.Resources
+                    .Where(resource => resource.Configuration is not null)
+                    .SelectMany(resource => resource.Configuration!.PropertyPaths.Select(path =>
+                        (Resource: resource.Name, Configuration: resource.Configuration, Path: path)))
+                    .Take(MaxConfigurationPathsPerFile)
+                    .ToArray();
+                if (configurationPaths.Length > 0)
+                {
+                    builder.AppendLine();
+                    builder.AppendLine("內嵌 JSON 設定結構：");
+                    builder.AppendLine();
+                    builder.AppendLine("| 資源 | 根類型 | 欄位路徑 |");
+                    builder.AppendLine("| --- | --- | --- |");
+                    foreach (var item in configurationPaths)
+                    {
+                        builder.AppendLine(
+                            $"| `{EscapeInline(item.Resource)}` | {EscapeCell(item.Configuration.RootKind ?? "-")} | `{EscapeInline(item.Path)}` |");
+                    }
+                }
+
+                var totalConfigurationPaths = code.Resources.Sum(resource => resource.Configuration?.PropertyPaths.Count ?? 0);
+                if (totalConfigurationPaths > MaxConfigurationPathsPerFile
+                    || code.Resources.Any(resource => resource.Configuration?.PropertyPathsTruncated == true))
+                {
+                    builder.AppendLine();
+                    builder.AppendLine($"（報告最多列出 {MaxConfigurationPathsPerFile} 個內嵌 JSON 設定欄位路徑，完整摘要請看 blueprint.json）");
+                }
+
+                foreach (var resource in code.Resources
+                             .Where(resource => resource.Configuration is { Status: not "parsed", Error: not null })
+                             .Take(10))
+                {
+                    builder.AppendLine();
+                    builder.AppendLine(
+                        $"- `{EscapeInline(resource.Name)}` JSON 設定摘要不完整：{EscapeCell(resource.Configuration!.Error!)}");
                 }
 
                 var bamlElements = code.Resources
