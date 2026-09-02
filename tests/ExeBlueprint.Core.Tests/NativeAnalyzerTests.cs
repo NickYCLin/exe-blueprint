@@ -348,7 +348,8 @@ public sealed class NativeAnalyzerTests
     {
         await using var temp = new TemporaryDirectory();
         var unixScript = "#!/bin/sh\nsleep 5\n";
-        var windowsScript = "@echo off\r\nping 127.0.0.1 -n 6 >nul\r\n";
+        // 測試執行器的 PATH 有可能被精簡；用 SystemRoot 下的絕對路徑避免把環境差異誤判成逾時邏輯失敗。
+        var windowsScript = "@echo off\r\n\"%SystemRoot%\\System32\\PING.EXE\" 127.0.0.1 -n 6 >nul\r\n";
         await WriteLauncherAsync(temp.Path, unixScript, windowsScript);
 
         var stopwatch = Stopwatch.StartNew();
