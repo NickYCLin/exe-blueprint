@@ -53,7 +53,7 @@ Blueprint 中介資料
 
 ZIP 只會把通過 portable path、重複／檔案目錄衝突、重新解析點與大小檢查的普通檔案寫進私人暫存目錄。ASAR 會先嚴格解析 8-byte 外層 Chromium Pickle、bounded header Pickle 與 strict UTF-8 JSON tree，再驗證每個項目的 portable path、十進位 offset、size、資料範圍和非完全相同的重疊範圍。實體 staging 檔名是 opaque 名稱；分類、報告和相依解析一律使用保留下來的邏輯路徑。
 
-分析器會保留 ASAR 容器本身，並把 packed 項目以 streaming copy 寫入隨機私人暫存目錄；Unix-like 系統會把目錄權限縮到 mode `0700`。`.asar.unpacked` 只接受索引指定、大小相符且路徑中沒有重新解析點的檔案，讀取時仍會複製到私人 staging，避免把外部路徑直接當成展開結果。ASAR link 會驗證 target、循環與 hop 上限，但不建立作業系統 symlink；有 link、遺失 sidecar、無效 nested ASAR 或達到深度上限時，容器仍會留在 `files`，相對應的 `archives[].complete` 會是 `false` 並附上原因。
+分析器會保留 ASAR 容器本身，並把 packed 項目以 streaming copy 寫入隨機私人暫存目錄；Unix-like 系統會把目錄權限縮到 mode `0700`。直接輸入的 apphost 若同目錄存在同名 DLL 與 `.runtimeconfig.json`，會把非重新解析點的 DLL 當作第二個 direct artifact 納入，避免原生 host 掩蓋受管型別與資源。`.asar.unpacked` 只接受索引指定、大小相符且路徑中沒有重新解析點的檔案，讀取時仍會複製到私人 staging，避免把外部路徑直接當成展開結果。ASAR link 會驗證 target、循環與 hop 上限，但不建立作業系統 symlink；有 link、遺失 sidecar、無效 nested ASAR 或達到深度上限時，容器仍會留在 `files`，相對應的 `archives[].complete` 會是 `false` 並附上原因。
 
 預設工作區最多保留 25,000 個檔案、20 GiB 邏輯總大小、單檔 4 GiB，archive depth 最多 8；另外會限制 ASAR 嘗試數、單一與累計 header、累計節點和保留路徑字元總量。所有 nested ASAR 共用同一組工作區 budget，不會在每一層重新歸零。取消或失敗時會清除私人暫存資料；Markdown 只列出 bounded archive 狀態，JSON 則保留完整的 archive 統計與 complete/error 契約。
 

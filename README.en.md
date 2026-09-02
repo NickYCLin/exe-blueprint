@@ -6,7 +6,7 @@
 [![GitHub Release](https://img.shields.io/github/v/release/NickYCLin/exe-blueprint)](https://github.com/NickYCLin/exe-blueprint/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-ExeBlueprint is a cross-platform static analyzer for Windows EXE/DLL files and application inputs supplied as folders, ZIP packages, or Electron ASAR archives. It inspects PE files, .NET metadata and IL, dependencies, embedded resources, and WPF BAML, then exports a machine-readable software blueprint plus a readable Markdown report.
+ExeBlueprint is a cross-platform static analyzer for Windows EXE/DLL files and application inputs supplied as folders, ZIP packages, or Electron ASAR archives. It inspects PE files, .NET metadata and IL, dependencies, embedded resources, and WPF BAML, then exports a machine-readable software blueprint plus a readable Markdown report. When a directly selected .NET apphost has matching DLL and `.runtimeconfig.json` sidecars, it also analyzes the managed DLL.
 
 It includes an Avalonia desktop app for Windows, macOS, and Linux, as well as a command-line interface. Analysis is static by default: ExeBlueprint does not run the input application.
 

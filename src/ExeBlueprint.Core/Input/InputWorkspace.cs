@@ -96,6 +96,7 @@ internal sealed class InputWorkspace : IAsyncDisposable
                         info.Name,
                         info.Length,
                         new FileOrigin { Kind = "direct", Depth = 0 })));
+                    TryAddDirectDotNetAppHostSidecar(info, states);
                     kind = IsAsarPath(info.Name) ? "asar" : "file";
                     name = info.Name;
                 }
@@ -1002,6 +1003,52 @@ internal sealed class InputWorkspace : IAsyncDisposable
                signature[1] == 0x4B &&
                signature[2] is 0x03 or 0x05 or 0x07 &&
                signature[3] is 0x04 or 0x06 or 0x08;
+    }
+
+    // .NET 發佈預設會把原生 apphost、同名受管 DLL 與 runtimeconfig 放在同一資料夾。
+    // 直接選擇 apphost 時一併納入 DLL，讓型別與資源仍可從受管組件讀取。
+    private static void TryAddDirectDotNetAppHostSidecar(
+        FileInfo executable,
+        ICollection<WorkspaceFileState> states)
+    {
+        if (executable.DirectoryName is null ||
+            (executable.Extension.Length > 0 &&
+             !executable.Extension.Equals(".exe", StringComparison.OrdinalIgnoreCase)))
+        {
+            return;
+        }
+
+        var baseName = Path.GetFileNameWithoutExtension(executable.Name);
+        var assemblyPath = Path.Combine(executable.DirectoryName, $"{baseName}.dll");
+        var runtimeConfigPath = Path.Combine(executable.DirectoryName, $"{baseName}.runtimeconfig.json");
+        if (!File.Exists(assemblyPath) || !File.Exists(runtimeConfigPath))
+        {
+            return;
+        }
+
+        try
+        {
+            if ((File.GetAttributes(assemblyPath) & FileAttributes.ReparsePoint) != 0)
+            {
+                return;
+            }
+
+            var assembly = new FileInfo(assemblyPath);
+            if (!assembly.Exists)
+            {
+                return;
+            }
+
+            states.Add(new WorkspaceFileState(new WorkspaceFile(
+                assembly.FullName,
+                assembly.Name,
+                assembly.Length,
+                new FileOrigin { Kind = "direct", Depth = 0 })));
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            // 側檔無法安全讀取時維持原本只分析 apphost 的行為。
+        }
     }
 
     private static bool IsAsarPath(string path) =>

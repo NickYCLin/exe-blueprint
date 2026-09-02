@@ -36,7 +36,7 @@ ExeBlueprint 不是動態沙箱，也不是能完整還原所有原始碼的反�
 
 ## 目前能做什麼
 
-- 分析單一檔案、完整資料夾、ZIP 或 Electron ASAR；資料夾與 ZIP 內的 ASAR、以及有上限的巢狀 ASAR 也會展開
+- 分析單一檔案、完整資料夾、ZIP 或 Electron ASAR；資料夾與 ZIP 內的 ASAR、以及有上限的巢狀 ASAR 也會展開；若直接輸入 .NET apphost，偵測到同名 DLL 與 `.runtimeconfig.json` 時會一併分析該受管 DLL
 - 計算每個檔案的 SHA-256
 - 讀取 PE 架構、子系統、section 與簽章資料
 - 分辨 .NET assembly 與原生 PE

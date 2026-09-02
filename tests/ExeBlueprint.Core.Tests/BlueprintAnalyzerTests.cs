@@ -25,6 +25,54 @@ public sealed class BlueprintAnalyzerTests
     }
 
     [Fact]
+    public async Task AnalyzeDirectAppHostIncludesMatchingManagedAssemblySidecar()
+    {
+        await using var temp = new TemporaryDirectory();
+        var executablePath = Path.Combine(temp.Path, "Probe.exe");
+        var assemblyPath = Path.Combine(temp.Path, "Probe.dll");
+        await File.WriteAllTextAsync(executablePath, "native apphost placeholder");
+        File.Copy(typeof(BlueprintAnalyzer).Assembly.Location, assemblyPath);
+        await File.WriteAllTextAsync(Path.Combine(temp.Path, "Probe.runtimeconfig.json"), "{}");
+
+        var document = await new BlueprintAnalyzer().AnalyzeAsync(executablePath);
+
+        Assert.Equal(2, document.Input.FileCount);
+        var assembly = Assert.Single(document.Files, file => file.RelativePath == "Probe.dll");
+        Assert.True(assembly.IsManaged);
+        Assert.True(assembly.Code!.TypeCount > 0);
+        Assert.Contains(document.Technologies, item => item.Id == "dotnet");
+    }
+
+    [Fact]
+    public async Task AnalyzeDirectExecutableDoesNotIncludeSiblingWithoutRuntimeConfig()
+    {
+        await using var temp = new TemporaryDirectory();
+        var executablePath = Path.Combine(temp.Path, "Probe.exe");
+        await File.WriteAllTextAsync(executablePath, "native executable placeholder");
+        File.Copy(typeof(BlueprintAnalyzer).Assembly.Location, Path.Combine(temp.Path, "Probe.dll"));
+
+        var document = await new BlueprintAnalyzer().AnalyzeAsync(executablePath);
+
+        Assert.Equal(1, document.Input.FileCount);
+        Assert.DoesNotContain(document.Files, file => file.RelativePath == "Probe.dll");
+    }
+
+    [Fact]
+    public async Task AnalyzeDirectNonExecutableDoesNotIncludeMatchingAssemblySidecar()
+    {
+        await using var temp = new TemporaryDirectory();
+        var inputPath = Path.Combine(temp.Path, "Probe.json");
+        await File.WriteAllTextAsync(inputPath, "{}");
+        File.Copy(typeof(BlueprintAnalyzer).Assembly.Location, Path.Combine(temp.Path, "Probe.dll"));
+        await File.WriteAllTextAsync(Path.Combine(temp.Path, "Probe.runtimeconfig.json"), "{}");
+
+        var document = await new BlueprintAnalyzer().AnalyzeAsync(inputPath);
+
+        Assert.Equal(1, document.Input.FileCount);
+        Assert.DoesNotContain(document.Files, file => file.RelativePath == "Probe.dll");
+    }
+
+    [Fact]
     public async Task AnalyzeDirectoryDetectsEasyLanguageRuntimePackage()
     {
         await using var temp = new TemporaryDirectory();
