@@ -350,14 +350,14 @@ public static class MarkdownReportWriter
                 if (configurationPaths.Length > 0)
                 {
                     builder.AppendLine();
-                    builder.AppendLine("內嵌 JSON 設定結構：");
+                    builder.AppendLine("內嵌設定結構：");
                     builder.AppendLine();
-                    builder.AppendLine("| 資源 | 根類型 | 欄位路徑 |");
-                    builder.AppendLine("| --- | --- | --- |");
+                    builder.AppendLine("| 資源 | 格式 | 根類型 | 欄位路徑 |");
+                    builder.AppendLine("| --- | --- | --- | --- |");
                     foreach (var item in configurationPaths)
                     {
                         builder.AppendLine(
-                            $"| `{EscapeInline(item.Resource)}` | {EscapeCell(item.Configuration.RootKind ?? "-")} | `{EscapeInline(item.Path)}` |");
+                            $"| `{EscapeInline(item.Resource)}` | {EscapeCell(item.Configuration.Format)} | {EscapeCell(item.Configuration.RootKind ?? "-")} | `{EscapeInline(item.Path)}` |");
                     }
                 }
 
@@ -366,7 +366,7 @@ public static class MarkdownReportWriter
                     || code.Resources.Any(resource => resource.Configuration?.PropertyPathsTruncated == true))
                 {
                     builder.AppendLine();
-                    builder.AppendLine($"（報告最多列出 {MaxConfigurationPathsPerFile} 個內嵌 JSON 設定欄位路徑，完整摘要請看 blueprint.json）");
+                    builder.AppendLine($"（報告最多列出 {MaxConfigurationPathsPerFile} 個內嵌設定欄位路徑，完整摘要請看 blueprint.json）");
                 }
 
                 foreach (var resource in code.Resources
@@ -375,7 +375,7 @@ public static class MarkdownReportWriter
                 {
                     builder.AppendLine();
                     builder.AppendLine(
-                        $"- `{EscapeInline(resource.Name)}` JSON 設定摘要不完整：{EscapeCell(resource.Configuration!.Error!)}");
+                        $"- `{EscapeInline(resource.Name)}` {EscapeCell(resource.Configuration!.Format.ToUpperInvariant())} 設定摘要不完整：{EscapeCell(resource.Configuration.Error!)}");
                 }
 
                 var bamlElements = code.Resources

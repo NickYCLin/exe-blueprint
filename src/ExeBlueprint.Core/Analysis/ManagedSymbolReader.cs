@@ -398,6 +398,16 @@ internal static class ManagedSymbolReader
                     size,
                     resourcesDirectory);
             }
+            else if (location == "embedded" &&
+                     (name.EndsWith(".config", StringComparison.OrdinalIgnoreCase)
+                      || name.EndsWith(".xml", StringComparison.OrdinalIgnoreCase)))
+            {
+                configuration = ReadEmbeddedXmlConfiguration(
+                    peReader,
+                    resource.Offset,
+                    size,
+                    resourcesDirectory);
+            }
 
             resources.Add(new ManagedResourceModel
             {
@@ -504,14 +514,52 @@ internal static class ManagedSymbolReader
         long? size,
         DirectoryEntry? resourcesDirectory)
     {
+        return ReadEmbeddedConfiguration(
+            peReader,
+            offset,
+            size,
+            resourcesDirectory,
+            "JSON",
+            EmbeddedJsonConfigurationReader.MaxBytes,
+            EmbeddedJsonConfigurationReader.Read,
+            EmbeddedJsonConfigurationReader.Unavailable);
+    }
+
+    private static ManagedResourceConfigurationModel ReadEmbeddedXmlConfiguration(
+        PEReader peReader,
+        long offset,
+        long? size,
+        DirectoryEntry? resourcesDirectory)
+    {
+        return ReadEmbeddedConfiguration(
+            peReader,
+            offset,
+            size,
+            resourcesDirectory,
+            "XML",
+            EmbeddedXmlConfigurationReader.MaxBytes,
+            EmbeddedXmlConfigurationReader.Read,
+            EmbeddedXmlConfigurationReader.Unavailable);
+    }
+
+    private static ManagedResourceConfigurationModel ReadEmbeddedConfiguration(
+        PEReader peReader,
+        long offset,
+        long? size,
+        DirectoryEntry? resourcesDirectory,
+        string format,
+        int maxBytes,
+        Func<byte[], ManagedResourceConfigurationModel> read,
+        Func<string, ManagedResourceConfigurationModel> unavailable)
+    {
         if (size is not { } resourceSize)
         {
-            return EmbeddedJsonConfigurationReader.Unavailable("找不到完整的內嵌 JSON 設定資料。");
+            return unavailable($"找不到完整的內嵌 {format} 設定資料。");
         }
 
-        if (resourceSize > EmbeddedJsonConfigurationReader.MaxBytes)
+        if (resourceSize > maxBytes)
         {
-            return EmbeddedJsonConfigurationReader.Unavailable("內嵌 JSON 設定超過 1 MB 安全解析上限。");
+            return unavailable($"內嵌 {format} 設定超過 1 MB 安全解析上限。");
         }
 
         var data = TryReadEmbeddedResourceData(
@@ -520,8 +568,8 @@ internal static class ManagedSymbolReader
             (int)resourceSize,
             resourcesDirectory);
         return data is null
-            ? EmbeddedJsonConfigurationReader.Unavailable("找不到完整的內嵌 JSON 設定資料。")
-            : EmbeddedJsonConfigurationReader.Read(data);
+            ? unavailable($"找不到完整的內嵌 {format} 設定資料。")
+            : read(data);
     }
 
     internal static ResourceTableReadResult ReadResourceTable(byte[] data, int entryLimit)

@@ -828,7 +828,7 @@ public sealed class ManagedSymbolReaderTests
         var outputPath = Path.Combine(temp.Path, "blueprint.json");
         await BlueprintJsonWriter.WriteAsync(document, outputPath);
         using var json = JsonDocument.Parse(await File.ReadAllTextAsync(outputPath));
-        Assert.Equal("0.15", json.RootElement.GetProperty("schemaVersion").GetString());
+        Assert.Equal("0.16", json.RootElement.GetProperty("schemaVersion").GetString());
         var constraintTypeJson = json.RootElement
             .GetProperty("files")[0]
             .GetProperty("code")
@@ -1245,6 +1245,29 @@ public sealed class ManagedSymbolReaderTests
         Assert.DoesNotContain("Demo Console", configuration.PropertyPaths);
         Assert.DoesNotContain("Information", configuration.PropertyPaths);
 
+        var xmlResource = Assert.Single(
+            code.Resources,
+            resource => resource.Name == "ExeBlueprint.Core.Tests.Fixtures.embedded-app.config");
+        var xmlConfiguration = Assert.IsType<ManagedResourceConfigurationModel>(xmlResource.Configuration);
+        Assert.Equal("xml", xmlConfiguration.Format);
+        Assert.Equal("parsed", xmlConfiguration.Status);
+        Assert.Equal("configuration", xmlConfiguration.RootKind);
+        Assert.Equal(8, xmlConfiguration.PropertyCount);
+        Assert.Equal(
+            [
+                "configuration",
+                "configuration/appSettings",
+                "configuration/appSettings/add",
+                "configuration/appSettings/add/@key",
+                "configuration/appSettings/add/@value",
+                "configuration/system.serviceModel",
+                "configuration/system.serviceModel/bindings",
+                "configuration/system.serviceModel/bindings/basicHttpBinding"
+            ],
+            xmlConfiguration.PropertyPaths);
+        Assert.DoesNotContain("FeatureMode", xmlConfiguration.PropertyPaths);
+        Assert.DoesNotContain("OnlyInTheInput", xmlConfiguration.PropertyPaths);
+
         await using var temp = new TemporaryDirectory();
         var outputPath = Path.Combine(temp.Path, "embedded-settings.json");
         await BlueprintJsonWriter.WriteAsync(document, outputPath);
@@ -1261,6 +1284,18 @@ public sealed class ManagedSymbolReaderTests
             configurationJson.GetProperty("propertyPaths").EnumerateArray(),
             path => path.GetString() == "logging.level");
         Assert.DoesNotContain("Demo Console", configurationJson.GetRawText());
+        var xmlConfigurationJson = json.RootElement
+            .GetProperty("files")[0]
+            .GetProperty("code")
+            .GetProperty("resources")
+            .EnumerateArray()
+            .Single(resource => resource.GetProperty("name").GetString() == xmlResource.Name)
+            .GetProperty("configuration");
+        Assert.Equal("xml", xmlConfigurationJson.GetProperty("format").GetString());
+        Assert.Contains(
+            xmlConfigurationJson.GetProperty("propertyPaths").EnumerateArray(),
+            path => path.GetString() == "configuration/appSettings/add/@key");
+        Assert.DoesNotContain("OnlyInTheInput", xmlConfigurationJson.GetRawText());
     }
 
     [Fact]
@@ -2281,7 +2316,7 @@ public sealed class ManagedSymbolReaderTests
         var assemblyPath = typeof(BlueprintAnalyzer).Assembly.Location;
         var document = await new BlueprintAnalyzer().AnalyzeAsync(assemblyPath);
 
-        Assert.Equal("0.15", document.SchemaVersion);
+        Assert.Equal("0.16", document.SchemaVersion);
         Assert.True(document.Summary.TypeCount > 0);
         Assert.True(document.Summary.MethodCount > 0);
         Assert.Equal(document.Files[0].Code!.TypeCount, document.Summary.TypeCount);

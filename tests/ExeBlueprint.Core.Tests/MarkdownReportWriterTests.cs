@@ -58,9 +58,11 @@ public sealed class MarkdownReportWriterTests
         Assert.Contains("`accent`", report);
         Assert.Contains("`AccessText`", report);
         Assert.Contains("[88, 98)", report);
-        Assert.Contains("內嵌 JSON 設定結構：", report);
+        Assert.Contains("內嵌設定結構：", report);
         Assert.Contains("`application.displayName`", report);
+        Assert.Contains("`configuration/appSettings/add/@key`", report);
         Assert.DoesNotContain("Demo Console", report);
+        Assert.DoesNotContain("OnlyInTheInput", report);
     }
 
     [Fact]
