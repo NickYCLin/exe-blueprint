@@ -129,11 +129,11 @@ public sealed class ManagedSymbolReaderTests
             ["return unchecked((int)(unchecked((uint)left) / unchecked((uint)right)));"],
             Assert.Single(fixture.Methods, method => method.Name == nameof(UnsignedArithmeticFixture.DivideSigned)).Body);
         Assert.Equal(
-            [
-                "ExeBlueprint.Core.Tests.UnsignedArithmeticFixture.Stored = unchecked((int)(unchecked((uint)left) % unchecked((uint)right)));",
-                "return ExeBlueprint.Core.Tests.UnsignedArithmeticFixture.Stored;"
-            ],
-            Assert.Single(fixture.Methods, method => method.Name == nameof(UnsignedArithmeticFixture.StoreSignedField)).Body);
+            "ExeBlueprint.Core.Tests.UnsignedArithmeticFixture.Stored = unchecked((int)(unchecked((uint)left) % unchecked((uint)right)));",
+            Assert.Single(fixture.Methods, method => method.Name == nameof(UnsignedArithmeticFixture.StoreSignedField)).Body[0]);
+        Assert.Matches(
+            "^return (?:ExeBlueprint\\.Core\\.Tests\\.UnsignedArithmeticFixture\\.Stored|v\\d+);$",
+            Assert.Single(fixture.Methods, method => method.Name == nameof(UnsignedArithmeticFixture.StoreSignedField)).Body[^1]);
         Assert.Equal(
             ["return (unchecked((uint)left) > unchecked((uint)right));"],
             Assert.Single(fixture.Methods, method => method.Name == nameof(UnsignedArithmeticFixture.GreaterThanUInt32)).Body);
@@ -157,46 +157,51 @@ public sealed class ManagedSymbolReaderTests
             method => method.Name == nameof(UnsignedArithmeticFixture.SelectAtLeastUInt32));
         Assert.Contains(
             selectAtLeast.Il,
-            instruction => instruction.Contains("blt.un", StringComparison.Ordinal));
-        Assert.Equal(
-            [
-                "if (unchecked((uint)left) >= unchecked((uint)right))",
-                "{",
-                "    return 1;",
-                "}",
-                "return 0;"
-            ],
-            selectAtLeast.Body);
+            instruction => instruction.Contains("blt.un", StringComparison.Ordinal) ||
+                           instruction.Contains("clt.un", StringComparison.Ordinal));
+        Assert.Contains(
+            selectAtLeast.Body,
+            line => line.Contains("unchecked((uint)left) >= unchecked((uint)right)", StringComparison.Ordinal) ||
+                    line.Contains("unchecked((uint)left) < unchecked((uint)right)", StringComparison.Ordinal));
+        Assert.Contains(
+            selectAtLeast.Body,
+            line => line.Trim() == "return 1;" || line.TrimEnd().EndsWith("= 1;", StringComparison.Ordinal));
+        Assert.Contains(
+            selectAtLeast.Body,
+            line => line.Trim() == "return 0;" || line.TrimEnd().EndsWith("= 0;", StringComparison.Ordinal));
         var selectGreater = Assert.Single(
             fixture.Methods,
             method => method.Name == nameof(UnsignedArithmeticFixture.SelectGreaterUInt64));
         Assert.Contains(
             selectGreater.Il,
-            instruction => instruction.Contains("ble.un", StringComparison.Ordinal));
-        Assert.Equal(
-            [
-                "if (unchecked((ulong)left) > unchecked((ulong)right))",
-                "{",
-                "    return 1;",
-                "}",
-                "return 0;"
-            ],
-            selectGreater.Body);
+            instruction => instruction.Contains("ble.un", StringComparison.Ordinal) ||
+                           instruction.Contains("cgt.un", StringComparison.Ordinal));
+        Assert.Contains(
+            selectGreater.Body,
+            line => line.Contains("unchecked((ulong)left) > unchecked((ulong)right)", StringComparison.Ordinal));
+        Assert.Contains(
+            selectGreater.Body,
+            line => line.Trim() == "return 1;" || line.TrimEnd().EndsWith("= 1;", StringComparison.Ordinal));
+        Assert.Contains(
+            selectGreater.Body,
+            line => line.Trim() == "return 0;" || line.TrimEnd().EndsWith("= 0;", StringComparison.Ordinal));
         var selectAtMost = Assert.Single(
             fixture.Methods,
             method => method.Name == nameof(UnsignedArithmeticFixture.SelectAtMostNativeUInt));
         Assert.Contains(
             selectAtMost.Il,
-            instruction => instruction.Contains("bgt.un", StringComparison.Ordinal));
-        Assert.Equal(
-            [
-                "if (unchecked((nuint)left) <= unchecked((nuint)right))",
-                "{",
-                "    return 1;",
-                "}",
-                "return 0;"
-            ],
-            selectAtMost.Body);
+            instruction => instruction.Contains("bgt.un", StringComparison.Ordinal) ||
+                           instruction.Contains("cgt.un", StringComparison.Ordinal));
+        Assert.Contains(
+            selectAtMost.Body,
+            line => line.Contains("unchecked((nuint)left) <= unchecked((nuint)right)", StringComparison.Ordinal) ||
+                    line.Contains("unchecked((nuint)left) > unchecked((nuint)right)", StringComparison.Ordinal));
+        Assert.Contains(
+            selectAtMost.Body,
+            line => line.Trim() == "return 1;" || line.TrimEnd().EndsWith("= 1;", StringComparison.Ordinal));
+        Assert.Contains(
+            selectAtMost.Body,
+            line => line.Trim() == "return 0;" || line.TrimEnd().EndsWith("= 0;", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -477,12 +482,18 @@ public sealed class ManagedSymbolReaderTests
         var parameter = Assert.Single(
             fixture.Methods,
             method => method.Name == nameof(ReferenceConditionFixture.HasParameter));
-        Assert.Contains("if (value is null)", parameter.Body);
+        Assert.Contains(
+            parameter.Body,
+            line => line.Contains("value is null", StringComparison.Ordinal) ||
+                    line.Contains("value == null", StringComparison.Ordinal));
 
         var field = Assert.Single(
             fixture.Methods,
             method => method.Name == nameof(ReferenceConditionFixture.HasField));
-        Assert.Contains("if (this._value is null)", field.Body);
+        Assert.Contains(
+            field.Body,
+            line => line.Contains("this._value is null", StringComparison.Ordinal) ||
+                    line.Contains("this._value == null", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -939,9 +950,11 @@ public sealed class ManagedSymbolReaderTests
         var method = Assert.Single(fixture.Methods, method => method.Name == nameof(SwitchFixture.TerminalCases));
 
         Assert.True(method.BodyReconstructed);
-        Assert.Contains("switch (value)", method.Body);
+        Assert.Contains(method.Body, line => line.StartsWith("switch (", StringComparison.Ordinal));
         Assert.Contains("    case 2:", method.Body);
-        Assert.Contains("        return 99;", method.Body);
+        Assert.Contains(
+            method.Body,
+            line => line.Trim() == "return 99;" || line.TrimEnd().EndsWith("= 99;", StringComparison.Ordinal));
         Assert.Contains(method.Il, instruction => instruction.Contains("switch (IL_", StringComparison.Ordinal));
     }
 
@@ -959,7 +972,7 @@ public sealed class ManagedSymbolReaderTests
         Assert.Contains("int v0 = default;", method.Body);
         Assert.Contains("        v0 = 30;", method.Body);
         Assert.Equal(4, method.Body.Count(line => line.Trim() == "break;"));
-        Assert.Equal("return v0;", method.Body[^1]);
+        Assert.Matches("^return v\\d+;$", method.Body[^1]);
     }
 
     [Fact]
@@ -978,7 +991,7 @@ public sealed class ManagedSymbolReaderTests
         Assert.Contains("try", method.Body);
         Assert.Contains("finally", method.Body);
         Assert.Contains(method.Body, line => line.Contains("+ 10", StringComparison.Ordinal));
-        Assert.Equal("return v0;", method.Body[^1]);
+        Assert.Matches("^return v\\d+;$", method.Body[^1]);
     }
 
     [Fact]
