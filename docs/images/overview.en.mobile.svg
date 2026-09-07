@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="480" height="558" viewBox="0 0 480 558" role="img" aria-labelledby="title desc" xml:lang="en">
+  <title id="title">ExeBlueprint — Input, analysis, results</title>
+  <desc id="desc">EXE, DLL, folder, ZIP or ASAR input is statically analyzed into REPORT.md and blueprint.json without executing the input.</desc>
+  <rect width="480" height="558" rx="16" fill="#f3f6fc"/>
+  <g font-family="Segoe UI, Microsoft JhengHei, PingFang TC, Noto Sans CJK TC, sans-serif">
+    <text x="24" y="37" font-size="24" font-weight="700" fill="#20355b">Input, analysis, results</text>
+    <rect x="24" y="64" width="432" height="128" rx="12" fill="#fff" stroke="#cbd7e9"/>
+    <rect x="24" y="218" width="432" height="128" rx="12" fill="#fff" stroke="#cbd7e9"/>
+    <rect x="24" y="372" width="432" height="144" rx="12" fill="#172c4e"/>
+    <g fill="none" stroke="#7189aa" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M240 198v14m-5-5 5 5 5-5"/>
+      <path d="M240 352v14m-5-5 5 5 5-5"/>
+    </g>
+    <text x="44" y="96" font-size="20" font-weight="700" fill="#2563eb">01 / Choose an input</text>
+    <text x="44" y="136" font-size="32" font-weight="600" fill="#172c4e">EXE / DLL</text>
+    <text x="44" y="171" font-size="23" fill="#52627b">Folder · ZIP · ASAR</text>
+    <text x="44" y="250" font-size="20" font-weight="700" fill="#2563eb">02 / Static analysis</text>
+    <text x="44" y="290" font-size="28" fill="#172c4e">Files and dependencies</text>
+    <text x="44" y="325" font-size="24" fill="#52627b">Code and resources</text>
+    <text x="44" y="406" font-size="20" font-weight="700" fill="#a9c9ff">03 / Read the results</text>
+    <text x="44" y="448" font-family="Consolas, monospace" font-size="32" fill="#fff">REPORT.md</text>
+    <text x="44" y="490" font-family="Consolas, monospace" font-size="32" fill="#b6d2ff">blueprint.json</text>
+    <text x="24" y="544" font-size="18" fill="#52627b">ExeBlueprint · Optional code skeletons</text>
+  </g>
+</svg>

@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="416" viewBox="0 0 1200 416" role="img" aria-labelledby="title desc" xml:lang="en">
+  <title id="title">ExeBlueprint — From application files to analysis results</title>
+  <desc id="desc">EXE, DLL, folder, ZIP or ASAR input is statically analyzed into REPORT.md and blueprint.json. Code skeletons are optional.</desc>
+  <defs>
+    <pattern id="grid" width="24" height="24" patternUnits="userSpaceOnUse">
+      <path d="M24 0H0V24" fill="none" stroke="#e5eaf3" stroke-width="1"/>
+    </pattern>
+  </defs>
+  <rect width="1200" height="416" rx="18" fill="#f3f6fc"/>
+  <rect width="1200" height="416" rx="18" fill="url(#grid)"/>
+  <g font-family="Segoe UI, Microsoft JhengHei, PingFang TC, Noto Sans CJK TC, sans-serif">
+    <text x="36" y="48" font-size="23" font-weight="700" fill="#20355b">From application files to analysis results</text>
+    <text x="1164" y="48" text-anchor="end" font-size="18" fill="#52627b">Static analysis · No input execution</text>
+    <rect x="36" y="82" width="328" height="240" rx="14" fill="#ffffff" stroke="#cbd7e9"/>
+    <rect x="436" y="82" width="328" height="240" rx="14" fill="#ffffff" stroke="#cbd7e9"/>
+    <rect x="836" y="82" width="328" height="240" rx="14" fill="#172c4e"/>
+    <g fill="none" stroke="#7189aa" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M384 202h32m-9-8 9 8-9 8"/>
+      <path d="M784 202h32m-9-8 9 8-9 8"/>
+    </g>
+    <text x="60" y="124" font-size="17" font-weight="700" fill="#2563eb">01 / INPUT</text>
+    <text x="60" y="170" font-size="26" font-weight="700" fill="#172c4e">Choose an input</text>
+    <text x="60" y="227" font-size="37" font-weight="600" fill="#172c4e">EXE / DLL</text>
+    <text x="60" y="274" font-size="23" fill="#52627b">Folder · ZIP · ASAR</text>
+    <text x="460" y="124" font-size="17" font-weight="700" fill="#2563eb">02 / ANALYSIS</text>
+    <text x="460" y="170" font-size="26" font-weight="700" fill="#172c4e">Inspect the structure</text>
+    <text x="460" y="227" font-size="24" fill="#172c4e">Files and dependencies</text>
+    <text x="460" y="274" font-size="24" fill="#52627b">Code and resources</text>
+    <text x="860" y="124" font-size="17" font-weight="700" fill="#a9c9ff">03 / OUTPUT</text>
+    <text x="860" y="170" font-size="26" font-weight="700" fill="#ffffff">Read the results</text>
+    <text x="860" y="227" font-family="Consolas, monospace" font-size="30" fill="#ffffff">REPORT.md</text>
+    <text x="860" y="274" font-family="Consolas, monospace" font-size="30" fill="#b6d2ff">blueprint.json</text>
+    <text x="36" y="376" font-size="19" font-weight="600" fill="#20355b">ExeBlueprint</text>
+    <text x="1164" y="376" text-anchor="end" font-size="19" fill="#52627b">Optional C# / C++ / Rust / Go skeletons</text>
+  </g>
+</svg>

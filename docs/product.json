@@ -1,0 +1,230 @@
+{
+  "profileFormatVersion": 1,
+  "documentType": "product-description",
+  "name": "ExeBlueprint",
+  "summary": {
+    "zh-TW": "整理 Windows 執行檔與應用程式套件的檔案、技術、相依關係及程式結構，輸出 Markdown 報告與 JSON。",
+    "en": "Inspects Windows binaries and application packages, then exports file, technology, dependency and code-structure information as Markdown and JSON."
+  },
+  "repository": "https://github.com/NickYCLin/exe-blueprint",
+  "license": "MIT",
+  "descriptionScope": {
+    "sourceBranch": "main",
+    "analysisOutputSchemaVersion": "0.17",
+    "releasePolicy": "Capabilities describe the current main source, not every downloadable release. Consult the selected release notes.",
+    "releaseUrl": "https://github.com/NickYCLin/exe-blueprint/releases",
+    "maintenance": "Update this profile with README.md, README.en.md and the source contracts when capabilities change.",
+    "pathBase": "Repository root; all sourcePaths and documentation paths below are relative to that root."
+  },
+  "audience": [
+    "Engineers taking over legacy applications",
+    "Application migration teams",
+    "Developers inspecting .NET assemblies",
+    "Scripts and external AI tools consuming analysis results"
+  ],
+  "interfaces": [
+    "desktop",
+    "cli"
+  ],
+  "hostPlatforms": [
+    "Windows x64",
+    "macOS arm64",
+    "macOS x64",
+    "Linux x64"
+  ],
+  "primaryAnalysisTargets": [
+    "Windows PE executables and libraries",
+    ".NET assemblies",
+    "Application packages"
+  ],
+  "inputs": [
+    "file",
+    "directory",
+    "zip",
+    "electron-asar"
+  ],
+  "execution": {
+    "runsInputApplication": false,
+    "builtInAiModel": false,
+    "optionalAnalysisBackend": "Ghidra headless for native PE functions and static CALL references",
+    "missingOptionalBackend": "Continue other analysis and record why native analysis was skipped."
+  },
+  "outputs": [
+    {
+      "path": "REPORT.md",
+      "format": "markdown",
+      "language": "zh-TW",
+      "purpose": "Human-readable analysis report",
+      "condition": "Default; omitted with --json-only"
+    },
+    {
+      "path": "blueprint.json",
+      "format": "json",
+      "purpose": "Structured analysis result; this is not the product profile"
+    },
+    {
+      "path": "reconstructed-csharp/",
+      "format": "csharp-projects",
+      "purpose": "Types, signatures and supported method bodies; compilation is not guaranteed",
+      "condition": "--emit-csharp"
+    },
+    {
+      "path": "reconstructed-cpp/",
+      "format": "cpp",
+      "purpose": "Type and method-signature skeletons; empty method bodies",
+      "condition": "--emit-cpp"
+    },
+    {
+      "path": "reconstructed-rust/",
+      "format": "rust",
+      "purpose": "Type and method-signature skeletons; empty method bodies",
+      "condition": "--emit-rust"
+    },
+    {
+      "path": "reconstructed-go/",
+      "format": "go",
+      "purpose": "Type and method-signature skeletons; empty method bodies",
+      "condition": "--emit-go"
+    }
+  ],
+  "featureStatusDefinitions": {
+    "available": "Implemented within the stated scope.",
+    "partial": "Implemented for a supported subset; limitations apply.",
+    "optional": "Requires an additional backend or explicit option.",
+    "planned": "Not implemented; not a current product capability."
+  },
+  "features": [
+    {
+      "id": "file-inventory",
+      "status": "available",
+      "summary": "File hashes, PE structure, imports and assembly references.",
+      "sourcePaths": [
+        "src/ExeBlueprint.Core/Analysis/FileAnalyzer.cs"
+      ]
+    },
+    {
+      "id": "archive-input",
+      "status": "available",
+      "summary": "Bounded ZIP and ASAR expansion, including nested ASAR, with incomplete-result reporting.",
+      "sourcePaths": [
+        "src/ExeBlueprint.Core/Input/InputWorkspace.cs"
+      ]
+    },
+    {
+      "id": "technology-detection",
+      "status": "available",
+      "summary": "Common language, runtime, framework and installer fingerprints with confidence and evidence.",
+      "limitation": "Detection does not prove the source language or imply support for its reconstruction.",
+      "sourcePaths": [
+        "src/ExeBlueprint.Core/Analysis/TechnologyDetector.cs"
+      ]
+    },
+    {
+      "id": "managed-structure",
+      "status": "available",
+      "summary": ".NET types, members, IL and method call graphs.",
+      "sourcePaths": [
+        "src/ExeBlueprint.Core/Analysis/ManagedSymbolReader.cs"
+      ]
+    },
+    {
+      "id": "embedded-resources",
+      "status": "partial",
+      "summary": "Standard .resources values, bounded pre-serialized-resource envelopes and WPF BAML structure.",
+      "limitation": "No execution of resource converters and no full UI reconstruction.",
+      "sourcePaths": [
+        "src/ExeBlueprint.Core/Models/CodeModel.cs",
+        "src/ExeBlueprint.Core/Analysis/ManagedSymbolReader.cs"
+      ]
+    },
+    {
+      "id": "configuration-structure",
+      "status": "available",
+      "summary": "Value-free summaries of embedded JSON, XML and .config structure.",
+      "limitation": "This applies to configuration summaries, not redaction of every string in the report.",
+      "sourcePaths": [
+        "src/ExeBlueprint.Core/Analysis/EmbeddedJsonConfigurationReader.cs",
+        "src/ExeBlueprint.Core/Analysis/EmbeddedXmlConfigurationReader.cs"
+      ]
+    },
+    {
+      "id": "csharp-skeletons",
+      "status": "partial",
+      "summary": ".NET type and signature skeletons, supported method bodies and package-local project references.",
+      "limitation": "Unrecovered methods retain IL and use NotImplementedException; compilation and behavioral equivalence are not guaranteed.",
+      "sourcePaths": [
+        "src/ExeBlueprint.Core/Generation/CSharpSkeletonGenerator.cs"
+      ]
+    },
+    {
+      "id": "other-language-skeletons",
+      "status": "partial",
+      "summary": "C++, Rust and Go type and method-signature skeletons from managed code.",
+      "limitation": "Method bodies remain empty; this is not general cross-language program conversion.",
+      "sourcePaths": [
+        "src/ExeBlueprint.Core/Generation/SkeletonSupport.cs"
+      ]
+    },
+    {
+      "id": "native-call-graph",
+      "status": "optional",
+      "verificationLimit": "Parser and exporter fixture tests are available; real Ghidra execution acceptance is still pending.",
+      "summary": "Ghidra function inventory and static CALL references with call sites and direct/indirect flags.",
+      "limitation": "Unresolved targets and truncation are recorded. Indirect runtime targets may be incomplete; jump-based tail calls and native code reconstruction are not supported.",
+      "sourcePaths": [
+        "scripts/ghidra/ExportFunctions.py",
+        "src/ExeBlueprint.Core/Models/NativeCodeModel.cs"
+      ]
+    },
+    {
+      "id": "desktop-input",
+      "status": "available",
+      "summary": "File/folder selection, drag and drop, recent successful inputs, progress and cancellation.",
+      "sourcePaths": [
+        "src/ExeBlueprint.Desktop/MainWindow.axaml.cs"
+      ]
+    }
+  ],
+  "planned": [
+    "Outer Inno Setup, NSIS, MSI, PyInstaller and Electron installer extraction",
+    "Native tail-call analysis and code reconstruction",
+    "Deeper type-specific UI and resource summaries",
+    "Broader support for compilable multi-project C# reconstruction",
+    "E-language, VB6 and Delphi to C# conversion",
+    "Method-body reconstruction for C++, Rust and Go generators",
+    "Behavioral comparison between original and reconstructed programs",
+    "Desktop installers"
+  ],
+  "resultReading": {
+    "firstFields": [
+      "schemaVersion",
+      "summary",
+      "warnings"
+    ],
+    "detailFields": [
+      "files",
+      "dependencies",
+      "technologies",
+      "archives"
+    ],
+    "evidenceFields": [
+      "technologies[].evidence",
+      "technologies[].confidence"
+    ],
+    "incompleteData": "Inspect truncation, completeness and error fields at their documented level. Missing data is not proof of absence.",
+    "nativeNullSemantics": {
+      "files[].nativeCode": "No native analysis result was supplied for this file.",
+      "files[].nativeCode.callGraph": "No call graph was supplied; not the same as a scanned graph with zero calls.",
+      "files[].nativeCode.callGraph.calls[].targetAddress": "This retained call's target was unresolved."
+    },
+    "sensitiveContent": "Reports may contain program strings and embedded resources. Review before sharing with people or external AI services."
+  },
+  "documentation": {
+    "traditionalChinese": "README.md",
+    "english": "README.en.md",
+    "capabilities": "docs/capabilities.md",
+    "architecture": "docs/architecture.md",
+    "contributing": "CONTRIBUTING.md",
+    "releasing": "docs/releasing.md"
+  }
+}

@@ -1,196 +1,133 @@
 # ExeBlueprint
 
-[繁體中文](README.md)｜[English](README.en.md)
+**先看懂程式，再決定怎麼接手。**
+
+ExeBlueprint 把 Windows EXE、DLL 與應用程式套件整理成程式藍圖：有哪些檔案、用了什麼技術、依賴哪些組件，以及能讀出多少程式結構。
+分析結果同時提供可直接閱讀的 Markdown 報告，以及供腳本或 AI 處理的 JSON。
+
+[下載桌面版](https://github.com/NickYCLin/exe-blueprint/releases/latest) · [開始使用](#開始使用) · [功能詳解](docs/capabilities.md) · [給 AI 的產品資料](docs/product.json) · [English](README.en.md)
 
 [![CI](https://github.com/NickYCLin/exe-blueprint/actions/workflows/ci.yml/badge.svg)](https://github.com/NickYCLin/exe-blueprint/actions/workflows/ci.yml)
 [![GitHub Release](https://img.shields.io/github/v/release/NickYCLin/exe-blueprint)](https://github.com/NickYCLin/exe-blueprint/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-ExeBlueprint 是跨平台的 Windows EXE／DLL 與應用程式套件靜態分析工具，可直接接受資料夾、ZIP 與 Electron ASAR。它會整理 PE、.NET metadata、IL、相依關係與內嵌資源，產生可供盤點、重建或後續自動化處理的 `blueprint.json`，另外附上一份方便閱讀的 `REPORT.md`。
+<p><picture>
+  <source media="(max-width: 600px)" srcset="docs/images/overview.zh-TW.mobile.svg">
+  <img src="docs/images/overview.zh-TW.svg" alt="流程概覽：EXE、DLL、資料夾、ZIP 或 ASAR → 靜態分析檔案、相依關係與程式結構 → REPORT.md、blueprint.json 與選配程式骨架。">
+</picture></p>
 
-現在有圖形介面可直接選擇或拖放檔案（包含 ZIP／ASAR）與資料夾，也能指定輸出位置並重選最近分析成功的來源；桌面版支援 Windows、macOS 與 Linux，原本的命令列工具也會繼續提供。
+工具可在 **Windows、macOS、Linux** 執行，提供**桌面版與 CLI**。主要分析對象是 Windows 程式與應用程式套件；分析時不會執行輸入程式。
 
-目前版本只做靜態分析，不會執行輸入程式。
+> 本頁介紹目前 `main` 原始碼的能力。下載套件可能尚未包含最近的功能，請查看對應的 [Release 說明](https://github.com/NickYCLin/exe-blueprint/releases)；要使用 `main` 的功能，可[從原始碼執行](#從原始碼執行)。
 
-## 適合什麼情境
+## 適合拿來做什麼
 
-- 想先盤點陌生或老舊的 Windows 應用程式，不希望直接執行來源不明的 EXE
-- 要查 PE imports、.NET assembly references、框架、資源與套件內相依關係
-- 在系統移轉或軟體考古前，先整理 .NET 型別、IL、呼叫圖與 WPF BAML 結構
-- 要把分析結果交給腳本、CI 或大型語言模型接著比對、分類與規劃重建工作
-- 需要 JSON 資料做後續工具鏈輸入，也需要 Markdown 報告供工程師快速閱讀
+<table>
+  <tr>
+    <td width="50%" valign="top"><h3>接手舊系統</h3><p>只剩執行檔或一包安裝目錄時，先確認程式架構、框架、組件與資源，再規劃後續工作。</p></td>
+    <td width="50%" valign="top"><h3>盤點相依套件</h3><p>查看 EXE／DLL 之間的依賴，分清哪些組件在套件內、哪些需要另外尋找。</p></td>
+  </tr>
+  <tr>
+    <td valign="top"><h3>準備 .NET 重建</h3><p>整理型別、方法與呼叫關係，匯出 C# 骨架，從已知結構開始接手改寫。</p></td>
+    <td valign="top"><h3>交給腳本或 AI 接著分析</h3><p>用 JSON 做比對、分類或整理清單，保留判斷依據、警告與不完整狀態。</p></td>
+  </tr>
+</table>
 
-ExeBlueprint 不是動態沙箱，也不是能完整還原所有原始碼的反編譯器。原生程式的函式分析可選配 Ghidra；目前較完整的程式結構還原集中在 .NET assembly。
+## 放進什麼，會拿到什麼
 
-## 下載
+| 階段 | 內容 |
+| --- | --- |
+| **輸入** | 單一 EXE／DLL、資料夾、ZIP、Electron ASAR |
+| **分析** | 檔案雜湊、PE 結構、技術辨識、相依關係、.NET metadata／IL 與內嵌資源；可選配 Ghidra 原生分析 |
+| **閱讀結果** | `REPORT.md`：繁體中文摘要，方便先看重點 |
+| **處理資料** | `blueprint.json`：結構化結果，方便程式或 AI 讀取 |
+| **選擇性輸出** | C#、C++、Rust、Go 程式骨架，供對照與改寫 |
 
-不想安裝 .NET SDK，可以直接到 [GitHub Releases](https://github.com/NickYCLin/exe-blueprint/releases/latest) 下載自包含版本：
-
-- `ExeBlueprint-v0.2.1-win-x64.zip`：Windows 10／11 64 位元，解壓縮後雙擊 `ExeBlueprint.exe`。
-- `ExeBlueprint-v0.2.1-macos-arm64.zip`：Apple Silicon Mac。
-- `ExeBlueprint-v0.2.1-macos-x64.zip`：Intel Mac。
-- `ExeBlueprint-v0.2.1-linux-x64.tar.gz`：Intel／AMD 64 位元 Linux 桌面版。
-- `SHA256SUMS.txt`：用來核對下載檔是否完整。
-
-每個套件也附上 `exe-blueprint-cli` 命令列版本。Windows 及 macOS 產物目前尚未做商業程式碼簽章，macOS 也未經 Apple 公證；第一次開啟的方式與 Linux 相依套件都寫在壓縮檔內的 `README.txt`。請只從本專案 Releases 下載，並核對 SHA-256。
-
-## 目前能做什麼
-
-- 分析單一檔案、完整資料夾、ZIP 或 Electron ASAR；資料夾與 ZIP 內的 ASAR、以及有上限的巢狀 ASAR 也會展開；若直接輸入 .NET apphost，偵測到同名 DLL 與 `.runtimeconfig.json` 時會一併分析該受管 DLL
-- 計算每個檔案的 SHA-256
-- 讀取 PE 架構、子系統、section 與簽章資料
-- 分辨 .NET assembly 與原生 PE
-- 讀取 PE imports 與 .NET assembly references
-- 讀出 .NET assembly 的命名空間、型別、巢狀宣告關係、ref-like 旗標、欄位、屬性、事件、方法簽章、virtual／override／sealed dispatch 旗標、enum 常值與繼承關係
-- 列出 .NET assembly 的內嵌 manifest 資源（.resources、WPF BAML、內嵌設定檔或組件），標出用途、位置與大小；`.resources` 會再列出鍵名、型別及可安全解碼的標準值；對 System.Resources.Extensions 預序列化的自訂型別，會讀出封裝格式、payload 大小／magic 與 TypeConverterString 的原始文字，不載入型別或執行轉換器；內嵌 `.json`、`.xml` 與 `.config` 設定檔只會列出元素、屬性與欄位結構，不會輸出設定值；`.baml` 會整理檔頭版本、record 類型數量、element／property 使用次數、可重建 parent/child 與 content/complex property 關係的 flat element tree、檔案內宣告與 WPF 內建的型別／屬性 ID 對照、安全的 property 值，以及 deferred ResourceDictionary 的 string/type/complex key、value 範圍和 key-local optimized／verbose StaticResource 關係
-- 掃描 IL 建立方法層級呼叫圖，看得出程式流程怎麼串
-- 把每個方法的 IL 反組譯成可讀指令（呼叫、字串、分支目標都解析出來）
-- 用堆疊模擬把方法 IL 還原成 C# 陳述式，把條件分支還原成 if／if-else，迴圈還原成 while／do-while（可巢狀），並還原標準 try/catch、含混合巢狀 `&&`／`||` 短路條件的 catch filter、try/finally、fault 與複合 try/catch/finally，也支援保護區直接拋出例外的 terminal try
-- 能把標準 IL 跳表還原成 switch，支援 case 直接 return／throw，或指派區域變數後回到共用流程
-- 把 .NET 型別轉出一份 C# 骨架，能還原的方法直接給程式碼，其餘附上原始 IL
-- 另外可轉出 C++／Rust／Go 的型別與方法簽章骨架（結構為主，方法體留空）
-- 選配用 Ghidra headless 分析原生 PE，列出函式與靜態 CALL 呼叫圖，保留呼叫位置、直接／間接類型和未解析目標（沒裝 Ghidra 會自動略過並加註記）
-- 找出套件內可以對上的 EXE／DLL 相依關係
-- 依檔案內容辨識常見語言、runtime、框架與安裝器
-- 輸出 JSON 與繁體中文 Markdown 報告
-- 安全解開 ZIP，阻擋路徑穿越、跨平台路徑衝突和符號連結
-- 嚴格解析 ASAR 的 Chromium Pickle header 與 JSON 索引，驗證路徑、offset、size 和範圍後才把內容複製到私人暫存目錄；外置 `.asar.unpacked` 項目會驗證大小與重新解析點，ASAR link 不會落成作業系統連結
-- ASAR 展開受到檔案數、總大小、單檔大小、巢狀深度、封存數、header、節點和路徑總量限制；無效或只完成一部分的封存會保留容器並在 JSON／報告明示原因
-
-目前已有以下辨識規則：
-
-- .NET、WPF、Windows Forms、Avalonia
-- Visual Basic 6、Delphi／C++Builder、Microsoft Visual C++
-- Go、Rust、Python、PyInstaller、Java／JVM
-- 易語言 runtime 與支持庫檔案
-- Qt、Tauri、Electron、Unity
-- Inno Setup、NSIS
-
-辨識結果會附上依據與可信度。看到某個語言名稱，不代表已經證明原始碼就是用該語言撰寫。
-
-## 從原始碼執行
-
-需要 [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)。
-
-啟動桌面版：
-
-```powershell
-dotnet run --project .\src\ExeBlueprint.Desktop
-```
-
-命令列版本：
-
-```powershell
-dotnet run --project .\src\ExeBlueprint.Cli -- analyze .\MyApplication
-dotnet run --project .\src\ExeBlueprint.Cli -- analyze .\MyApplication.zip
-dotnet run --project .\src\ExeBlueprint.Cli -- analyze .\resources\app.asar
-dotnet run --project .\src\ExeBlueprint.Cli -- analyze .\App.exe -o .\report
-```
-
-不指定輸出目錄時，結果會放在：
+預設輸出如下；加上 `--json-only` 時只產生 JSON。
 
 ```text
 exe-blueprint-output/<輸入名稱>-<時間>/
-├─ blueprint.json
-└─ REPORT.md
+├─ REPORT.md
+└─ blueprint.json
 ```
 
-如果只需要 JSON：
+## 目前做到哪裡
+
+| 項目 | 已有能力 | 使用時要知道 |
+| --- | --- | --- |
+| 檔案與套件盤點 | PE、SHA-256、imports、assembly references、ZIP／ASAR 展開 | 封存有大小與深度上限；尚未解開各類外層安裝器 |
+| 技術辨識 | 辨識 .NET、VB6、Delphi、Go、Rust、Python、易語言、Qt、Electron 等常見特徵 | 結果附依據與可信度，辨識到語言不等於能還原該語言原始碼 |
+| .NET 結構分析 | 型別、欄位、屬性、事件、方法、IL、呼叫圖 | 遇到不支援或不完整的資料會保留註記 |
+| 資源與設定 | `.resources`、WPF BAML 結構、內嵌 JSON／XML 設定結構 | 設定摘要省略值；BAML 結構摘要不等於完整還原 UI |
+| C# 骨架 | 型別與簽章、可還原的方法體、`.slnx` 和套件內專案參照 | 未還原方法保留 IL 並使用 `NotImplementedException`；不保證直接編譯 |
+| C++／Rust／Go 骨架 | 型別與方法簽章 | 目前以結構為主，方法體留空 |
+| 原生 PE 分析 | 選配 Ghidra，列出函式及靜態 CALL 呼叫圖 | 間接目標可能不完整；tail call 與原生程式碼還原仍待完成 |
+
+完整支援清單與待辦見[功能詳解](docs/capabilities.md)，資料欄位與解析規則見[架構說明](docs/architecture.md)。
+
+## 開始使用
+
+### 桌面版
+
+1. 到 [Releases](https://github.com/NickYCLin/exe-blueprint/releases/latest) 下載對應平台的套件，依 `SHA256SUMS.txt` 核對後解壓縮。
+2. 開啟程式，選擇分析來源與輸出目錄；目前 `main` 也支援拖放與最近使用項目。
+3. 執行分析後，開啟輸出目錄中的 `REPORT.md` 或 `blueprint.json`。
+
+| 執行環境 | 下載套件名稱結尾 | 啟動檔 |
+| --- | --- | --- |
+| Windows 10／11 x64 | `win-x64.zip` | `ExeBlueprint.exe` |
+| macOS Apple Silicon | `macos-arm64.zip` | `ExeBlueprint.app` |
+| macOS Intel | `macos-x64.zip` | `ExeBlueprint.app` |
+| Linux x64 | `linux-x64.tar.gz` | `ExeBlueprint` |
+
+下載套件已包含 .NET runtime，也附有 `exe-blueprint-cli` 命令列版本。首次開啟與 Linux 相依套件的說明在壓縮檔內的 `README.txt`；目前 Windows／macOS 產物未做商業程式碼簽章，macOS 未經公證。
+
+### 從原始碼執行
+
+需要 [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)。在 repository 根目錄執行：
 
 ```powershell
-dotnet run --project .\src\ExeBlueprint.Cli -- analyze .\App.exe --json-only
+# 開啟桌面版
+dotnet run --project ./src/ExeBlueprint.Desktop
+
+# 分析資料夾，輸出 JSON 與報告
+dotnet run --project ./src/ExeBlueprint.Cli -- analyze ./MyApplication -o ./report
+
+# 也可直接分析 EXE、DLL、ZIP 或 ASAR
+dotnet run --project ./src/ExeBlueprint.Cli -- analyze ./MyApplication.zip -o ./zip-report
 ```
 
-要順便把 .NET 型別轉出骨架，加上對應的 `--emit-*`（可同時多個）：
+常用的選擇性輸出：
 
 ```powershell
-dotnet run --project .\src\ExeBlueprint.Cli -- analyze .\App.exe --emit-csharp --emit-rust --emit-go --emit-cpp
+# 產生 C# 骨架；也可搭配 --emit-cpp、--emit-rust、--emit-go
+dotnet run --project ./src/ExeBlueprint.Cli -- analyze ./App.dll --emit-csharp
+
+# 僅輸出 JSON
+dotnet run --project ./src/ExeBlueprint.Cli -- analyze ./App.dll --json-only
+
+# 使用已安裝的 Ghidra 分析原生 PE
+dotnet run --project ./src/ExeBlueprint.Cli -- analyze ./Native.exe --native --ghidra ./ghidra
 ```
 
-各語言會分別放在輸出目錄的 `reconstructed-csharp/`、`reconstructed-cpp/`、`reconstructed-rust/`、`reconstructed-go/`。
-C# 會還原方法體：能結構化的方法用堆疊模擬還原成 C# 陳述式（含 if／if-else、while／do-while、switch、try/catch、含混合巢狀短路條件的 catch filter、try/finally、fault、複合 try/catch/finally 與 terminal try），
-還原不了的把原始 IL 放進註解、方法體先用 `NotImplementedException`。
-C++／Rust／Go 目前只還原型別與方法簽章（結構），方法體留空。全部僅供對照或轉語言起點，不保證能直接編譯。
+找不到 Ghidra 時，其他分析仍會繼續，原生分析會附上略過原因。輸出目錄已有報告時預設不覆寫；需要覆寫時加上 `--force`。完整參數可用 `dotnet run --project ./src/ExeBlueprint.Cli -- --help` 查看。
 
-要分析原生 PE（C/C++、Delphi、Go、Rust 等沒有 .NET metadata 的程式）的函式，加上 `--native`
-（需先安裝 [Ghidra](https://ghidra-sre.org/) 並設定 `GHIDRA_INSTALL_DIR`，或用 `--ghidra <目錄>` 指定）：
+## 給 AI 或自動化工具
 
-```powershell
-$env:GHIDRA_INSTALL_DIR = "C:\ghidra_11.0"
-dotnet run --project .\src\ExeBlueprint.Cli -- analyze .\Native.exe --native
-```
+**了解這個產品**：讀取 [docs/product.json](docs/product.json)，其中列出定位、輸入、輸出、功能狀態、限制及原始碼依據。這是產品說明資料，與實際分析產生的 `blueprint.json` 分開。
 
-沒偵測到 Ghidra 時不會失敗，只會在報告與警告裡註記略過了原生分析。
+**閱讀一次分析結果**：先看 `schemaVersion`、`summary` 與 `warnings`，再依需求讀取 `files`、`dependencies`、`technologies` 和 `archives`。目前 `main` 輸出的 schema 是 `0.17`。
 
-輸出目錄已有報告時，程式預設不會覆寫。確定要覆寫可加上 `--force`。
+- 技術判斷要連同 `evidence` 與 `confidence` 閱讀。
+- `truncated`、`complete=false` 或錯誤欄位代表資料有缺口，不能把缺少的資料解讀成「不存在」。各層欄位定義見[架構說明](docs/architecture.md)。
+- `nativeCode.callGraph=null` 表示未提供呼叫圖；`targetAddress=null` 表示該筆呼叫目標未解析。
+- ExeBlueprint 產生可供 AI 讀取的檔案，目前未內建 AI 模型，也不會自動完成整套系統重寫。
 
-## 自行發佈
+## 開發與參與
 
-```powershell
-dotnet publish .\src\ExeBlueprint.Desktop -c Release -r win-x64 --self-contained true
-dotnet publish .\src\ExeBlueprint.Cli -c Release -r win-x64 --self-contained true
-```
+建置與測試方式見 [CONTRIBUTING.md](CONTRIBUTING.md)，發佈方式見[發佈指南](docs/releasing.md)。
+Commit 使用自然、簡潔的繁體中文 `<type>(<scope>): <主旨>`；push 前先 pull 並整合遠端改動。
 
-`-r` 可改成 `linux-x64`、`osx-x64` 或 `osx-arm64`。正式 Release 會另外把 macOS 產物整理成 `.app`。
-
-```text
-src/ExeBlueprint.Desktop/bin/Release/net10.0/win-x64/publish/ExeBlueprint.exe
-```
-
-## 報告內容
-
-`blueprint.json` 目前使用 schema `0.17`，是後續專案重建和轉語言要共用的資料格式，內容包含：
-
-- 輸入套件摘要
-- 每個檔案的格式、雜湊與來源資訊（provenance；直接輸入、資料夾、ZIP 或 ASAR，以及直接容器、項目和深度）
-- ASAR 封存的 header／節點／packed／unpacked／link 數量，以及完整或不完整狀態與原因
-- PE 與 .NET metadata
-- .NET 型別、同一 artifact 內的 TypeDef／declaring TypeDef identity、泛型參數與 constraint metadata（含獨立的 owner domain／primary constraint 證據）、欄位、屬性、事件、方法簽章、方法層級呼叫圖與各方法反組譯出的 IL
-- `.resources` 的標準鍵值，以及預序列化自訂型別的 `serialization` 格式、payload 大小、辨識出的資料種類與完整性；只會保留原始 TypeConverterString 文字
-- 原生 `nativeCode.callGraph` 的呼叫來源、位置、目標位址和直接／間接類型；無法確認目標時保留 `null`，超限時標示 `truncated`
-- 內嵌 JSON 與 XML／`.config` 設定檔的 `configuration` 結構摘要（根類型、結構節點數和欄位路徑），不保存任何設定值
-- 語言、框架和工具鏈判斷
-- 套件內與外部相依關係
-- 分析警告
-
-`REPORT.md` 適合直接閱讀，用來快速確認入口程式、架構、相依套件、程式碼結構和辨識結果。
-
-## 接下來要做的功能
-
-- 解開 Inno Setup、NSIS、MSI、PyInstaller 與 Electron 外層安裝封裝（Electron ASAR 已支援）
-- 深化原生 PE 分析：補上 tail call 與程式碼還原（目前已有函式清單及靜態 CALL 呼叫圖；間接呼叫的執行期目標仍可能不完整）
-- 擴充中介模型，補上 UI 與設定（函式、型別、欄位、屬性、事件、呼叫圖、內嵌 manifest 資源清單、`.resources` 標準鍵值與預序列化自訂型別的安全 envelope 摘要、內嵌 JSON／XML 設定的安全欄位結構，以及 WPF BAML record、flat element tree、檔內與內建型別／屬性 ID、可安全讀取的 property 值、deferred complex key 與 verbose StaticResource 關係已完成 .NET 部分；接著可深化型別專屬的靜態摘要）
-- 補齊例外處理與型別引用，讓骨架能直接編譯成多專案 solution（目前會產生 `.slnx` 與套件內的 `ProjectReference`，class 與具 instance constructor 的 struct skeleton 成員會有 `default!` initializer，已保留完整命名空間、泛型巢狀型別、interface／delegate variance、可安全表示的 type／method／delegate `where` constraints、ref struct、managed／unmanaged 函式指標簽章、pointer 成員與已還原方法體所需的 scoped `unsafe` context、方法與運算式的 nullable 語意及欄位／屬性／事件修飾詞，能區分 virtual、override、sealed override 與 final 介面實作，並還原 canonical `base(...)`／`this(...)` constructor initializer、直線欄位初始化、exact direct-base nonvirtual dispatch、terminal void return、if／if-else、while／do-while、標準 switch、try/catch、含混合巢狀短路條件的 catch filter、try/finally、以 catch/rethrow 等價表示的 fault、複合 try/catch/finally、terminal try、indexer、具區塊 setter 的唯寫屬性、參考型別 null 分支、bool／char／enum 呼叫常值、enum 位元運算、位移與 switch case、enum 成員常值、區域變數型別、bool／enum typed target 的 CLI stack-family 轉型，以及具已知整數 stack family 的 `div.un`／`rem.un`／`cgt.un`／`clt.un` 與四種 `.un` 關係分支）
-- 優先支援易語言、VB6、Delphi 到 C# 的轉換
-- 讓 C++／Rust／Go 產生器也還原方法體、支援易語言（目前這三個語言只還原結構）
-- 比較原程式與重建版本的輸入、輸出和副作用
-- 補上桌面版安裝程式（拖放輸入與最近使用項目已完成）
-
-這些項目尚未完成，詳細分層可看 [架構說明](docs/architecture.md)。
-
-## 安全與公開資料
-
-- 只分析自己擁有或已獲授權的程式。
-- 輸入檔預設放在 repo 外，`inputs/` 和常見 Windows binary 已加入 `.gitignore`。
-- 不要提交客戶程式、反編譯結果、帳密、token、私有網址、資料庫或內部設定。
-- 未來如需動態分析，會放在隔離環境，不會直接在日常工作環境執行不明程式。
-
-## 開發
-
-```powershell
-dotnet restore .\ExeBlueprint.slnx
-dotnet build .\ExeBlueprint.slnx -c Release
-dotnet test .\ExeBlueprint.slnx -c Release
-```
-
-Commit message 採用：
-
-```text
-<type>(<scope>): <繁體中文主旨>
-```
-
-主旨不超過 50 個字，內文說明異動原因與內容。完整規則請看 [CONTRIBUTING.md](CONTRIBUTING.md)。
-
-## 授權
+只分析自己擁有或已獲授權的程式。分析報告仍可能包含程式字串與內嵌資源內容，分享給他人或外部 AI 前請先檢查；不要將客戶程式、反編譯結果、帳密或內部設定提交到 repository。安全問題的回報方式見 [SECURITY.md](SECURITY.md)。
 
 本專案採用 [MIT License](LICENSE)。
