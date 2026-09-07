@@ -151,6 +151,28 @@ public sealed class NativeAnalyzerTests
     }
 
     [Fact]
+    public async Task ReturnsCallGraphAndWarnsAboutUnresolvedTargets()
+    {
+        await using var temp = new TemporaryDirectory();
+        await WriteLauncherAsync(temp.Path, "#!/bin/sh\nexit 0\n", "@exit /b 0\r\n");
+        var result = await NativeAnalyzer.AnalyzeAsync(
+            typeof(NativeAnalyzer).Assembly.Location,
+            CreateOptions(temp.Path),
+            async (request, cancellationToken) =>
+            {
+                await File.WriteAllTextAsync(request.OutputPath, NativeCallGraphTests.OutputJson, cancellationToken);
+                return new GhidraRunResult(0, string.Empty, string.Empty);
+            },
+            CancellationToken.None);
+
+        Assert.Equal("ghidra", result.Backend);
+        Assert.Equal(3, result.FunctionCount);
+        Assert.False(result.FunctionsTruncated);
+        Assert.Equal(5, result.CallGraph!.Calls.Count);
+        Assert.Contains("2 筆已保留紀錄無法確認目標", result.Note);
+    }
+
+    [Fact]
     public async Task RejectsNonzeroExitEvenWhenValidOutputExists()
     {
         await using var temp = new TemporaryDirectory();

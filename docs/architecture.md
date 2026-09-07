@@ -31,12 +31,13 @@ Blueprint 中介資料
 
 ## Blueprint 資料
 
-目前 schema 版本是 `0.16`，主要欄位包括：
+目前 schema 版本是 `0.17`，主要欄位包括：
 
 - `input`：輸入類型、檔案數與總大小
 - `summary`：PE、assembly、型別、方法、資源和相依關係數量
 - `files`：每個檔案的格式、雜湊、來源資訊（provenance）和分析資料，受管組件另含 `code`
 - `files[].origin`：`direct`、`directory`、`zip` 或 `asar` 來源；需要時保存直接容器、容器內項目與展開深度，讓 staging 實體路徑不會外洩或取代邏輯路徑
+- `files[].nativeCode.callGraph`：原生 CALL 呼叫紀錄，保留來源函式、呼叫位置、目標位址、直接／間接類型及截斷狀態；未解析目標為 `null`
 - `files[].code`：.NET 型別、同一 artifact 內可精確連結巢狀 owner 的 TypeDef token、ref-like 關係、泛型名稱、owner domain 與可獨立證明 primary constraint 的 additive 明細、欄位、含 index parameters 的屬性、事件、方法簽章、dispatch 與已還原 body 的 `requiresUnsafeContext` 旗標、入口點、方法層級呼叫圖、manifest 資源（含預序列化自訂資源的 `serialization` 摘要及 JSON／XML 設定的 `configuration` 結構）與各方法反組譯出的 IL
 - `archives`：每次 ASAR 展開的容器路徑、深度、header 大小、節點與 packed／unpacked／link 數量，以及 `complete`／`error` 狀態
 - `dependencies`：PE imports 與 assembly references
@@ -47,7 +48,7 @@ Blueprint 中介資料
 
 內嵌 `.json`、`.xml` 與 `.config` 設定檔會在 1 MB、32 層、20,000 個節點與 10,000 個結構節點的上限內解析。JSON 的結構節點是 object 欄位；XML 的結構節點是元素與屬性，屬性路徑以 `/@name` 表示。XML 一律禁止 DTD 與外部解析器。`configuration` 只保存根類型、已走訪結構節點數和去重後的欄位路徑（最多 200 筆），絕不保存任何 JSON value 或 XML 文字、屬性值；超過上限、巢狀過深或格式無效時會標成 partial／invalid 並附原因。
 
-後續可深化自訂資源型別的靜態摘要、原生呼叫圖或更細的控制流程；新增欄位時會再提升 schema 版本，舊欄位維持相容。
+後續可深化自訂資源型別的靜態摘要、原生 tail call 或更細的控制流程；新增欄位時會再提升 schema 版本，舊欄位維持相容。
 
 ## ZIP／ASAR 安全匯入
 
@@ -71,10 +72,14 @@ ZIP 只會把通過 portable path、重複／檔案目錄衝突、重新解析�
 ## 原生 PE 分析（Ghidra）
 
 開啟 `--native` 時，`NativeAnalyzer` 會對原生 PE 呼叫 Ghidra headless（`analyzeHeadless`），
-用內建的 `ExportFunctions.py` 後置腳本把函式匯出成 JSON，再由 `GhidraOutputParser` 解析進 `FileArtifact.NativeCode`。
+用內建的 `ExportFunctions.py` 後置腳本把函式與靜態 CALL 參照匯出成 JSON，再由 `GhidraOutputParser` 解析進 `FileArtifact.NativeCode`。
 Ghidra 安裝目錄來自 `--ghidra` 或環境變數 `GHIDRA_INSTALL_DIR`。找不到 Ghidra、逾時或執行失敗時不會讓整體分析失敗，
 只會把 `Backend` 記成 `none` 並附上註記，同時列入報告警告。原生函式與受管 `code` 分開存放，
 所以 C#／C++／Rust／Go 產生器不會誤把原生函式當成 .NET 型別輸出。headless process 的 stdout/stderr 會同步清空並只保留 bounded diagnostic tail；逾時或取消會終止整個 process tree 並等待退出。匯出 JSON 最多 32 MiB、保留 100,000 筆函式及每欄 16,384 字元，超限會透過 `functionsTruncated` 明示，非零 exit code 或 schema 錯誤不會被當成成功結果。Windows 的 Ghidra launcher 是 batch；為避免 `%NAME%` 或 `!NAME!` 被 `cmd.exe` 多層展開成另一段路徑，launcher、輸入或暫存路徑若含 literal `%` 或 `!` 會安全略過並附上原因。
+
+匯出格式 v2 新增 `callGraph.calls`，舊 v1 函式輸出仍可讀取，但呼叫圖是 `null`，不會誤當成沒有呼叫。腳本依 Ghidra 的 [FunctionManager](https://github.com/NationalSecurityAgency/ghidra/blob/master/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/listing/FunctionManager.java)、[Instruction](https://github.com/NationalSecurityAgency/ghidra/blob/master/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/listing/Instruction.java) 與 [ReferenceManager](https://github.com/NationalSecurityAgency/ghidra/blob/master/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/symbol/ReferenceManager.java) API，走訪已保留函式的指令，只處理 CALL flow 與 CALL reference；目標必須精確對到函式入口，不依名稱合併、不沿資料指標或 thunk 猜測、不把落在函式中間的位址當成入口。遞迴呼叫、同名函式、外部函式和同一位置的多個已知目標各自保留，同一來源／位置／目標的重複參照只記一次。找不到目標仍保留呼叫位置，`targetAddress=null`；`isIndirect` 來自指令的 computed flow，已知間接目標不代表執行期目標已全部找到。跳躍形式的 tail call 尚未納入。
+
+函式位址是 identity，最多 256 字元且不得截短；parser 拒絕重複函式位址、重複 JSON 欄位、重複呼叫、不存在的來源／目標和外部函式作為 caller。函式清單超限時只留下能連結到已保留函式的 edge。每次分析最多保留 100,000 筆呼叫、掃描 2,000,000 條指令與 2,000,000 筆參照；單一指令在配置參照陣列前先確認不超過 4,096 筆。函式與呼叫共用 24 MiB 的 JSON 匯出預算，取消會停止匯出；達到任一上限或函式清單不完整時，`callGraph.truncated=true`。`unresolvedCallCount` 只計算已保留且目標為 null 的紀錄，並非全程式總數。Markdown 最多列出 100 筆呼叫，明示未解析及截斷狀態；JSON 保存安全上限內的全部紀錄。腳本的 API fixture 測試可用 `python -B -m unittest discover -s tests/ghidra -v` 執行；這些測試不等同真實 Ghidra 驗收。
 
 ## 易語言
 

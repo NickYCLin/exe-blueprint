@@ -35,7 +35,7 @@ public sealed class BlueprintAnalyzer
                 warnings.Add($"{artifact.RelativePath}：{artifact.AnalysisError}");
             }
 
-            if (artifact.NativeCode is { Backend: "none", Note: { Length: > 0 } note })
+            if (artifact.NativeCode is { Note: { Length: > 0 } note })
             {
                 warnings.Add(note);
             }

@@ -39,7 +39,7 @@ Each archive also includes the `exe-blueprint-cli` command-line tool and checksu
 - Embedded manifest resources, safe decoding of standard `.resources` values, bounded summaries of pre-serialized custom-resource envelopes, and value-free embedded JSON configuration structure
 - WPF `.baml` header versions, record summaries, element/property usage, a bounded flat element tree with parent/content/complex-property links, file-declared or built-in WPF type/property ID mappings, safe property strings/references, and deferred resources with string, type, or bounded complex keys plus key-local optimized or verbose `StaticResource` links
 - Common runtime, framework, language, installer, and toolchain fingerprints
-- Optional Ghidra headless results for native PE functions
+- Optional Ghidra headless results for native PE functions and static CALL references, including call sites, direct/indirect calls, and unresolved targets
 
 Recognized technologies include .NET, WPF, Windows Forms, Avalonia, Visual Basic 6, Delphi/C++Builder, Microsoft Visual C++, Go, Rust, Python, PyInstaller, Java/JVM, Qt, Tauri, Electron, Unity, Inno Setup, and NSIS. Detection results include evidence and confidence; a detected language or framework is not treated as proof of the original source language.
 
@@ -53,7 +53,9 @@ exe-blueprint-output/<input-name>-<timestamp>/
 └─ REPORT.md
 ```
 
-`blueprint.json` schema 0.16 records each file's direct, directory, ZIP, or ASAR provenance, generic parameter and constraint metadata for managed code, BAML deferred-resource relationships, pre-serialized custom-resource envelope summaries, embedded JSON and XML configuration structure without values, and an `archives` list with ASAR expansion counts, completeness, and errors. `REPORT.md` is a Traditional Chinese summary for human review.
+`blueprint.json` schema 0.17 records each file's direct, directory, ZIP, or ASAR provenance, generic parameter and constraint metadata for managed code, BAML deferred-resource relationships, pre-serialized custom-resource envelope summaries, embedded JSON and XML configuration structure without values, and an `archives` list with ASAR expansion counts, completeness, and errors. `REPORT.md` is a Traditional Chinese summary for human review.
+
+Native results include `nativeCode.callGraph.calls`, linked by function address rather than name. Each record preserves the caller, call site, target address (or `null` when unresolved), and whether the instruction is indirect. `truncated` marks omitted data; `unresolvedCallCount` counts retained records without a target. This is a bounded static CALL reference graph, not a complete runtime graph: indirect targets may be incomplete, and jump-based tail calls are not included. Legacy backend output has a `null` call graph.
 
 Optional generators can also create structural starting points under:
 

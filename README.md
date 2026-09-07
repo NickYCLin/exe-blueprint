@@ -49,7 +49,7 @@ ExeBlueprint 不是動態沙箱，也不是能完整還原所有原始碼的反�
 - 能把標準 IL 跳表還原成 switch，支援 case 直接 return／throw，或指派區域變數後回到共用流程
 - 把 .NET 型別轉出一份 C# 骨架，能還原的方法直接給程式碼，其餘附上原始 IL
 - 另外可轉出 C++／Rust／Go 的型別與方法簽章骨架（結構為主，方法體留空）
-- 選配用 Ghidra headless 分析原生 PE，列出函式（沒裝 Ghidra 會自動略過並加註記）
+- 選配用 Ghidra headless 分析原生 PE，列出函式與靜態 CALL 呼叫圖，保留呼叫位置、直接／間接類型和未解析目標（沒裝 Ghidra 會自動略過並加註記）
 - 找出套件內可以對上的 EXE／DLL 相依關係
 - 依檔案內容辨識常見語言、runtime、框架與安裝器
 - 輸出 JSON 與繁體中文 Markdown 報告
@@ -139,7 +139,7 @@ src/ExeBlueprint.Desktop/bin/Release/net10.0/win-x64/publish/ExeBlueprint.exe
 
 ## 報告內容
 
-`blueprint.json` 目前使用 schema `0.16`，是後續專案重建和轉語言要共用的資料格式，內容包含：
+`blueprint.json` 目前使用 schema `0.17`，是後續專案重建和轉語言要共用的資料格式，內容包含：
 
 - 輸入套件摘要
 - 每個檔案的格式、雜湊與來源資訊（provenance；直接輸入、資料夾、ZIP 或 ASAR，以及直接容器、項目和深度）
@@ -147,6 +147,7 @@ src/ExeBlueprint.Desktop/bin/Release/net10.0/win-x64/publish/ExeBlueprint.exe
 - PE 與 .NET metadata
 - .NET 型別、同一 artifact 內的 TypeDef／declaring TypeDef identity、泛型參數與 constraint metadata（含獨立的 owner domain／primary constraint 證據）、欄位、屬性、事件、方法簽章、方法層級呼叫圖與各方法反組譯出的 IL
 - `.resources` 的標準鍵值，以及預序列化自訂型別的 `serialization` 格式、payload 大小、辨識出的資料種類與完整性；只會保留原始 TypeConverterString 文字
+- 原生 `nativeCode.callGraph` 的呼叫來源、位置、目標位址和直接／間接類型；無法確認目標時保留 `null`，超限時標示 `truncated`
 - 內嵌 JSON 與 XML／`.config` 設定檔的 `configuration` 結構摘要（根類型、結構節點數和欄位路徑），不保存任何設定值
 - 語言、框架和工具鏈判斷
 - 套件內與外部相依關係
@@ -157,7 +158,7 @@ src/ExeBlueprint.Desktop/bin/Release/net10.0/win-x64/publish/ExeBlueprint.exe
 ## 接下來要做的功能
 
 - 解開 Inno Setup、NSIS、MSI、PyInstaller 與 Electron 外層安裝封裝（Electron ASAR 已支援）
-- 深化原生 PE 分析：把 Ghidra 的函式進一步還原成呼叫圖與程式碼（目前先列出函式清單）
+- 深化原生 PE 分析：補上 tail call 與程式碼還原（目前已有函式清單及靜態 CALL 呼叫圖；間接呼叫的執行期目標仍可能不完整）
 - 擴充中介模型，補上 UI 與設定（函式、型別、欄位、屬性、事件、呼叫圖、內嵌 manifest 資源清單、`.resources` 標準鍵值與預序列化自訂型別的安全 envelope 摘要、內嵌 JSON／XML 設定的安全欄位結構，以及 WPF BAML record、flat element tree、檔內與內建型別／屬性 ID、可安全讀取的 property 值、deferred complex key 與 verbose StaticResource 關係已完成 .NET 部分；接著可深化型別專屬的靜態摘要）
 - 補齊例外處理與型別引用，讓骨架能直接編譯成多專案 solution（目前會產生 `.slnx` 與套件內的 `ProjectReference`，class 與具 instance constructor 的 struct skeleton 成員會有 `default!` initializer，已保留完整命名空間、泛型巢狀型別、interface／delegate variance、可安全表示的 type／method／delegate `where` constraints、ref struct、managed／unmanaged 函式指標簽章、pointer 成員與已還原方法體所需的 scoped `unsafe` context、方法與運算式的 nullable 語意及欄位／屬性／事件修飾詞，能區分 virtual、override、sealed override 與 final 介面實作，並還原 canonical `base(...)`／`this(...)` constructor initializer、直線欄位初始化、exact direct-base nonvirtual dispatch、terminal void return、if／if-else、while／do-while、標準 switch、try/catch、含混合巢狀短路條件的 catch filter、try/finally、以 catch/rethrow 等價表示的 fault、複合 try/catch/finally、terminal try、indexer、具區塊 setter 的唯寫屬性、參考型別 null 分支、bool／char／enum 呼叫常值、enum 位元運算、位移與 switch case、enum 成員常值、區域變數型別、bool／enum typed target 的 CLI stack-family 轉型，以及具已知整數 stack family 的 `div.un`／`rem.un`／`cgt.un`／`clt.un` 與四種 `.un` 關係分支）
 - 優先支援易語言、VB6、Delphi 到 C# 的轉換

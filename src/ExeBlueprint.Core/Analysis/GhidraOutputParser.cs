@@ -3,7 +3,7 @@ using ExeBlueprint.Models;
 
 namespace ExeBlueprint.Analysis;
 
-// 解析 Ghidra 匯出腳本產生的 JSON（{ "functions": [ { name, address, signature, external } ] }）。
+// v1 是函式清單；v2 另含以函式位址連結的 callGraph。
 internal static class GhidraOutputParser
 {
     internal const int MaxJsonBytes = 32 * 1024 * 1024;
@@ -11,6 +11,8 @@ internal static class GhidraOutputParser
     private const int MaxFunctions = 100_000;
     private const int MaxStringChars = 16_384;
     private const int MaxJsonDepth = 16;
+    private const int MaxCalls = 100_000;
+    private const int MaxAddressChars = 256;
 
     public static GhidraOutputParseResult Parse(string json) =>
         Parse(json, MaxJsonChars, MaxFunctions, MaxStringChars);
@@ -19,11 +21,13 @@ internal static class GhidraOutputParser
         string json,
         int maxJsonChars,
         int maxFunctions,
-        int maxStringChars)
+        int maxStringChars,
+        int maxCalls = MaxCalls)
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(maxJsonChars, 1);
         ArgumentOutOfRangeException.ThrowIfLessThan(maxFunctions, 1);
         ArgumentOutOfRangeException.ThrowIfLessThan(maxStringChars, 1);
+        ArgumentOutOfRangeException.ThrowIfLessThan(maxCalls, 1);
 
         if (string.IsNullOrWhiteSpace(json))
         {
@@ -48,10 +52,11 @@ internal static class GhidraOutputParser
                 });
             var root = document.RootElement;
             if (root.ValueKind != JsonValueKind.Object
+                || HasDuplicateProperties(root)
                 || !root.TryGetProperty("schemaVersion", out var schemaVersion)
                 || schemaVersion.ValueKind != JsonValueKind.Number
                 || !schemaVersion.TryGetInt32(out var schemaVersionNumber)
-                || schemaVersionNumber != 1
+                || schemaVersionNumber is not (1 or 2)
                 || !root.TryGetProperty("functionCount", out var functionCountValue)
                 || functionCountValue.ValueKind != JsonValueKind.Number
                 || !functionCountValue.TryGetInt32(out var functionCount)
@@ -85,10 +90,13 @@ internal static class GhidraOutputParser
             }
 
             var result = new List<NativeFunction>(Math.Min(sourceFunctionCount, maxFunctions));
+            var functionAddresses = new Dictionary<string, bool>(StringComparer.Ordinal);
+            var retainedAddresses = new HashSet<string>(StringComparer.Ordinal);
             var index = 0;
             foreach (var element in functions.EnumerateArray())
             {
                 if (element.ValueKind != JsonValueKind.Object
+                    || HasDuplicateProperties(element)
                     || !TryGetRequiredString(element, "name", maxStringChars, ref truncated, out var name)
                     || string.IsNullOrWhiteSpace(name)
                     || !TryGetRequiredString(element, "address", maxStringChars, ref truncated, out var address)
@@ -100,8 +108,17 @@ internal static class GhidraOutputParser
                         $"Ghidra JSON 的 functions[{index}] schema 不正確。");
                 }
 
+                // 位址是 v2 呼叫圖的 identity，不能像顯示文字一樣截短。
+                if (schemaVersionNumber == 2
+                    && (!TryGetAddress(element, "address", out address)
+                        || !functionAddresses.TryAdd(address, external.GetBoolean())))
+                {
+                    return GhidraOutputParseResult.Invalid("Ghidra JSON 的函式位址無效或重複。");
+                }
+
                 if (result.Count < maxFunctions)
                 {
+                    retainedAddresses.Add(address);
                     result.Add(new NativeFunction
                     {
                         Name = name,
@@ -118,12 +135,119 @@ internal static class GhidraOutputParser
                 index++;
             }
 
-            return new GhidraOutputParseResult(true, functionCount, result, truncated, null);
+            NativeCallGraph? callGraph = null;
+            if (schemaVersionNumber == 2)
+            {
+                callGraph = ParseCallGraph(root, functionAddresses, retainedAddresses, truncated, maxCalls);
+                if (callGraph is null)
+                {
+                    return GhidraOutputParseResult.Invalid("Ghidra JSON 的 callGraph schema 或函式參照不正確。");
+                }
+            }
+            else if (root.TryGetProperty("callGraph", out _))
+            {
+                return GhidraOutputParseResult.Invalid("Ghidra JSON v1 不支援 callGraph。");
+            }
+
+            return new GhidraOutputParseResult(true, functionCount, result, truncated, null)
+            {
+                CallGraph = callGraph
+            };
         }
         catch (JsonException exception)
         {
             return GhidraOutputParseResult.Invalid($"Ghidra JSON 格式錯誤：{exception.Message}");
         }
+    }
+
+    private static NativeCallGraph? ParseCallGraph(
+        JsonElement root,
+        IReadOnlyDictionary<string, bool> functionAddresses,
+        HashSet<string> retainedAddresses,
+        bool functionsTruncated,
+        int maxCalls)
+    {
+        if (!root.TryGetProperty("callGraph", out var graph)
+            || graph.ValueKind != JsonValueKind.Object
+            || HasDuplicateProperties(graph)
+            || !graph.TryGetProperty("calls", out var calls)
+            || calls.ValueKind != JsonValueKind.Array
+            || !graph.TryGetProperty("truncated", out var truncatedValue)
+            || truncatedValue.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+        {
+            return null;
+        }
+
+        var truncated = functionsTruncated || truncatedValue.GetBoolean();
+        var result = new List<NativeCall>(Math.Min(calls.GetArrayLength(), maxCalls));
+        // 同一 call site 可有多個已知目標，但相同 edge 不可重複計數。
+        var identities = new HashSet<(string Caller, string Site, string? Target)>();
+        foreach (var call in calls.EnumerateArray())
+        {
+            if (call.ValueKind != JsonValueKind.Object
+                || HasDuplicateProperties(call)
+                || !TryGetAddress(call, "callerAddress", out var caller)
+                || !functionAddresses.TryGetValue(caller, out var callerIsExternal)
+                || callerIsExternal
+                || !TryGetAddress(call, "callSiteAddress", out var site)
+                || !call.TryGetProperty("targetAddress", out var targetValue)
+                || !call.TryGetProperty("isIndirect", out var indirect)
+                || indirect.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+            {
+                return null;
+            }
+
+            string? target = null;
+            if (targetValue.ValueKind != JsonValueKind.Null
+                && (!TryGetAddress(call, "targetAddress", out target)
+                    || !functionAddresses.ContainsKey(target)))
+            {
+                return null;
+            }
+
+            if (!identities.Add((caller, site, target)))
+            {
+                return null;
+            }
+
+            if (result.Count >= maxCalls
+                || !retainedAddresses.Contains(caller)
+                || (target is not null && !retainedAddresses.Contains(target)))
+            {
+                truncated = true;
+                continue;
+            }
+
+            result.Add(new NativeCall
+            {
+                CallerAddress = caller,
+                CallSiteAddress = site,
+                TargetAddress = target,
+                IsIndirect = indirect.GetBoolean()
+            });
+        }
+
+        return new NativeCallGraph { Calls = result, Truncated = truncated };
+    }
+
+    private static bool TryGetAddress(JsonElement element, string property, out string value)
+    {
+        value = string.Empty;
+        if (!element.TryGetProperty(property, out var address) || address.ValueKind != JsonValueKind.String)
+        {
+            return false;
+        }
+
+        value = address.GetString() ?? string.Empty;
+        return !string.IsNullOrWhiteSpace(value)
+            && value.Length <= MaxAddressChars
+            && !value.Any(char.IsControl);
+    }
+
+    private static bool HasDuplicateProperties(JsonElement element)
+    {
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        return element.EnumerateObject().Any(property => !names.Add(property.Name));
     }
 
     private static bool TryGetRequiredString(
@@ -165,5 +289,7 @@ internal sealed record GhidraOutputParseResult(
     bool Truncated,
     string? Error)
 {
+    public NativeCallGraph? CallGraph { get; init; }
+
     public static GhidraOutputParseResult Invalid(string error) => new(false, 0, [], false, error);
 }

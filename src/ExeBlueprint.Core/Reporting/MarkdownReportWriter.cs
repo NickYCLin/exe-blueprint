@@ -217,7 +217,52 @@ public static class MarkdownReportWriter
                 builder.AppendLine($"（報告僅列出前 {retained} 個，共偵測 {native.FunctionCount} 個函式{suffix}）");
             }
 
+            AppendNativeCallGraph(builder, native);
             builder.AppendLine();
+        }
+    }
+
+    private static void AppendNativeCallGraph(StringBuilder builder, NativeCodeModel native)
+    {
+        builder.AppendLine();
+        if (native.CallGraph is not { } graph)
+        {
+            builder.AppendLine("此後端輸出未提供原生呼叫圖。");
+            return;
+        }
+
+        builder.AppendLine($"原生呼叫圖：保留 {graph.Calls.Count} 筆呼叫紀錄，其中 {graph.UnresolvedCallCount} 筆目標未解析。");
+        builder.AppendLine("僅列出 Ghidra 的靜態 CALL 參照；間接呼叫的目標可能不完整，不含跳躍形式的 tail call。");
+        if (graph.Truncated)
+        {
+            builder.AppendLine("呼叫圖已達安全上限或函式清單不完整；blueprint.json 也只保留部分紀錄。");
+        }
+        if (graph.Calls.Count == 0)
+        {
+            return;
+        }
+
+        var functions = native.Functions
+            .Where(function => function.Address is not null)
+            .GroupBy(function => function.Address!, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.First(), StringComparer.Ordinal);
+        string DisplayFunction(string? address) => address is null
+            ? "未解析"
+            : functions.TryGetValue(address, out var function)
+                ? $"{function.Name} ({address})" : address;
+
+        builder.AppendLine();
+        builder.AppendLine("| 呼叫來源 | 呼叫位置 | 目標 | 類型 |");
+        builder.AppendLine("| --- | --- | --- | --- |");
+        const int maxReportCalls = 100;
+        foreach (var call in graph.Calls.Take(maxReportCalls))
+        {
+            builder.AppendLine($"| {EscapeCell(DisplayFunction(call.CallerAddress))} | {EscapeCell(call.CallSiteAddress)} | {EscapeCell(DisplayFunction(call.TargetAddress))} | {(call.IsIndirect ? "間接" : "直接")} |");
+        }
+        if (graph.Calls.Count > maxReportCalls)
+        {
+            builder.AppendLine();
+            builder.AppendLine($"（報告僅列出前 {maxReportCalls} 筆；其餘已保留紀錄請查看 blueprint.json）");
         }
     }
 

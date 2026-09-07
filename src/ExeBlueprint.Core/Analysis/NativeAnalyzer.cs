@@ -5,7 +5,7 @@ using ExeBlueprint.Models;
 
 namespace ExeBlueprint.Analysis;
 
-// 用 Ghidra headless 分析原生 PE，抽出函式清單。
+// 用 Ghidra headless 分析原生 PE，抽出函式清單與靜態呼叫關係。
 // 找不到 Ghidra 或執行失敗時不會讓分析失敗，只回傳帶註記的結果（Backend="none"）。
 internal static class NativeAnalyzer
 {
@@ -129,7 +129,8 @@ internal static class NativeAnalyzer
                 FunctionCount = parsed.FunctionCount,
                 Functions = parsed.Functions,
                 FunctionsTruncated = parsed.Truncated,
-                Note = parsed.Truncated ? "Ghidra 函式輸出已達安全保留上限，結果已截斷。" : null
+                CallGraph = parsed.CallGraph,
+                Note = BuildOutputNote(parsed)
             };
         }
         catch (GhidraUnsafeCleanupException exception)
@@ -171,6 +172,24 @@ internal static class NativeAnalyzer
         Backend = "none",
         Note = note
     };
+
+    private static string? BuildOutputNote(GhidraOutputParseResult parsed)
+    {
+        var notes = new List<string>();
+        if (parsed.Truncated)
+        {
+            notes.Add("Ghidra 函式輸出已達安全保留上限，結果已截斷。");
+        }
+        if (parsed.CallGraph is { Truncated: true })
+        {
+            notes.Add("Ghidra 呼叫圖未完整保留，請查看已匯出的呼叫紀錄。");
+        }
+        if (parsed.CallGraph is { UnresolvedCallCount: > 0 } graph)
+        {
+            notes.Add($"Ghidra 呼叫圖有 {graph.UnresolvedCallCount} 筆已保留紀錄無法確認目標。");
+        }
+        return notes.Count == 0 ? null : string.Join(" ", notes);
+    }
 
     private static async Task WriteExportScriptAsync(string scriptPath, CancellationToken cancellationToken)
     {

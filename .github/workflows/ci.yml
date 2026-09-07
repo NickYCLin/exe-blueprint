@@ -37,3 +37,6 @@ jobs:
 
       - name: Test
         run: dotnet test ./ExeBlueprint.slnx -c Release --no-build
+
+      - name: Test Ghidra exporter
+        run: python -B -m unittest discover -s tests/ghidra -v
