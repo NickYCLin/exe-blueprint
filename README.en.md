@@ -73,6 +73,8 @@ See the [detailed capabilities and roadmap](docs/capabilities.md) and [architect
 2. Open the app and select an input and output folder. The current `main` source also supports drag and drop and recent inputs.
 3. Run the analysis, then open `REPORT.md` or `blueprint.json` in the output folder.
 
+The current `main` includes a [Windows installer build and verification workflow](docs/windows-installer.md). A `win-x64-setup.exe` will be included from the next release; the ZIP package remains available.
+
 | Host platform | Package name ends with | Launch |
 | --- | --- | --- |
 | Windows 10/11 x64 | `win-x64.zip` | `ExeBlueprint.exe` |

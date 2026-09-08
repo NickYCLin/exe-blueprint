@@ -73,6 +73,8 @@ exe-blueprint-output/<輸入名稱>-<時間>/
 2. 開啟程式，選擇分析來源與輸出目錄；目前 `main` 也支援拖放與最近使用項目。
 3. 執行分析後，開啟輸出目錄中的 `REPORT.md` 或 `blueprint.json`。
 
+`main` 已加入 [Windows 安裝程式](docs/windows-installer.md)的建置與驗收流程；`win-x64-setup.exe` 會從下一次版本發布起提供，ZIP 版仍保留。
+
 | 執行環境 | 下載套件名稱結尾 | 啟動檔 |
 | --- | --- | --- |
 | Windows 10／11 x64 | `win-x64.zip` | `ExeBlueprint.exe` |

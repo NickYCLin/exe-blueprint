@@ -1,6 +1,6 @@
 # 發佈新版本
 
-GitHub Release 由版本 tag 觸發，產物會在 GitHub Actions 的乾淨 Windows 環境重新建置，不使用開發電腦上的既有檔案。
+GitHub Release 由版本 tag 觸發，產物會在 GitHub Actions 各平台的乾淨環境重新建置，不使用開發電腦上的既有檔案。
 
 ## 發佈前
 
@@ -32,6 +32,7 @@ git push origin v0.2.0
 - 發佈 Windows x64、Linux x64、macOS Intel 與 Apple Silicon 自包含套件。
 - Windows 與 Linux 套件包含桌面程式和 CLI；macOS 另外整理成 `.app`。
 - 建立 ZIP、tar.gz 與 `SHA256SUMS.txt`。
+- Windows 額外建立安裝程式，通過安裝、升級與移除驗收後才交給 Release job。建置方式與驗收範圍見 [Windows 安裝程式](windows-installer.md)。
 - 建立或更新同名 GitHub Release。
 
 Windows 與 macOS 產物目前沒有商業程式碼簽章，macOS 也沒有 Apple 公證。版本說明與套件內 README 都必須直接寫明，不可把這些產物稱為已簽章版本。
