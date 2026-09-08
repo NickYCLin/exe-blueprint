@@ -54,7 +54,7 @@ public sealed partial class MainWindow : Window
         {
             if (e.Property == TextBox.TextProperty && !_settingSuggestedOutput)
             {
-                _outputWasEdited = !string.IsNullOrWhiteSpace(OutputPathBox.Text);
+                _outputWasEdited = NormalizePathInput(OutputPathBox.Text) is not null;
             }
         };
     }
@@ -225,7 +225,7 @@ public sealed partial class MainWindow : Window
     private void OnInputPathChanged()
     {
         ClearResult();
-        var hasInput = !string.IsNullOrWhiteSpace(InputPathBox.Text);
+        var hasInput = NormalizePathInput(InputPathBox.Text) is not null;
         AnalyzeButton.IsEnabled = _analysisCancellation is null && hasInput;
         SetStatus(hasInput ? "可以開始" : "尚未開始",
             hasInput ? "準備好了" : "先選擇分析來源",
@@ -244,13 +244,14 @@ public sealed partial class MainWindow : Window
         try
         {
             _settingSuggestedOutput = true;
-            if (string.IsNullOrWhiteSpace(InputPathBox.Text))
+            var inputPath = NormalizePathInput(InputPathBox.Text);
+            if (inputPath is null)
             {
                 OutputPathBox.Text = string.Empty;
                 return;
             }
 
-            var suggested = BlueprintExportService.CreateDefaultOutputDirectory(InputPathBox.Text, _outputBaseDirectory);
+            var suggested = BlueprintExportService.CreateDefaultOutputDirectory(inputPath, _outputBaseDirectory);
             var available = suggested;
             for (var number = 2; Directory.Exists(available) || File.Exists(available); number++)
             {
@@ -276,7 +277,7 @@ public sealed partial class MainWindow : Window
             return;
         }
 
-        var inputPath = InputPathBox.Text?.Trim();
+        var inputPath = NormalizePathInput(InputPathBox.Text);
         if (string.IsNullOrWhiteSpace(inputPath))
         {
             ShowError("請先選擇要分析的檔案、資料夾、ZIP 或 ASAR。");
@@ -304,26 +305,26 @@ public sealed partial class MainWindow : Window
 
         try
         {
-            var result = await _runAnalysis(
-                new BlueprintExportRequest
-                {
-                    InputPath = inputPath,
-                    BaseDirectory = _outputBaseDirectory,
-                    OutputDirectory = NullIfWhiteSpace(OutputPathBox.Text),
-                    Overwrite = OverwriteCheckBox.IsChecked == true,
-                    JsonOnly = ReportCheckBox.IsChecked != true,
-                    EmitCSharp = CSharpCheckBox.IsChecked == true,
-                    EmitCpp = CppCheckBox.IsChecked == true,
-                    EmitRust = RustCheckBox.IsChecked == true,
-                    EmitGo = GoCheckBox.IsChecked == true,
-                    EnableNativeAnalysis = NativeCheckBox.IsChecked == true,
-                    GhidraInstallDir = NullIfWhiteSpace(GhidraPathBox.Text)
-                },
-                progress,
+            var request = new BlueprintExportRequest
+            {
+                InputPath = inputPath,
+                BaseDirectory = _outputBaseDirectory,
+                OutputDirectory = NormalizePathInput(OutputPathBox.Text),
+                Overwrite = OverwriteCheckBox.IsChecked == true,
+                JsonOnly = ReportCheckBox.IsChecked != true,
+                EmitCSharp = CSharpCheckBox.IsChecked == true,
+                EmitCpp = CppCheckBox.IsChecked == true,
+                EmitRust = RustCheckBox.IsChecked == true,
+                EmitGo = GoCheckBox.IsChecked == true,
+                EnableNativeAnalysis = NativeCheckBox.IsChecked == true,
+                GhidraInstallDir = NormalizePathInput(GhidraPathBox.Text)
+            };
+            var result = await Task.Run(
+                () => _runAnalysis(request, progress, cancellation.Token),
                 cancellation.Token);
 
             _lastOutputDirectory = result.OutputDirectory;
-            _lastReportPath = ReportCheckBox.IsChecked == true ? Path.Combine(result.OutputDirectory, "REPORT.md") : null;
+            _lastReportPath = request.JsonOnly ? null : Path.Combine(result.OutputDirectory, "REPORT.md");
             _settingSuggestedOutput = true;
             try { OutputPathBox.Text = result.OutputDirectory; }
             finally { _settingSuggestedOutput = false; }
@@ -488,7 +489,7 @@ public sealed partial class MainWindow : Window
         GoCheckBox.IsEnabled = !busy;
         OverwriteCheckBox.IsEnabled = !busy;
         NativeCheckBox.IsEnabled = !busy;
-        AnalyzeButton.IsEnabled = !busy && !string.IsNullOrWhiteSpace(InputPathBox.Text);
+        AnalyzeButton.IsEnabled = !busy && NormalizePathInput(InputPathBox.Text) is not null;
         AnalyzeButton.IsVisible = !busy;
         OpenOutputButton.IsVisible = !busy && _lastOutputDirectory is not null;
         OpenReportButton.IsVisible = !busy && _lastReportPath is not null;
@@ -555,8 +556,16 @@ public sealed partial class MainWindow : Window
         StatusBadgeText.Foreground = new SolidColorBrush(Color.Parse(warning ? "#80510D" : success ? "#236444" : "#3455C5"));
     }
 
-    private static string? NullIfWhiteSpace(string? value) =>
-        string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+    private static string? NormalizePathInput(string? value)
+    {
+        var path = value?.Trim();
+        if (path is { Length: >= 2 } && path[0] == '"' && path[^1] == '"')
+        {
+            path = path[1..^1];
+        }
+
+        return string.IsNullOrWhiteSpace(path) ? null : path;
+    }
 
     protected override void OnClosing(WindowClosingEventArgs e)
     {

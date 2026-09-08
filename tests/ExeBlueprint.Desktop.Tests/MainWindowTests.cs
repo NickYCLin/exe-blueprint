@@ -56,6 +56,8 @@ public sealed class MainWindowTests(DesktopTestSession desktopSession) : IDispos
                 Input(window).Text = "";
                 Assert.False(Control<Button>(window, "AnalyzeButton").IsEnabled);
                 Assert.Equal(custom, Output(window).Text);
+                Input(window).Text = "\"\"";
+                Assert.False(Control<Button>(window, "AnalyzeButton").IsEnabled);
                 Output(window).Text = "";
                 Input(window).Text = Path.Combine(_temporaryDirectory, "fourth.exe");
                 Assert.Contains("fourth-", Output(window).Text);
@@ -98,7 +100,7 @@ public sealed class MainWindowTests(DesktopTestSession desktopSession) : IDispos
     public async Task CompletionShowsWarningsAndChangingSourceClearsOldResult()
     {
         var session = desktopSession.Session;
-        await session.Dispatch(() =>
+        await session.Dispatch(async () =>
         {
             IProgress<BlueprintExportProgress>? oldProgress = null;
             var window = CreateWindow((request, progress, _) =>
@@ -112,6 +114,7 @@ public sealed class MainWindowTests(DesktopTestSession desktopSession) : IDispos
             {
                 Input(window).Text = Path.Combine(_temporaryDirectory, "example.exe");
                 Click(window, "AnalyzeButton");
+                await WaitUntil(() => Control<Button>(window, "AnalyzeButton").IsVisible);
                 Assert.True(Control<Grid>(window, "ResultStats").IsVisible);
                 Assert.True(Control<Button>(window, "OpenReportButton").IsVisible);
                 Assert.True(Control<Button>(window, "OpenOutputButton").IsVisible);
@@ -132,6 +135,7 @@ public sealed class MainWindowTests(DesktopTestSession desktopSession) : IDispos
                 Assert.False(Control<Grid>(window, "ResultStats").IsVisible);
                 Assert.False(Control<Button>(window, "OpenOutputButton").IsVisible);
                 Assert.False(Control<Button>(window, "OpenReportButton").IsVisible);
+                return true;
             }
             finally { window.Close(); }
         }, TestContextToken);
@@ -144,8 +148,10 @@ public sealed class MainWindowTests(DesktopTestSession desktopSession) : IDispos
         await session.Dispatch(async () =>
         {
             var cancelled = false;
+            var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var window = CreateWindow(async (_, _, token) =>
             {
+                entered.SetResult();
                 try { await Task.Delay(Timeout.Infinite, token); }
                 catch (OperationCanceledException) { cancelled = true; throw; }
                 throw new InvalidOperationException("Unreachable");
@@ -154,6 +160,7 @@ public sealed class MainWindowTests(DesktopTestSession desktopSession) : IDispos
             {
                 Input(window).Text = Path.Combine(_temporaryDirectory, "example.exe");
                 Click(window, "AnalyzeButton");
+                await entered.Task.WaitAsync(TimeSpan.FromSeconds(15));
                 Assert.False(Input(window).IsEnabled);
                 Assert.False(Control<Button>(window, "AnalyzeButton").IsVisible);
                 Assert.True(Control<Button>(window, "CancelButton").IsVisible);
@@ -216,7 +223,7 @@ public sealed class MainWindowTests(DesktopTestSession desktopSession) : IDispos
     public async Task JsonOnlyResultDoesNotOfferAnOldReport()
     {
         var session = desktopSession.Session;
-        await session.Dispatch(() =>
+        await session.Dispatch(async () =>
         {
             var window = CreateWindow((request, _, _) =>
             {
@@ -232,8 +239,10 @@ public sealed class MainWindowTests(DesktopTestSession desktopSession) : IDispos
                 Control<CheckBox>(window, "CSharpCheckBox").IsChecked = false;
                 Control<CheckBox>(window, "RustCheckBox").IsChecked = true;
                 Click(window, "AnalyzeButton");
+                await WaitUntil(() => Control<Button>(window, "AnalyzeButton").IsVisible);
                 Assert.False(Control<Button>(window, "OpenReportButton").IsVisible);
                 Assert.True(Control<Button>(window, "OpenOutputButton").IsVisible);
+                return true;
             }
             finally { window.Close(); }
         }, TestContextToken);
@@ -243,7 +252,7 @@ public sealed class MainWindowTests(DesktopTestSession desktopSession) : IDispos
     public async Task KeyboardCanStartAnalysisAndLargeWarningListsStayBounded()
     {
         var session = desktopSession.Session;
-        await session.Dispatch(() =>
+        await session.Dispatch(async () =>
         {
             var window = CreateWindow((request, _, _) =>
             {
@@ -261,12 +270,80 @@ public sealed class MainWindowTests(DesktopTestSession desktopSession) : IDispos
                 Assert.True(start.Focus());
                 window.KeyPressQwerty(PhysicalKey.Space, RawInputModifiers.None);
                 window.KeyReleaseQwerty(PhysicalKey.Space, RawInputModifiers.None);
+                await WaitUntil(() => Control<Button>(window, "AnalyzeButton").IsVisible);
                 Assert.True(Control<Grid>(window, "ResultStats").IsVisible);
                 Assert.Equal("150", Control<TextBlock>(window, "WarningCountText").Text);
                 Assert.Equal(100, Control<ItemsControl>(window, "WarningsList").ItemCount);
                 Assert.True(Control<TextBlock>(window, "WarningsMoreText").IsVisible);
                 window.SetRenderScaling(1.5);
                 AssertWithinWindow(window, start);
+                return true;
+            }
+            finally { window.Close(); }
+        }, TestContextToken);
+    }
+
+    [Fact]
+    public async Task SynchronousAnalysisWorkDoesNotBlockTheCancelButton()
+    {
+        var session = desktopSession.Session;
+        await session.Dispatch(async () =>
+        {
+            var entered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var window = CreateWindow((request, _, token) =>
+            {
+                entered.SetResult(Dispatcher.UIThread.CheckAccess());
+                // 模擬第一個 await 前的同步掃描。若工作仍在 UI 執行緒，取消按鈕就無法回應。
+                token.WaitHandle.WaitOne(TimeSpan.FromSeconds(10));
+                token.ThrowIfCancellationRequested();
+                return Task.FromResult(Result(request.OutputDirectory!));
+            });
+            try
+            {
+                Input(window).Text = Path.Combine(_temporaryDirectory, "large-folder");
+                Click(window, "AnalyzeButton");
+                Assert.False(await entered.Task.WaitAsync(TimeSpan.FromSeconds(15)));
+                Assert.True(Control<Button>(window, "CancelButton").IsEnabled);
+                Click(window, "CancelButton");
+                await WaitUntil(() => Control<Button>(window, "AnalyzeButton").IsVisible);
+                Assert.Equal("已取消", Control<TextBlock>(window, "StatusBadgeText").Text);
+                Assert.True(Input(window).IsEnabled);
+                return true;
+            }
+            finally { window.Close(); }
+        }, TestContextToken);
+    }
+
+    [Fact]
+    public async Task PastedQuotedPathsReachAnalysisWithoutTheirWrapperQuotes()
+    {
+        var session = desktopSession.Session;
+        await session.Dispatch(async () =>
+        {
+            BlueprintExportRequest? observed = null;
+            var source = Path.Combine(_temporaryDirectory, "Example App.exe");
+            var output = Path.Combine(_temporaryDirectory, "My Results");
+            var ghidra = Path.Combine(_temporaryDirectory, "Ghidra Install");
+            var window = CreateWindow((request, _, _) =>
+            {
+                observed = request;
+                return Task.FromResult(Result(request.OutputDirectory!));
+            });
+            try
+            {
+                Input(window).Text = $"  \"{source}\"  ";
+                Assert.Contains("Example App-", Output(window).Text);
+                Output(window).Text = $"\"{output}\"";
+                Control<TextBox>(window, "GhidraPathBox").Text = $"\"{ghidra}\"";
+                Control<CheckBox>(window, "NativeCheckBox").IsChecked = true;
+                Click(window, "AnalyzeButton");
+                await WaitUntil(() => Control<Button>(window, "AnalyzeButton").IsVisible);
+                Assert.NotNull(observed);
+                Assert.Equal(source, observed.InputPath);
+                Assert.Equal(output, observed.OutputDirectory);
+                Assert.Equal(ghidra, observed.GhidraInstallDir);
+                Assert.Equal(output, Output(window).Text);
+                return true;
             }
             finally { window.Close(); }
         }, TestContextToken);
