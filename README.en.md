@@ -73,7 +73,7 @@ See the [detailed capabilities and roadmap](docs/capabilities.md) and [architect
 2. Select or drop an input and confirm the output folder. Keep the defaults for a first analysis; additional languages and Ghidra are under advanced options.
 3. Progress, result counts and warnings appear on the right. Open the report or output folder from there. See the [desktop guide](docs/desktop-guide.md) for the current main interface; downloadable versions follow their release notes.
 
-The current `main` includes a [Windows installer build and verification workflow](docs/windows-installer.md). A `win-x64-setup.exe` will be included from the next release; the ZIP package remains available.
+The current `main` includes build and verification workflows for the [Windows installer](docs/windows-installer.md) and [macOS DMG](docs/macos-dmg.md). The next release will add `win-x64-setup.exe`, `macos-x64.dmg` and `macos-arm64.dmg`; ZIP packages remain available.
 
 | Host platform | Package name ends with | Launch |
 | --- | --- | --- |

@@ -1,0 +1,92 @@
+name: macOS installer
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/macos-installer.yml
+      - .github/workflows/release.yml
+      - packaging/**
+      - scripts/packaging/**
+      - src/**
+      - Directory.Build.props
+      - global.json
+  pull_request:
+    paths:
+      - .github/workflows/macos-installer.yml
+      - .github/workflows/release.yml
+      - packaging/**
+      - scripts/packaging/**
+      - src/**
+      - Directory.Build.props
+      - global.json
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  mount-and-copy:
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15-intel
+            rid: osx-x64
+            architecture: x64
+          - os: macos-15
+            rid: osx-arm64
+            architecture: arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.x
+      - name: Build disk image
+        id: build
+        shell: bash
+        env:
+          TARGET_RID: ${{ matrix.rid }}
+          TARGET_ARCH: ${{ matrix.architecture }}
+        run: |
+          set -euo pipefail
+          version="$(python3 -c 'import xml.etree.ElementTree as ET; print(ET.parse("Directory.Build.props").findtext(".//Version"))')"
+          desktop="$RUNNER_TEMP/desktop"
+          cli="$RUNNER_TEMP/cli"
+          stage="$RUNNER_TEMP/stage"
+          dotnet publish ./src/ExeBlueprint.Desktop -c Release -r "$TARGET_RID" --self-contained true \
+            -p:PublishSingleFile=false -p:DebugSymbols=false -p:DebugType=None -o "$desktop"
+          dotnet publish ./src/ExeBlueprint.Cli -c Release -r "$TARGET_RID" --self-contained true \
+            -p:PublishSingleFile=true -p:DebugSymbols=false -p:DebugType=None -o "$cli"
+          mkdir -p "$stage/ExeBlueprint.app/Contents/MacOS" "$stage/ExeBlueprint.app/Contents/Resources"
+          ditto "$desktop" "$stage/ExeBlueprint.app/Contents/MacOS"
+          ditto "$cli/exe-blueprint" "$stage/exe-blueprint-cli"
+          ditto ./packaging/README-desktop.txt "$stage/README.txt"
+          sed "s/__VERSION__/$version/g" ./packaging/macos/Info.plist > "$stage/ExeBlueprint.app/Contents/Info.plist"
+          chmod +x "$stage/ExeBlueprint.app/Contents/MacOS/ExeBlueprint" "$stage/exe-blueprint-cli"
+          dmg="$(bash ./scripts/packaging/build-macos-dmg.sh "$stage" "$RUNNER_TEMP/packages" "$version" "$TARGET_ARCH")"
+          echo "dmg=$dmg" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Verify mounted image and app bundle copy
+        shell: bash
+        env:
+          DMG_PATH: ${{ steps.build.outputs.dmg }}
+          EXPECTED_VERSION: ${{ steps.build.outputs.version }}
+          TARGET_ARCH: ${{ matrix.architecture }}
+        run: |
+          bash ./scripts/packaging/test-macos-dmg.sh "$DMG_PATH" "$RUNNER_TEMP/stage" \
+            "$EXPECTED_VERSION" "$TARGET_ARCH" "$RUNNER_TEMP/dmg-acceptance"
+      - name: Upload image and verification evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-installer-${{ matrix.architecture }}
+          path: |
+            ${{ steps.build.outputs.dmg }}
+            ${{ runner.temp }}/dmg-acceptance/*.json
+            ${{ runner.temp }}/dmg-acceptance/*.log
+            ${{ runner.temp }}/dmg-acceptance/cli-version.txt
+          if-no-files-found: warn
+          retention-days: 7

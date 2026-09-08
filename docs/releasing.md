@@ -33,6 +33,7 @@ git push origin v0.2.0
 - Windows 與 Linux 套件包含桌面程式和 CLI；macOS 另外整理成 `.app`。
 - 建立 ZIP、tar.gz 與 `SHA256SUMS.txt`。
 - Windows 額外建立安裝程式，通過安裝、升級與移除驗收後才交給 Release job。建置方式與驗收範圍見 [Windows 安裝程式](windows-installer.md)。
+- macOS 另建 Intel 與 Apple Silicon 的 DMG，通過唯讀掛載、CLI 與 app bundle 複製比對後才發布，詳見 [macOS DMG](macos-dmg.md)。
 - 建立或更新同名 GitHub Release。
 
 Windows 與 macOS 產物目前沒有商業程式碼簽章，macOS 也沒有 Apple 公證。版本說明與套件內 README 都必須直接寫明，不可把這些產物稱為已簽章版本。

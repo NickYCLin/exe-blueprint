@@ -201,7 +201,7 @@
     "E-language, VB6 and Delphi to C# conversion",
     "Method-body reconstruction for C++, Rust and Go generators",
     "Behavioral comparison between original and reconstructed programs",
-    "macOS and Linux desktop installation integration"
+    "Linux desktop installation integration"
   ],
   "resultReading": {
     "firstFields": [

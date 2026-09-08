@@ -10,10 +10,12 @@ Windows
 
 macOS
 -----
-雙擊 ExeBlueprint.app 開啟圖形介面。
-這一版尚未經 Apple Developer 簽章與公證。第一次開啟若被擋住，請在 Finder 對
-ExeBlueprint.app 按右鍵，選「打開」，再確認一次。
-命令列版本是 exe-blueprint-cli。
+使用 DMG 時，將 ExeBlueprint.app 拖到同一個視窗的 Applications，再退出磁碟映像。
+從「應用程式」開啟 ExeBlueprint；ZIP 版也可先將 .app 複製到「應用程式」。
+更新前先結束程式，再用新版 .app 取代舊版。移除時將 .app 移到垃圾桶，分析結果仍會保留。
+這一版尚未經 Apple Developer 簽章與公證。首次開啟的系統提示與處理方式請參考 Apple：
+https://support.apple.com/zh-tw/102445
+命令列版本是 exe-blueprint-cli，可另外複製到自己的工具目錄。
 
 Linux
 -----
