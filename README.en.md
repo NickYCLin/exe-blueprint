@@ -110,7 +110,7 @@ dotnet run --project ./src/ExeBlueprint.Cli -- analyze ./App.dll --json-only
 dotnet run --project ./src/ExeBlueprint.Cli -- analyze ./Native.exe --native --ghidra ./ghidra
 ```
 
-If Ghidra is missing, other analysis continues and the native result records why it was skipped. Existing reports are preserved unless `--force` is supplied. Run `dotnet run --project ./src/ExeBlueprint.Cli -- --help` for all options.
+If Ghidra is missing, other analysis continues and the native result records why it was skipped. The exporter uses Jython; Ghidra 12.1.3 requires its bundled Jython extension. See [native acceptance](docs/native-acceptance.md) for setup and tested scope. Existing reports are preserved unless `--force` is supplied. Run `dotnet run --project ./src/ExeBlueprint.Cli -- --help` for all options.
 
 ## For AI and automation
 

@@ -113,7 +113,8 @@ internal static class NativeAnalyzer
 
             if (!File.Exists(outputPath))
             {
-                return Failure("Ghidra 執行成功但未產生 functions.json。");
+                var diagnostic = FormatDiagnostic(run.StandardErrorTail, run.StandardOutputTail);
+                return Failure($"Ghidra 已結束但未產生 functions.json{diagnostic}");
             }
 
             var json = await ReadOutputJsonAsync(outputPath, cancellationToken).ConfigureAwait(false);
@@ -375,12 +376,22 @@ internal static class NativeAnalyzer
 
     private static string FormatDiagnostic(string standardErrorTail, string standardOutputTail)
     {
-        var value = string.IsNullOrWhiteSpace(standardErrorTail)
-            ? standardOutputTail
-            : standardErrorTail;
+        const string scriptErrorMarker = "REPORT SCRIPT ERROR:";
+        var value = standardErrorTail.Contains(scriptErrorMarker, StringComparison.OrdinalIgnoreCase)
+            ? standardErrorTail
+            : standardOutputTail.Contains(scriptErrorMarker, StringComparison.OrdinalIgnoreCase)
+                ? standardOutputTail
+                : string.IsNullOrWhiteSpace(standardErrorTail) ? standardOutputTail : standardErrorTail;
         if (string.IsNullOrWhiteSpace(value))
         {
             return "。";
+        }
+
+        // headless 的 script 錯誤可能仍以 exit code 0 結束，後面還會接成功訊息與長 stack trace。
+        var scriptErrorIndex = value.IndexOf(scriptErrorMarker, StringComparison.OrdinalIgnoreCase);
+        if (scriptErrorIndex >= 0)
+        {
+            value = value[scriptErrorIndex..];
         }
 
         var sanitized = new string(value
@@ -392,7 +403,7 @@ internal static class NativeAnalyzer
             .Trim();
         if (sanitized.Length > MaxDiagnosticChars)
         {
-            sanitized = sanitized[^MaxDiagnosticChars..];
+            sanitized = scriptErrorIndex >= 0 ? sanitized[..MaxDiagnosticChars] : sanitized[^MaxDiagnosticChars..];
         }
 
         return string.IsNullOrWhiteSpace(sanitized) ? "。" : $"：{sanitized}";

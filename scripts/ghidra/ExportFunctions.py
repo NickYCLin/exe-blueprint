@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+#@runtime Jython
 # ExeBlueprint 的 Ghidra 後置腳本：匯出函式、靜態 CALL 與直接 tail call，不執行輸入程式。
 #
 # 用法（NativeAnalyzer 會自動帶入，也可手動執行）：

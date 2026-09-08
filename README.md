@@ -110,7 +110,7 @@ dotnet run --project ./src/ExeBlueprint.Cli -- analyze ./App.dll --json-only
 dotnet run --project ./src/ExeBlueprint.Cli -- analyze ./Native.exe --native --ghidra ./ghidra
 ```
 
-找不到 Ghidra 時，其他分析仍會繼續，原生分析會附上略過原因。輸出目錄已有報告時預設不覆寫；需要覆寫時加上 `--force`。完整參數可用 `dotnet run --project ./src/ExeBlueprint.Cli -- --help` 查看。
+找不到 Ghidra 時，其他分析仍會繼續，原生分析會附上略過原因。匯出腳本使用 Jython；Ghidra 12.1.3 需先安裝隨附的 Jython 擴充，步驟與實測範圍見[原生分析驗收](docs/native-acceptance.md)。輸出目錄已有報告時預設不覆寫；需要覆寫時加上 `--force`。完整參數可用 `dotnet run --project ./src/ExeBlueprint.Cli -- --help` 查看。
 
 ## 給 AI 或自動化工具
 

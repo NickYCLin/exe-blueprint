@@ -201,6 +201,32 @@ public sealed class NativeAnalyzerTests
         Assert.True(result.Note!.Length < 1_100);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PreservesScriptFailureWhenGhidraExitsZeroWithoutOutput(bool useStandardError)
+    {
+        await using var temp = new TemporaryDirectory();
+        await WriteLauncherAsync(temp.Path, "#!/bin/sh\nexit 0\n", "@exit /b 0\r\n");
+        var diagnostic = new string('x', 2_000)
+            + "\nREPORT SCRIPT ERROR: ExportFunctions.py : runtime-sentinel unavailable\u0000\n"
+            + new string('y', 2_000) + "\nImport succeeded";
+        var result = await NativeAnalyzer.AnalyzeAsync(
+            typeof(NativeAnalyzer).Assembly.Location,
+            CreateOptions(temp.Path),
+            (_, _) => Task.FromResult(new GhidraRunResult(
+                0, useStandardError ? string.Empty : diagnostic, useStandardError ? diagnostic : "JDK warning")),
+            CancellationToken.None);
+
+        Assert.Equal("none", result.Backend);
+        Assert.Null(result.CallGraph);
+        Assert.Contains("未產生 functions.json", result.Note);
+        Assert.Contains("runtime-sentinel unavailable", result.Note);
+        Assert.DoesNotContain("Import succeeded", result.Note);
+        Assert.DoesNotContain("\u0000", result.Note, StringComparison.Ordinal);
+        Assert.True(result.Note!.Length < 1_100);
+    }
+
     [Fact]
     public async Task ReportsMalformedAndOversizedOutputWithoutEscapingAnalyzer()
     {

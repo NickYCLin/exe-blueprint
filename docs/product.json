@@ -46,7 +46,7 @@
   "execution": {
     "runsInputApplication": false,
     "builtInAiModel": false,
-    "optionalAnalysisBackend": "Ghidra headless for native PE functions, static CALL references and direct tail calls",
+    "optionalAnalysisBackend": "Ghidra headless with the Jython runtime for native PE functions, static CALL references and direct tail calls",
     "missingOptionalBackend": "Continue other analysis and record why native analysis was skipped."
   },
   "outputs": [
@@ -168,7 +168,7 @@
     {
       "id": "native-call-graph",
       "status": "optional",
-      "verificationLimit": "Parser and exporter fixture tests are available; real Ghidra execution acceptance is still pending.",
+      "verificationLimit": "Parser/exporter fixture tests and a real Windows x64 Ghidra 12.1.3 run with its bundled Jython extension passed for the repository's MSVC fixture. Other Ghidra versions, platforms and calling-convention semantics require separate acceptance.",
       "summary": "Ghidra function inventory, static CALL references and unconditional direct tail calls with call sites, direct/indirect and tail-call flags.",
       "limitation": "Unresolved targets and truncation are recorded. Indirect runtime targets may be incomplete. Tail calls require a unique function-entry target outside the caller body with no fall-through; ABI and stack state are not verified. Conditional/indirect tail calls and native code reconstruction are not supported.",
       "sourcePaths": [
@@ -225,6 +225,7 @@
     "english": "README.en.md",
     "capabilities": "docs/capabilities.md",
     "architecture": "docs/architecture.md",
+    "nativeAcceptance": "docs/native-acceptance.md",
     "contributing": "CONTRIBUTING.md",
     "releasing": "docs/releasing.md"
   }
