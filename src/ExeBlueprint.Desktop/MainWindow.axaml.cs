@@ -11,17 +11,29 @@ namespace ExeBlueprint.Desktop;
 
 public sealed partial class MainWindow : Window
 {
-    private readonly BlueprintExportService _exportService = new();
-    private readonly RecentInputStore _recentInputStore = RecentInputStore.CreateDefault();
+    private readonly Func<BlueprintExportRequest, IProgress<BlueprintExportProgress>, CancellationToken, Task<BlueprintExportResult>> _runAnalysis;
+    private readonly RecentInputStore _recentInputStore;
+    private readonly string _outputBaseDirectory;
     private readonly List<string> _recentInputPaths = [];
     private CancellationTokenSource? _analysisCancellation;
     private string? _lastOutputDirectory;
+    private string? _lastReportPath;
     private bool _settingSuggestedOutput;
     private bool _outputWasEdited;
     private bool _inputDropZoneActive;
 
-    public MainWindow()
+    public MainWindow() : this(RecentInputStore.CreateDefault())
     {
+    }
+
+    internal MainWindow(
+        RecentInputStore recentInputStore,
+        Func<BlueprintExportRequest, IProgress<BlueprintExportProgress>, CancellationToken, Task<BlueprintExportResult>>? runAnalysis = null,
+        string? outputBaseDirectory = null)
+    {
+        _recentInputStore = recentInputStore;
+        _runAnalysis = runAnalysis ?? new BlueprintExportService().RunAsync;
+        _outputBaseDirectory = outputBaseDirectory ?? GetDefaultOutputBaseDirectory();
         InitializeComponent();
         var version = Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "0.2.0";
         VersionText.Text = $"桌面版 {version}";
@@ -31,13 +43,28 @@ public sealed partial class MainWindow : Window
         DragDrop.AddDragOverHandler(InputDropZone, OnInputDragOver);
         DragDrop.AddDropHandler(InputDropZone, OnInputDrop);
         LoadRecentInputs();
-        OutputPathBox.TextChanged += (_, _) =>
+        InputPathBox.PropertyChanged += (_, e) =>
         {
-            if (!_settingSuggestedOutput)
+            if (e.Property == TextBox.TextProperty)
+            {
+                OnInputPathChanged();
+            }
+        };
+        OutputPathBox.PropertyChanged += (_, e) =>
+        {
+            if (e.Property == TextBox.TextProperty && !_settingSuggestedOutput)
             {
                 _outputWasEdited = !string.IsNullOrWhiteSpace(OutputPathBox.Text);
             }
         };
+    }
+
+    private static string GetDefaultOutputBaseDirectory()
+    {
+        var documents = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+        return string.IsNullOrWhiteSpace(documents)
+            ? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
+            : documents;
     }
 
     private async void OnChooseFile(object? sender, RoutedEventArgs e)
@@ -91,9 +118,6 @@ public sealed partial class MainWindow : Window
         }
 
         SetInputPath(path);
-        StatusTitleText.Text = "已選擇最近使用項目";
-        StatusDetailText.Text = path;
-        SummaryText.IsVisible = false;
         RecentInputComboBox.SelectedIndex = -1;
     }
 
@@ -104,9 +128,6 @@ public sealed partial class MainWindow : Window
             _recentInputStore.Save([]);
             _recentInputPaths.Clear();
             RefreshRecentInputs();
-            StatusTitleText.Text = "已清除最近使用項目";
-            StatusDetailText.Text = "之後完成分析的來源會重新出現在這裡。";
-            SummaryText.IsVisible = false;
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or NotSupportedException)
         {
@@ -181,9 +202,6 @@ public sealed partial class MainWindow : Window
         }
 
         SetInputPath(selection.Path);
-        StatusTitleText.Text = "已選擇分析來源";
-        StatusDetailText.Text = selection.Path;
-        SummaryText.IsVisible = false;
         e.DragEffects = DragDropEffects.Copy;
     }
 
@@ -198,25 +216,48 @@ public sealed partial class MainWindow : Window
         }
 
         _inputDropZoneActive = active;
-        InputDropZone.Background = new SolidColorBrush(Color.Parse(active ? "#EFF6FF" : "#F8FAFC"));
-        InputDropZone.BorderBrush = new SolidColorBrush(Color.Parse(active ? "#2563EB" : "#CBD5E1"));
+        InputDropZone.Background = new SolidColorBrush(Color.Parse(active ? "#E4EBFF" : "#F3F6FF"));
+        InputDropZone.BorderBrush = new SolidColorBrush(Color.Parse(active ? "#3455C5" : "#B9C8EF"));
         InputDropTitleText.Foreground = new SolidColorBrush(Color.Parse(active ? "#1D4ED8" : "#334155"));
         InputDropTitleText.Text = active ? "放開即可選擇這個來源" : "把檔案或資料夾拖到這裡";
     }
 
-    private void OnInputPathChanged(object? sender, TextChangedEventArgs e)
+    private void OnInputPathChanged()
     {
-        if (_outputWasEdited || string.IsNullOrWhiteSpace(InputPathBox.Text))
+        ClearResult();
+        var hasInput = !string.IsNullOrWhiteSpace(InputPathBox.Text);
+        AnalyzeButton.IsEnabled = _analysisCancellation is null && hasInput;
+        SetStatus(hasInput ? "可以開始" : "尚未開始",
+            hasInput ? "準備好了" : "先選擇分析來源",
+            hasInput ? "確認儲存位置後，按下「開始分析」。" : "在左側選擇檔案、資料夾，或直接拖曳進來。");
+        EmptyResultHint.IsVisible = true;
+        if (_outputWasEdited)
         {
             return;
         }
 
+        SuggestOutput();
+    }
+
+    private void SuggestOutput()
+    {
         try
         {
             _settingSuggestedOutput = true;
-            OutputPathBox.Text = BlueprintExportService.CreateDefaultOutputDirectory(
-                InputPathBox.Text,
-                Environment.CurrentDirectory);
+            if (string.IsNullOrWhiteSpace(InputPathBox.Text))
+            {
+                OutputPathBox.Text = string.Empty;
+                return;
+            }
+
+            var suggested = BlueprintExportService.CreateDefaultOutputDirectory(InputPathBox.Text, _outputBaseDirectory);
+            var available = suggested;
+            for (var number = 2; Directory.Exists(available) || File.Exists(available); number++)
+            {
+                available = $"{suggested}-{number}";
+            }
+
+            OutputPathBox.Text = available;
         }
         catch (Exception exception) when (exception is ArgumentException or IOException or NotSupportedException)
         {
@@ -242,19 +283,32 @@ public sealed partial class MainWindow : Window
             return;
         }
 
-        _analysisCancellation = new CancellationTokenSource();
+        if (!_outputWasEdited)
+        {
+            SuggestOutput();
+        }
+
+        ClearResult();
+        var cancellation = new CancellationTokenSource();
+        _analysisCancellation = cancellation;
         SetBusy(true);
-        StatusTitleText.Text = "正在分析";
-        StatusDetailText.Text = "正在準備分析流程…";
-        SummaryText.IsVisible = false;
-        var progress = new Progress<BlueprintExportProgress>(value => StatusDetailText.Text = value.Message);
+        EmptyResultHint.IsVisible = false;
+        SetStatus("分析中", "正在整理程式資料", "檔案較多或啟用 Ghidra 時會需要一些時間。");
+        var progress = new Progress<BlueprintExportProgress>(value =>
+        {
+            if (ReferenceEquals(_analysisCancellation, cancellation) && !cancellation.IsCancellationRequested)
+            {
+                StatusDetailText.Text = value.Message;
+            }
+        });
 
         try
         {
-            var result = await _exportService.RunAsync(
+            var result = await _runAnalysis(
                 new BlueprintExportRequest
                 {
                     InputPath = inputPath,
+                    BaseDirectory = _outputBaseDirectory,
                     OutputDirectory = NullIfWhiteSpace(OutputPathBox.Text),
                     Overwrite = OverwriteCheckBox.IsChecked == true,
                     JsonOnly = ReportCheckBox.IsChecked != true,
@@ -266,14 +320,14 @@ public sealed partial class MainWindow : Window
                     GhidraInstallDir = NullIfWhiteSpace(GhidraPathBox.Text)
                 },
                 progress,
-                _analysisCancellation.Token);
+                cancellation.Token);
 
             _lastOutputDirectory = result.OutputDirectory;
-            OutputPathBox.Text = result.OutputDirectory;
-            StatusTitleText.Text = "分析完成";
-            StatusDetailText.Text = result.OutputDirectory;
-            SummaryText.Text = BuildSummary(result);
-            SummaryText.IsVisible = true;
+            _lastReportPath = ReportCheckBox.IsChecked == true ? Path.Combine(result.OutputDirectory, "REPORT.md") : null;
+            _settingSuggestedOutput = true;
+            try { OutputPathBox.Text = result.OutputDirectory; }
+            finally { _settingSuggestedOutput = false; }
+            ShowResult(result);
             OpenOutputButton.IsEnabled = true;
             if (!TryRememberRecentInput(inputPath))
             {
@@ -282,8 +336,7 @@ public sealed partial class MainWindow : Window
         }
         catch (OperationCanceledException)
         {
-            StatusTitleText.Text = "已取消分析";
-            StatusDetailText.Text = "已停止目前工作，先前完成的部分檔案可能仍留在輸出目錄。";
+            SetStatus("已取消", "分析已停止", "可以調整選項後再試一次。已產生的部分檔案可能仍留在儲存位置。");
         }
         catch (Exception exception) when (exception is ArgumentException or FileNotFoundException or InvalidDataException or IOException or UnauthorizedAccessException or NotSupportedException)
         {
@@ -291,7 +344,7 @@ public sealed partial class MainWindow : Window
         }
         finally
         {
-            _analysisCancellation.Dispose();
+            cancellation.Dispose();
             _analysisCancellation = null;
             SetBusy(false);
         }
@@ -299,8 +352,29 @@ public sealed partial class MainWindow : Window
 
     private void OnCancel(object? sender, RoutedEventArgs e)
     {
-        StatusDetailText.Text = "正在停止，請稍候…";
+        CancelButton.IsEnabled = false;
+        SetStatus("停止中", "正在取消分析", "正在停止，請稍候…");
         _analysisCancellation?.Cancel();
+    }
+
+    private void OnOpenReport(object? sender, RoutedEventArgs e)
+    {
+        if (_lastReportPath is null || !File.Exists(_lastReportPath))
+        {
+            SetStatus("找不到報告", "報告可能已被移動", "請開啟結果資料夾確認，或重新執行分析。", warning: true);
+            OpenReportButton.IsEnabled = false;
+            return;
+        }
+
+        try
+        {
+            Process.Start(new ProcessStartInfo { FileName = _lastReportPath, UseShellExecute = true });
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            SetStatus("無法開啟", "請從結果資料夾查看報告",
+                $"可用文字編輯器開啟 REPORT.md。{exception.Message}", warning: true);
+        }
     }
 
     private void OnOpenOutput(object? sender, RoutedEventArgs e)
@@ -388,6 +462,7 @@ public sealed partial class MainWindow : Window
 
     private void RefreshRecentInputs()
     {
+        RecentInputsExpander.IsVisible = _recentInputPaths.Count > 0;
         RecentInputComboBox.ItemsSource = _recentInputPaths.ToArray();
         RecentInputComboBox.IsEnabled = _analysisCancellation is null && _recentInputPaths.Count > 0;
         ClearRecentInputsButton.IsEnabled = _analysisCancellation is null && _recentInputPaths.Count > 0;
@@ -413,41 +488,71 @@ public sealed partial class MainWindow : Window
         GoCheckBox.IsEnabled = !busy;
         OverwriteCheckBox.IsEnabled = !busy;
         NativeCheckBox.IsEnabled = !busy;
-        AnalyzeButton.IsEnabled = !busy;
+        AnalyzeButton.IsEnabled = !busy && !string.IsNullOrWhiteSpace(InputPathBox.Text);
         AnalyzeButton.IsVisible = !busy;
-        OpenOutputButton.IsVisible = !busy;
+        OpenOutputButton.IsVisible = !busy && _lastOutputDirectory is not null;
+        OpenReportButton.IsVisible = !busy && _lastReportPath is not null;
+        OpenReportButton.IsEnabled = true;
         CancelButton.IsVisible = busy;
+        CancelButton.IsEnabled = busy;
         AnalysisProgressBar.IsVisible = busy;
     }
 
     private void ShowError(string message)
     {
-        StatusTitleText.Text = "無法完成分析";
-        StatusDetailText.Text = message;
-        SummaryText.IsVisible = false;
+        ClearResult();
+        EmptyResultHint.IsVisible = false;
+        SetStatus("需要處理", "這次未完成分析", message, warning: true);
     }
 
-    private static string BuildSummary(BlueprintExportResult result)
+    private void ClearResult()
+    {
+        _lastOutputDirectory = null;
+        _lastReportPath = null;
+        ResultStats.IsVisible = false;
+        SummaryText.IsVisible = false;
+        WarningsExpander.IsVisible = false;
+        WarningsList.ItemsSource = null;
+        WarningsMoreText.IsVisible = false;
+        ResultLocationPanel.IsVisible = false;
+        OpenOutputButton.IsVisible = false;
+        OpenReportButton.IsVisible = false;
+        AnalyzeButton.Content = "開始分析";
+    }
+
+    private void ShowResult(BlueprintExportResult result)
     {
         var document = result.Document;
-        var values = new List<string>
-        {
-            $"檔案 {document.Input.FileCount:N0}",
-            $"PE 執行檔 {document.Summary.ExecutableCount:N0}",
-            $"程式庫 {document.Summary.LibraryCount:N0}",
-            $"型別／方法 {document.Summary.TypeCount:N0}／{document.Summary.MethodCount:N0}"
-        };
-        if (result.Skeletons.Count > 0)
-        {
-            values.Add($"骨架 {string.Join("、", result.Skeletons.Select(item => item.Language))}");
-        }
+        var hasWarnings = document.Warnings.Count > 0;
+        SetStatus(hasWarnings ? "已完成 · 有注意事項" : "已完成", "分析結果已備妥",
+            hasWarnings ? "部分內容需要留意，請查看下方說明。"
+                : _lastReportPath is null ? "可開啟資料夾查看完整結果。" : "可閱讀報告，或開啟資料夾查看完整結果。",
+            warning: hasWarnings, success: !hasWarnings);
+        FileCountText.Text = document.Input.FileCount.ToString("N0");
+        TypeCountText.Text = document.Summary.TypeCount.ToString("N0");
+        MethodCountText.Text = document.Summary.MethodCount.ToString("N0");
+        WarningCountText.Text = document.Warnings.Count.ToString("N0");
+        ResultStats.IsVisible = true;
+        SummaryText.Text = result.Skeletons.Count > 0
+            ? $"已產生 {string.Join("、", result.Skeletons.Select(item => item.Language))} 程式骨架。"
+            : "這次未產生程式骨架，可先查看分析資料。";
+        SummaryText.IsVisible = true;
+        WarningsList.ItemsSource = document.Warnings.Take(100).ToArray();
+        WarningsMoreText.IsVisible = document.Warnings.Count > 100;
+        WarningsExpander.IsVisible = hasWarnings;
+        WarningsExpander.Header = $"查看 {document.Warnings.Count:N0} 項注意事項";
+        ResultLocationText.Text = result.OutputDirectory;
+        ResultLocationPanel.IsVisible = true;
+        AnalyzeButton.Content = "再次分析";
+    }
 
-        if (document.Warnings.Count > 0)
-        {
-            values.Add($"警告 {document.Warnings.Count:N0}（請查看報告）");
-        }
-
-        return string.Join("　｜　", values);
+    private void SetStatus(string badge, string title, string detail, bool warning = false, bool success = false)
+    {
+        StatusBadgeText.Text = badge;
+        StatusTitleText.Text = title;
+        StatusDetailText.Text = detail;
+        StatusBadge.Background = new SolidColorBrush(Color.Parse(warning ? "#FFF0D8" : success ? "#E5F4EC" : "#EEF2FF"));
+        StatusBadgeText.Foreground = new SolidColorBrush(Color.Parse(warning ? "#80510D" : success ? "#236444" : "#3455C5"));
     }
 
     private static string? NullIfWhiteSpace(string? value) =>

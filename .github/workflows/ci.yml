@@ -36,7 +36,18 @@ jobs:
         run: dotnet build ./ExeBlueprint.slnx -c Release --no-restore
 
       - name: Test
+        env:
+          EXEBLUEPRINT_UI_SCREENSHOTS: ${{ runner.temp }}/desktop-ui
         run: dotnet test ./ExeBlueprint.slnx -c Release --no-build
+
+      - name: Upload desktop screenshots
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: desktop-ui-${{ matrix.os }}
+          path: ${{ runner.temp }}/desktop-ui/*.png
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Test Ghidra exporter
         run: python -B -m unittest discover -s tests/ghidra -v

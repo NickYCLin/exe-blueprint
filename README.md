@@ -70,8 +70,8 @@ exe-blueprint-output/<輸入名稱>-<時間>/
 ### 桌面版
 
 1. 到 [Releases](https://github.com/NickYCLin/exe-blueprint/releases/latest) 下載對應平台的套件，依 `SHA256SUMS.txt` 核對後解壓縮。
-2. 開啟程式，選擇分析來源與輸出目錄；目前 `main` 也支援拖放與最近使用項目。
-3. 執行分析後，開啟輸出目錄中的 `REPORT.md` 或 `blueprint.json`。
+2. 選擇或拖入分析來源，確認儲存位置。第一次使用可保留預設選項；其他語言與 Ghidra 設定在進階選項。
+3. 開始分析後，右側會顯示進度、結果摘要與注意事項，再按「閱讀報告」或「開啟結果資料夾」。新版操作流程見[桌面版說明](docs/desktop-guide.md)，下載版請以該版本說明為準。
 
 `main` 已加入 [Windows 安裝程式](docs/windows-installer.md)的建置與驗收流程；`win-x64-setup.exe` 會從下一次版本發布起提供，ZIP 版仍保留。
 

@@ -1,302 +1,218 @@
 <Window xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         x:Class="ExeBlueprint.Desktop.MainWindow"
-        Title="ExeBlueprint"
-        Width="980"
-        Height="780"
-        MinWidth="760"
-        MinHeight="640"
-        Background="#F4F7FB"
+        Title="ExeBlueprint" Width="1120" Height="820" MinWidth="820" MinHeight="640"
+        RequestedThemeVariant="Light" Background="#F3F5F9" Foreground="#202C42"
         WindowStartupLocation="CenterScreen">
   <Window.Styles>
     <Style Selector="Border.card">
       <Setter Property="Background" Value="White" />
-      <Setter Property="BorderBrush" Value="#DCE4EE" />
+      <Setter Property="BorderBrush" Value="#DEE4EE" />
       <Setter Property="BorderThickness" Value="1" />
-      <Setter Property="CornerRadius" Value="14" />
+      <Setter Property="CornerRadius" Value="12" />
       <Setter Property="Padding" Value="22" />
     </Style>
     <Style Selector="TextBlock.sectionTitle">
-      <Setter Property="FontSize" Value="17" />
+      <Setter Property="FontSize" Value="18" />
       <Setter Property="FontWeight" Value="SemiBold" />
-      <Setter Property="Foreground" Value="#172033" />
+    </Style>
+    <Style Selector="TextBlock.hint">
+      <Setter Property="FontSize" Value="13" />
+      <Setter Property="Foreground" Value="#5D6B82" />
+      <Setter Property="TextWrapping" Value="Wrap" />
     </Style>
     <Style Selector="TextBlock.fieldLabel">
       <Setter Property="FontSize" Value="13" />
       <Setter Property="FontWeight" Value="SemiBold" />
-      <Setter Property="Foreground" Value="#3B4960" />
       <Setter Property="Margin" Value="0,0,0,7" />
     </Style>
-    <Style Selector="TextBlock.hint">
+    <Style Selector="TextBlock.step">
+      <Setter Property="Foreground" Value="#3858BA" />
+      <Setter Property="FontWeight" Value="Bold" />
       <Setter Property="FontSize" Value="12" />
-      <Setter Property="Foreground" Value="#64748B" />
-      <Setter Property="TextWrapping" Value="Wrap" />
-    </Style>
-    <Style Selector="Border.dropZone">
-      <Setter Property="Background" Value="#F8FAFC" />
-      <Setter Property="BorderBrush" Value="#CBD5E1" />
-      <Setter Property="BorderThickness" Value="1" />
-      <Setter Property="CornerRadius" Value="10" />
-      <Setter Property="Padding" Value="14" />
     </Style>
     <Style Selector="Button">
-      <Setter Property="MinHeight" Value="38" />
-      <Setter Property="Padding" Value="16,8" />
-      <Setter Property="CornerRadius" Value="8" />
+      <Setter Property="MinHeight" Value="40" />
+      <Setter Property="Padding" Value="14,9" />
+      <Setter Property="CornerRadius" Value="7" />
+      <Setter Property="HorizontalContentAlignment" Value="Center" />
     </Style>
     <Style Selector="Button.primary">
-      <Setter Property="Background" Value="#2563EB" />
+      <Setter Property="Background" Value="#3455C5" />
       <Setter Property="Foreground" Value="White" />
       <Setter Property="FontWeight" Value="SemiBold" />
-      <Setter Property="Padding" Value="24,10" />
     </Style>
     <Style Selector="Button.primary:pointerover /template/ ContentPresenter">
-      <Setter Property="Background" Value="#1D4ED8" />
+      <Setter Property="Background" Value="#2846AB" />
     </Style>
     <Style Selector="TextBox">
       <Setter Property="MinHeight" Value="40" />
-      <Setter Property="CornerRadius" Value="8" />
+      <Setter Property="CornerRadius" Value="7" />
+      <Setter Property="FontSize" Value="13" />
     </Style>
     <Style Selector="ComboBox">
       <Setter Property="MinHeight" Value="40" />
-      <Setter Property="CornerRadius" Value="8" />
+      <Setter Property="HorizontalAlignment" Value="Stretch" />
     </Style>
-    <Style Selector="CheckBox">
-      <Setter Property="MinHeight" Value="30" />
-      <Setter Property="VerticalContentAlignment" Value="Center" />
+    <Style Selector="Expander">
+      <Setter Property="HorizontalAlignment" Value="Stretch" />
+      <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+    </Style>
+    <Style Selector="CheckBox"><Setter Property="MinHeight" Value="32" /></Style>
+    <Style Selector="Border.stat">
+      <Setter Property="Background" Value="#F3F5FA" />
+      <Setter Property="CornerRadius" Value="8" />
+      <Setter Property="Padding" Value="14,12" />
+    </Style>
+    <Style Selector="TextBlock.statValue">
+      <Setter Property="FontSize" Value="23" />
+      <Setter Property="FontWeight" Value="SemiBold" />
     </Style>
   </Window.Styles>
-
   <Grid RowDefinitions="Auto,*,Auto">
-    <Border Grid.Row="0" Background="#111827" Padding="30,24">
-      <Grid ColumnDefinitions="*,Auto">
-        <StackPanel Spacing="5">
-          <TextBlock Text="ExeBlueprint"
-                     FontSize="27"
-                     FontWeight="Bold"
-                     Foreground="White" />
-          <TextBlock Text="把 EXE、DLL、資料夾、ZIP 或 ASAR 整理成可重建的程式藍圖"
-                     FontSize="14"
-                     Foreground="#C7D2E4" />
+    <Border Background="White" BorderBrush="#DEE4EE" BorderThickness="0,0,0,1" Padding="26,18">
+      <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="14">
+        <Border Background="#3455C5" CornerRadius="10" Width="42" Height="42">
+          <TextBlock Text="EB" FontWeight="Bold" FontSize="18" Foreground="White" HorizontalAlignment="Center" VerticalAlignment="Center" />
+        </Border>
+        <StackPanel Grid.Column="1" Spacing="2">
+          <TextBlock Text="ExeBlueprint" FontSize="21" FontWeight="Bold" />
+          <TextBlock Classes="hint" Text="看懂程式結構，整理重建線索" />
         </StackPanel>
-        <Border Grid.Column="1"
-                Background="#253149"
-                CornerRadius="16"
-                Padding="12,6"
-                VerticalAlignment="Center">
-          <TextBlock x:Name="VersionText"
-                     Text="桌面版"
-                     FontSize="12"
-                     FontWeight="SemiBold"
-                     Foreground="#DCE8FF" />
-        </Border>
+        <TextBlock x:Name="VersionText" Grid.Column="2" Classes="hint" VerticalAlignment="Center" />
       </Grid>
     </Border>
-
-    <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
-      <StackPanel Margin="30,26" Spacing="18">
-        <Border Classes="card">
-          <StackPanel Spacing="18">
-            <StackPanel Spacing="4">
-              <TextBlock Classes="sectionTitle" Text="1. 選擇分析來源" />
-              <TextBlock Classes="hint"
-                         Text="程式只做靜態分析，不會執行你選擇的程式或封存內容。" />
-            </StackPanel>
-
-            <Border x:Name="InputDropZone" Classes="dropZone">
-              <Grid ColumnDefinitions="Auto,*" ColumnSpacing="12">
-                <Border Width="36"
-                        Height="36"
-                        Background="#E8F0FF"
-                        CornerRadius="18">
-                  <TextBlock Text="↓"
-                             FontSize="20"
-                             FontWeight="Bold"
-                             Foreground="#2563EB"
-                             HorizontalAlignment="Center"
-                             VerticalAlignment="Center" />
-                </Border>
-                <StackPanel Grid.Column="1" Spacing="3" VerticalAlignment="Center">
-                  <TextBlock x:Name="InputDropTitleText"
-                             Text="把檔案或資料夾拖到這裡"
-                             FontSize="14"
-                             FontWeight="SemiBold"
-                             Foreground="#334155" />
-                  <TextBlock Classes="hint"
-                             Text="一次接受一個 EXE、DLL、ZIP、ASAR 或資料夾" />
+    <Grid Grid.Row="1" ColumnDefinitions="*,310" ColumnSpacing="20" Margin="24,22,24,16">
+      <ScrollViewer x:Name="SetupScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+        <StackPanel x:Name="SetupPanel" Spacing="16" Margin="0,0,4,0">
+          <Border Classes="card">
+            <StackPanel Spacing="14">
+              <StackPanel Spacing="4">
+                <TextBlock Classes="step" Text="步驟 1" />
+                <TextBlock Classes="sectionTitle" Text="選擇要分析的程式" />
+              </StackPanel>
+              <Border x:Name="InputDropZone" Background="#F3F6FF" BorderBrush="#B9C8EF" BorderThickness="1" CornerRadius="9" Padding="18,16">
+                <StackPanel Spacing="12">
+                  <TextBlock x:Name="InputDropTitleText" Text="把檔案或資料夾拖到這裡" FontWeight="SemiBold" Foreground="#334155" TextWrapping="Wrap" />
+                  <TextBlock Classes="hint" Text="支援 EXE、DLL、ZIP、ASAR 或整個程式資料夾" />
+                  <WrapPanel>
+                    <Button x:Name="ChooseFileButton" Content="選擇檔案" Click="OnChooseFile" Margin="0,0,8,0" />
+                    <Button x:Name="ChooseFolderButton" Content="選擇資料夾" Click="OnChooseFolder" />
+                  </WrapPanel>
                 </StackPanel>
-              </Grid>
-            </Border>
-
-            <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="10">
-              <StackPanel>
-                <TextBlock Classes="fieldLabel" Text="檔案、資料夾、ZIP 或 ASAR" />
-                <TextBox x:Name="InputPathBox"
-                         PlaceholderText="例如 C:\Apps\MyProgram、app.asar 或 /opt/my-program"
-                         TextChanged="OnInputPathChanged" />
-              </StackPanel>
-              <Button x:Name="ChooseFileButton"
-                      Grid.Column="1"
-                      Margin="0,27,0,0"
-                      Content="選擇檔案"
-                      Click="OnChooseFile" />
-              <Button x:Name="ChooseFolderButton"
-                      Grid.Column="2"
-                      Margin="0,27,0,0"
-                      Content="選擇資料夾"
-                      Click="OnChooseFolder" />
-            </Grid>
-
-            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10">
-              <StackPanel>
-                <TextBlock Classes="fieldLabel" Text="最近使用的分析來源" />
-                <ComboBox x:Name="RecentInputComboBox"
-                          PlaceholderText="尚無最近使用項目"
-                          SelectionChanged="OnRecentInputSelected" />
-              </StackPanel>
-              <Button x:Name="ClearRecentInputsButton"
-                      Grid.Column="1"
-                      Margin="0,27,0,0"
-                      IsEnabled="False"
-                      Content="清除紀錄"
-                      Click="OnClearRecentInputs" />
-            </Grid>
-
-            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10">
-              <StackPanel>
-                <TextBlock Classes="fieldLabel" Text="輸出位置" />
-                <TextBox x:Name="OutputPathBox"
-                         PlaceholderText="未指定時會建立 exe-blueprint-output 資料夾" />
-              </StackPanel>
-              <Button x:Name="ChooseOutputButton"
-                      Grid.Column="1"
-                      Margin="0,27,0,0"
-                      Content="選擇位置"
-                      Click="OnChooseOutput" />
-            </Grid>
-          </StackPanel>
-        </Border>
-
-        <Border Classes="card">
-          <StackPanel Spacing="16">
-            <StackPanel Spacing="4">
-              <TextBlock Classes="sectionTitle" Text="2. 選擇輸出內容" />
-              <TextBlock Classes="hint"
-                         Text="blueprint.json 一定會產生；其他項目可以依需求勾選。" />
+              </Border>
+              <TextBox x:Name="InputPathBox" PlaceholderText="也可以在這裡貼上檔案或資料夾路徑"
+                       AutomationProperties.Name="分析來源路徑" />
+              <Expander x:Name="RecentInputsExpander" Header="最近分析過的來源" IsVisible="False">
+                <StackPanel Spacing="8" Margin="0,10,0,0">
+                  <ComboBox x:Name="RecentInputComboBox" PlaceholderText="選擇最近使用的來源"
+                            AutomationProperties.Name="最近使用的分析來源" SelectionChanged="OnRecentInputSelected" />
+                  <Button x:Name="ClearRecentInputsButton" IsEnabled="False" Content="清除紀錄" Click="OnClearRecentInputs" HorizontalAlignment="Right" />
+                </StackPanel>
+              </Expander>
             </StackPanel>
-
-            <Grid ColumnDefinitions="*,*" RowDefinitions="Auto,Auto,Auto" ColumnSpacing="22" RowSpacing="8">
-              <CheckBox x:Name="ReportCheckBox"
-                        IsChecked="True"
-                        Content="繁體中文閱讀報告（REPORT.md）" />
-              <CheckBox x:Name="CSharpCheckBox"
-                        Grid.Column="1"
-                        IsChecked="True"
-                        Content="C# 專案與方法骨架" />
-              <CheckBox x:Name="CppCheckBox"
-                        Grid.Row="1"
-                        Content="C++ 型別與方法簽章" />
-              <CheckBox x:Name="RustCheckBox"
-                        Grid.Row="1"
-                        Grid.Column="1"
-                        Content="Rust 型別與方法簽章" />
-              <CheckBox x:Name="GoCheckBox"
-                        Grid.Row="2"
-                        Content="Go 型別與方法簽章" />
-              <CheckBox x:Name="OverwriteCheckBox"
-                        Grid.Row="2"
-                        Grid.Column="1"
-                        Content="允許覆寫既有分析結果" />
-            </Grid>
-
-            <Expander Header="原生程式進階分析（Ghidra）">
-              <StackPanel Margin="0,12,0,0" Spacing="12">
-                <CheckBox x:Name="NativeCheckBox"
-                          Content="使用 Ghidra headless 讀取原生 PE 函式" />
-                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10">
-                  <StackPanel>
-                    <TextBlock Classes="fieldLabel" Text="Ghidra 安裝目錄（選填）" />
-                    <TextBox x:Name="GhidraPathBox"
-                             PlaceholderText="留白時改讀 GHIDRA_INSTALL_DIR" />
-                  </StackPanel>
-                  <Button x:Name="ChooseGhidraButton"
-                          Grid.Column="1"
-                          Margin="0,27,0,0"
-                          Content="選擇目錄"
-                          Click="OnChooseGhidra" />
+          </Border>
+          <Border Classes="card">
+            <StackPanel Spacing="14">
+              <StackPanel Spacing="4">
+                <TextBlock Classes="step" Text="步驟 2" />
+                <TextBlock Classes="sectionTitle" Text="設定分析結果" />
+                <TextBlock Classes="hint" Text="第一次使用可保留預設選項，直接開始分析。" />
+              </StackPanel>
+              <StackPanel>
+                <TextBlock Classes="fieldLabel" Text="儲存位置" />
+                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                  <TextBox x:Name="OutputPathBox" PlaceholderText="選擇來源後，自動建立結果資料夾" AutomationProperties.Name="結果儲存位置" />
+                  <Button x:Name="ChooseOutputButton" Grid.Column="1" Content="變更" Click="OnChooseOutput" AutomationProperties.Name="變更結果儲存位置" />
                 </Grid>
-                <TextBlock Classes="hint"
-                           Text="沒有安裝 Ghidra 也能分析；程式會略過原生函式並在報告中註記。" />
               </StackPanel>
-            </Expander>
-          </StackPanel>
-        </Border>
-
-        <Border Classes="card">
-          <Grid ColumnDefinitions="Auto,*" ColumnSpacing="16">
-            <Border Width="42"
-                    Height="42"
-                    Background="#E8F0FF"
-                    CornerRadius="21"
-                    VerticalAlignment="Top">
-              <TextBlock Text="i"
-                         FontSize="20"
-                         FontWeight="Bold"
-                         Foreground="#2563EB"
-                         HorizontalAlignment="Center"
-                         VerticalAlignment="Center" />
-            </Border>
-            <StackPanel Grid.Column="1" Spacing="5">
-              <TextBlock x:Name="StatusTitleText"
-                         FontSize="16"
-                         FontWeight="SemiBold"
-                         Foreground="#172033"
-                         Text="準備好了" />
-              <TextBlock x:Name="StatusDetailText"
-                         Classes="hint"
-                         Text="選擇要分析的內容後，按右下角的「開始分析」。" />
-              <ProgressBar x:Name="AnalysisProgressBar"
-                           IsVisible="False"
-                           IsIndeterminate="True"
-                           Height="5"
-                           Margin="0,8,0,0" />
-              <TextBlock x:Name="SummaryText"
-                         IsVisible="False"
-                         Margin="0,7,0,0"
-                         TextWrapping="Wrap"
-                         Foreground="#334155" />
+              <StackPanel Spacing="2">
+                <CheckBox x:Name="ReportCheckBox" IsChecked="True" Content="閱讀報告（繁體中文）" />
+                <CheckBox x:Name="CSharpCheckBox" IsChecked="True" Content="C# 重建專案與程式骨架" />
+                <TextBlock Classes="hint" Text="另會保留 blueprint.json，方便交給其他工具接續處理。" />
+              </StackPanel>
+              <Expander x:Name="AdvancedExpander" Header="進階選項">
+                <StackPanel Spacing="12" Margin="0,12,0,0">
+                  <TextBlock Classes="fieldLabel" Text="其他語言的程式骨架" />
+                  <WrapPanel>
+                    <CheckBox x:Name="CppCheckBox" Content="C++" Margin="0,0,18,0" />
+                    <CheckBox x:Name="RustCheckBox" Content="Rust" Margin="0,0,18,0" />
+                    <CheckBox x:Name="GoCheckBox" Content="Go" />
+                  </WrapPanel>
+                  <TextBlock Classes="hint" Text="C++、Rust、Go 目前提供型別與方法簽章，尚未還原方法內容。" />
+                  <Separator />
+                  <CheckBox x:Name="NativeCheckBox" Content="使用 Ghidra 深入分析原生程式" />
+                  <TextBlock Classes="hint" Text="適合 C／C++ 等原生 PE。需另備 Ghidra、Java 和 Jython；未設定時仍會完成基本分析。" />
+                  <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                    <TextBox x:Name="GhidraPathBox" PlaceholderText="Ghidra 目錄（可留白讀取環境設定）" AutomationProperties.Name="Ghidra 安裝目錄" />
+                    <Button x:Name="ChooseGhidraButton" Grid.Column="1" Content="選擇" Click="OnChooseGhidra" AutomationProperties.Name="選擇 Ghidra 安裝目錄" />
+                  </Grid>
+                  <Separator />
+                  <CheckBox x:Name="OverwriteCheckBox" Content="覆寫這個位置已有的分析結果" />
+                  <TextBlock Classes="hint" Text="預設保留既有結果。重新分析時，也可以變更儲存位置。" />
+                </StackPanel>
+              </Expander>
             </StackPanel>
-          </Grid>
-        </Border>
-      </StackPanel>
-    </ScrollViewer>
-
-    <Border Grid.Row="2"
-            Background="White"
-            BorderBrush="#DCE4EE"
-            BorderThickness="0,1,0,0"
-            Padding="30,16">
-      <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="10">
-        <TextBlock VerticalAlignment="Center"
-                   FontSize="12"
-                   Foreground="#64748B"
-                   Text="支援 Windows、macOS 與 Linux 桌面環境" />
-        <Button x:Name="OpenOutputButton"
-                Grid.Column="1"
-                IsEnabled="False"
-                Content="開啟結果"
-                Click="OnOpenOutput" />
-        <Button x:Name="CancelButton"
-                Grid.Column="1"
-                IsVisible="False"
-                Content="取消"
-                Click="OnCancel" />
-        <Button x:Name="AnalyzeButton"
-                Grid.Column="2"
-                Classes="primary"
-                Content="開始分析"
-                Click="OnAnalyze" />
-      </Grid>
-    </Border>
+          </Border>
+        </StackPanel>
+      </ScrollViewer>
+      <Border Grid.Column="1" Classes="card" Padding="20">
+        <Grid RowDefinitions="Auto,*,Auto" RowSpacing="18">
+          <StackPanel Spacing="12">
+            <TextBlock Classes="step" Text="步驟 3 · 分析與查看結果" />
+            <Border x:Name="StatusBadge" Background="#EEF2FF" CornerRadius="6" Padding="10,5" HorizontalAlignment="Left">
+              <TextBlock x:Name="StatusBadgeText" Text="尚未開始" Foreground="#3455C5" FontSize="12" FontWeight="SemiBold" />
+            </Border>
+            <TextBlock x:Name="StatusTitleText" Text="先選擇分析來源" FontSize="20" FontWeight="SemiBold" TextWrapping="Wrap" />
+            <ProgressBar x:Name="AnalysisProgressBar" IsVisible="False" IsIndeterminate="True" Height="4" />
+          </StackPanel>
+          <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+            <StackPanel Spacing="16">
+              <TextBlock x:Name="StatusDetailText" Classes="hint" Text="選好左側的檔案或資料夾後，就能開始。分析完成後，這裡會顯示摘要與需要留意的項目。" />
+              <Border x:Name="EmptyResultHint" Background="#F5F7FB" CornerRadius="8" Padding="16">
+                <StackPanel Spacing="10">
+                  <TextBlock Text="你會得到什麼？" FontWeight="SemiBold" />
+                  <TextBlock Classes="hint" Text="程式使用的技術與相依套件" />
+                  <TextBlock Classes="hint" Text="型別、方法與可讀取的資源" />
+                  <TextBlock Classes="hint" Text="可接續重建的程式骨架" />
+                </StackPanel>
+              </Border>
+              <Grid x:Name="ResultStats" IsVisible="False" ColumnDefinitions="*,*" RowDefinitions="Auto,Auto" ColumnSpacing="8" RowSpacing="8">
+                <Border Classes="stat"><StackPanel><TextBlock x:Name="FileCountText" Classes="statValue" /><TextBlock Classes="hint" Text="檔案" /></StackPanel></Border>
+                <Border Grid.Column="1" Classes="stat"><StackPanel><TextBlock x:Name="TypeCountText" Classes="statValue" /><TextBlock Classes="hint" Text="型別" /></StackPanel></Border>
+                <Border Grid.Row="1" Classes="stat"><StackPanel><TextBlock x:Name="MethodCountText" Classes="statValue" /><TextBlock Classes="hint" Text="方法" /></StackPanel></Border>
+                <Border Grid.Row="1" Grid.Column="1" Classes="stat"><StackPanel><TextBlock x:Name="WarningCountText" Classes="statValue" /><TextBlock Classes="hint" Text="注意事項" /></StackPanel></Border>
+              </Grid>
+              <TextBlock x:Name="SummaryText" IsVisible="False" Classes="hint" />
+              <Expander x:Name="WarningsExpander" Header="查看注意事項" IsVisible="False" IsExpanded="True">
+                <ItemsControl x:Name="WarningsList" Margin="0,8,0,0">
+                  <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="x:String">
+                      <Border Background="#FFF6E8" CornerRadius="6" Padding="10" Margin="0,0,0,8">
+                        <TextBlock Text="{Binding}" Foreground="#80510D" FontSize="12" TextWrapping="Wrap" />
+                      </Border>
+                    </DataTemplate>
+                  </ItemsControl.ItemTemplate>
+                </ItemsControl>
+              </Expander>
+              <TextBlock x:Name="WarningsMoreText" Classes="hint" IsVisible="False"
+                         Text="畫面列出前 100 項，其餘可在 blueprint.json 的 warnings 欄位查看。" />
+              <StackPanel x:Name="ResultLocationPanel" IsVisible="False" Spacing="6">
+                <TextBlock Classes="fieldLabel" Text="結果儲存於" />
+                <SelectableTextBlock x:Name="ResultLocationText" FontSize="12" Foreground="#5D6B82" TextWrapping="Wrap" />
+              </StackPanel>
+            </StackPanel>
+          </ScrollViewer>
+          <StackPanel Grid.Row="2" Spacing="10">
+            <Button x:Name="OpenReportButton" IsVisible="False" Content="閱讀報告" Click="OnOpenReport" HorizontalAlignment="Stretch" />
+            <Button x:Name="OpenOutputButton" IsVisible="False" IsEnabled="False" Content="開啟結果資料夾" Click="OnOpenOutput" HorizontalAlignment="Stretch" />
+            <Button x:Name="CancelButton" IsVisible="False" Content="取消分析" Click="OnCancel" HorizontalAlignment="Stretch" />
+            <Button x:Name="AnalyzeButton" Classes="primary" Content="開始分析" Click="OnAnalyze" IsEnabled="False" HorizontalAlignment="Stretch" MinHeight="46" />
+          </StackPanel>
+        </Grid>
+      </Border>
+    </Grid>
+    <TextBlock Grid.Row="2" Classes="hint" Margin="26,0,26,14" FontSize="12"
+               Text="僅讀取檔案進行靜態分析，不會執行你選擇的程式。重建結果仍需人工確認與補齊。" />
   </Grid>
 </Window>
