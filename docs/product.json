@@ -179,10 +179,18 @@
     {
       "id": "desktop-input",
       "status": "available",
-      "summary": "File/folder selection, drag and drop, recent successful inputs, progress and cancellation.",
+      "summary": "Three-step desktop workflow with file/folder selection, drag and drop, recent successful inputs, persistent progress/actions, result counts, inline warnings, report opening and cancellation.",
       "sourcePaths": [
-        "src/ExeBlueprint.Desktop/MainWindow.axaml.cs"
+        "src/ExeBlueprint.Desktop/MainWindow.axaml.cs",
+        "src/ExeBlueprint.Desktop/MainWindow.axaml"
       ]
+    },
+    {
+      "id": "windows-installer",
+      "status": "available",
+      "summary": "Per-user Windows x64 installer with Traditional Chinese and English, Start Menu integration and uninstall; available from the next release.",
+      "verificationLimit": "GitHub Windows runner verified install, simulated 0.0.0 upgrade, payload hashes, installed CLI version, uninstall and preservation of user-added files. Unsigned.",
+      "sourcePaths": ["packaging/windows/ExeBlueprint.iss", "scripts/packaging/Test-WindowsInstaller.ps1"]
     }
   ],
   "planned": [
@@ -193,7 +201,7 @@
     "E-language, VB6 and Delphi to C# conversion",
     "Method-body reconstruction for C++, Rust and Go generators",
     "Behavioral comparison between original and reconstructed programs",
-    "Desktop installers"
+    "macOS and Linux desktop installation integration"
   ],
   "resultReading": {
     "firstFields": [

@@ -6,6 +6,8 @@
 
 ## 目前能做什麼
 
+- 桌面版依選來源、設定結果、分析與查看結果分成三步；進度與結果固定顯示，支援拖放、最近來源、取消、直接查看注意事項與開啟報告。詳細操作見[桌面版說明](desktop-guide.md)。
+
 - 分析單一檔案、完整資料夾、ZIP 或 Electron ASAR；資料夾與 ZIP 內的 ASAR、以及有上限的巢狀 ASAR 也會展開；若直接輸入 .NET apphost，偵測到同名 DLL 與 `.runtimeconfig.json` 時會一併分析該受管 DLL
 - 計算每個檔案的 SHA-256
 - 讀取 PE 架構、子系統、section 與簽章資料
