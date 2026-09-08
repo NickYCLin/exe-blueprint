@@ -2,6 +2,7 @@ ExeBlueprint 桌面版
 ===================
 
 這個套件同時放了圖形介面與命令列版本，不需要另外安裝 .NET。
+桌面版隨附 Noto Sans TC 中文字型；來源與授權在桌面程式旁的 Assets/Fonts 目錄。
 
 Windows
 -------

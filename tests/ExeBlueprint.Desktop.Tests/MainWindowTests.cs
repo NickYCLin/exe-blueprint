@@ -4,6 +4,7 @@ using Avalonia.Controls;
 using Avalonia.Headless;
 using Avalonia.Input;
 using Avalonia.Interactivity;
+using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using Avalonia.Threading;
 using ExeBlueprint.Application;
@@ -14,7 +15,7 @@ namespace ExeBlueprint.Desktop.Tests;
 public sealed class DesktopTestApp
 {
     public static AppBuilder BuildAvaloniaApp() => AppBuilder.Configure<App>()
-        .WithInterFont()
+        .WithDesktopFonts()
         .UseSkia()
         .UseHeadless(new AvaloniaHeadlessPlatformOptions { UseHeadlessDrawing = false });
 }
@@ -31,6 +32,28 @@ public sealed class MainWindowTests(DesktopTestSession desktopSession) : IDispos
 {
     private readonly string _temporaryDirectory = Path.Combine(
         Path.GetTempPath(), "ExeBlueprint.Desktop.Tests", Guid.NewGuid().ToString("N"));
+
+    [Fact]
+    public async Task ChineseLabelsUseEmbeddedFontWhenThePrimaryFontLacksGlyphs()
+    {
+        await desktopSession.Session.Dispatch(() =>
+        {
+            var embeddedFamily = new FontFamily(DesktopFonts.ChineseFontFamily);
+            var primaryFamily = new FontFamily("fonts:Inter#Inter");
+            foreach (var weight in new[] { FontWeight.Normal, FontWeight.SemiBold, FontWeight.Bold })
+            {
+                foreach (var character in "選擇要分析的程式儲存位置進階選項閱讀報告取消注意事項資料夾（）／，。")
+                {
+                    var glyphs = new Typeface(embeddedFamily, weight: weight).GlyphTypeface;
+                    Assert.NotEqual(0, glyphs.CharacterToGlyphMap.GetGlyph(character));
+                    Assert.True(FontManager.Current.TryMatchCharacter(character, FontStyle.Normal,
+                        weight, FontStretch.Normal, primaryFamily, null, out var matched));
+                    Assert.Equal(embeddedFamily.ToString(), matched.FontFamily.ToString(), ignoreCase: true);
+                    Assert.NotEqual(0, matched.GlyphTypeface.CharacterToGlyphMap.GetGlyph(character));
+                }
+            }
+        }, TestContextToken);
+    }
 
     [Fact]
     public async Task InputChangesUpdateSuggestedOutputAndKeepCustomLocation()

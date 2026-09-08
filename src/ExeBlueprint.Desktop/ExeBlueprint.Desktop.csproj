@@ -16,4 +16,9 @@
   <ItemGroup>
     <ProjectReference Include="..\ExeBlueprint.Core\ExeBlueprint.Core.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <AvaloniaResource Include="Assets/Fonts/*.otf" />
+    <None Update="Assets/Fonts/OFL.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <None Update="Assets/Fonts/README.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
 </Project>

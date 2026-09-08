@@ -2,6 +2,8 @@
 
 目前 main 的介面分成三個步驟。設定在左側，分析進度和結果固定顯示在右側；縮小視窗時，設定與結果內容各自捲動，主要按鈕仍可操作。
 
+桌面版隨附 Noto Sans TC，未安裝中文字型的 Linux 環境也能顯示繁體中文介面，不需要啟動時下載字型。字型來源與授權見[隨附字型說明](../src/ExeBlueprint.Desktop/Assets/Fonts/README.md)。
+
 ![桌面版的三步驟操作介面](images/desktop-workflow.png)
 
 ## 第一次分析
