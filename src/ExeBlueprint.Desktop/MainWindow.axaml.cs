@@ -21,6 +21,7 @@ public sealed partial class MainWindow : Window
     private bool _settingSuggestedOutput;
     private bool _outputWasEdited;
     private bool _inputDropZoneActive;
+    private bool _closeAfterAnalysis;
 
     public MainWindow() : this(RecentInputStore.CreateDefault())
     {
@@ -348,10 +349,16 @@ public sealed partial class MainWindow : Window
             cancellation.Dispose();
             _analysisCancellation = null;
             SetBusy(false);
+            if (_closeAfterAnalysis)
+            {
+                Close();
+            }
         }
     }
 
-    private void OnCancel(object? sender, RoutedEventArgs e)
+    private void OnCancel(object? sender, RoutedEventArgs e) => RequestCancellation();
+
+    private void RequestCancellation()
     {
         CancelButton.IsEnabled = false;
         SetStatus("停止中", "正在取消分析", "正在停止，請稍候…");
@@ -569,7 +576,15 @@ public sealed partial class MainWindow : Window
 
     protected override void OnClosing(WindowClosingEventArgs e)
     {
-        _analysisCancellation?.Cancel();
         base.OnClosing(e);
+        if (e.Cancel || _analysisCancellation is null)
+        {
+            return;
+        }
+
+        e.Cancel = true;
+        _closeAfterAnalysis = true;
+        RequestCancellation();
+        StatusDetailText.Text = "正在停止分析，清理完成後會自動關閉視窗。";
     }
 }

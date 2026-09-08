@@ -202,6 +202,59 @@ public sealed class MainWindowTests(DesktopTestSession desktopSession) : IDispos
     }
 
     [Fact]
+    public async Task ClosingDuringAnalysisWaitsForCancellationCleanup()
+    {
+        await desktopSession.Session.Dispatch(async () =>
+        {
+            var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var cleanupStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseCleanup = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var cleanupFinished = false;
+            var windowClosed = false;
+            var window = CreateWindow(async (_, _, token) =>
+            {
+                entered.SetResult();
+                try { await Task.Delay(Timeout.Infinite, token); }
+                finally
+                {
+                    cleanupStarted.SetResult();
+                    await releaseCleanup.Task;
+                    cleanupFinished = true;
+                }
+
+                throw new InvalidOperationException("Unreachable");
+            });
+            window.Closed += (_, _) => windowClosed = true;
+            try
+            {
+                Input(window).Text = Path.Combine(_temporaryDirectory, "example.exe");
+                Click(window, "AnalyzeButton");
+                await entered.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                window.Close();
+                await cleanupStarted.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                Assert.True(window.IsVisible);
+                Assert.False(windowClosed);
+                Assert.False(Control<Button>(window, "CancelButton").IsEnabled);
+                Assert.Contains("清理完成後", Control<TextBlock>(window, "StatusDetailText").Text);
+                window.Close();
+                Assert.False(windowClosed);
+                Capture(window, "closing");
+                releaseCleanup.SetResult();
+                await WaitUntil(() => windowClosed);
+                Assert.True(cleanupFinished);
+                Assert.False(window.IsVisible);
+                return true;
+            }
+            finally
+            {
+                releaseCleanup.TrySetResult();
+                window.Close();
+                await WaitUntil(() => windowClosed);
+            }
+        }, TestContextToken);
+    }
+
+    [Fact]
     public async Task RealAnalysisWritesReportAndJsonThenRejectsExplicitOverwrite()
     {
         Directory.CreateDirectory(_temporaryDirectory);
