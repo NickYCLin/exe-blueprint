@@ -813,7 +813,10 @@ internal static class ManagedSymbolReader
                 PayloadSize = payload.Length,
                 PayloadKind = ClassifySerializedPayload(payload),
                 Complete = true
-            }
+            },
+            ImageHeader = format is "type-converter-byte-array" or "activator-stream"
+                ? ResourceImageHeaderReader.Read(payload)
+                : null
         };
     }
 
@@ -1026,7 +1029,8 @@ internal static class ManagedSymbolReader
             Type = type,
             Status = "binary",
             DataSize = size,
-            Baml = baml
+            Baml = baml,
+            ImageHeader = ResourceImageHeaderReader.Read(data.AsSpan(payloadOffset, size))
         };
     }
 

@@ -400,9 +400,9 @@ public sealed class NativeAnalyzerTests
     public async Task RealLauncherTimeoutKillsProcessBeforeReturning()
     {
         await using var temp = new TemporaryDirectory();
-        var unixScript = "#!/bin/sh\nsleep 5\n";
+        var unixScript = "#!/bin/sh\nsleep 30\n";
         // 測試執行器的 PATH 有可能被精簡；用 SystemRoot 下的絕對路徑避免把環境差異誤判成逾時邏輯失敗。
-        var windowsScript = "@echo off\r\n\"%SystemRoot%\\System32\\PING.EXE\" 127.0.0.1 -n 6 >nul\r\n";
+        var windowsScript = "@echo off\r\n\"%SystemRoot%\\System32\\PING.EXE\" 127.0.0.1 -n 31 >nul\r\n";
         await WriteLauncherAsync(temp.Path, unixScript, windowsScript);
 
         var stopwatch = Stopwatch.StartNew();
@@ -414,7 +414,9 @@ public sealed class NativeAnalyzerTests
 
         Assert.Equal("none", result.Backend);
         Assert.Contains("逾時", result.Note, StringComparison.Ordinal);
-        Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(4));
+        // 正式流程允許 5 秒等待退出及 2 秒排空管線；4 秒門檻會誤判忙碌的 Windows runner。
+        // 仍必須遠早於 fixture 自然結束，並且回報正常逾時，而非清理失敗。
+        Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(15), $"逾時清理耗時：{stopwatch.Elapsed}");
     }
 
     [Fact]

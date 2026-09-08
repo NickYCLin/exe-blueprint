@@ -10,7 +10,7 @@
   "license": "MIT",
   "descriptionScope": {
     "sourceBranch": "main",
-    "analysisOutputSchemaVersion": "0.18",
+    "analysisOutputSchemaVersion": "0.19",
     "releasePolicy": "Capabilities describe the current main source, not every downloadable release. Consult the selected release notes.",
     "releaseUrl": "https://github.com/NickYCLin/exe-blueprint/releases",
     "maintenance": "Update this profile with README.md, README.en.md and the source contracts when capabilities change.",
@@ -130,8 +130,8 @@
     {
       "id": "embedded-resources",
       "status": "partial",
-      "summary": "Standard .resources values, bounded pre-serialized-resource envelopes and WPF BAML structure.",
-      "limitation": "No execution of resource converters and no full UI reconstruction.",
+      "summary": "Standard .resources values, bounded pre-serialized-resource envelopes, PNG/GIF header dimensions and WPF BAML structure.",
+      "limitation": "PNG/GIF headers are read from standard byte arrays/streams and TypeConverter byte-array or Activator-stream payloads; PNG IHDR CRC is checked. No pixel decoding, BinaryFormatter object inspection, resource converter execution or full UI reconstruction.",
       "sourcePaths": [
         "src/ExeBlueprint.Core/Models/CodeModel.cs",
         "src/ExeBlueprint.Core/Analysis/ManagedSymbolReader.cs"

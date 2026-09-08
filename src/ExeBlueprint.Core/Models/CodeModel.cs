@@ -107,6 +107,27 @@ public sealed record ManagedResourceEntryModel
     // 僅做靜態位元組摘要，不載入 WPF 型別，也不建立任何 UI 物件。
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     public BamlSummaryModel? Baml { get; init; }
+
+    // PNG／GIF 的固定檔頭摘要；不代表像素內容、動畫影格或完整影像已驗證。
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public ResourceImageHeaderModel? ImageHeader { get; init; }
+}
+
+public sealed record ResourceImageHeaderModel
+{
+    public required string Format { get; init; }
+
+    // parsed 只表示固定檔頭通過檢查；invalid 時不提供尺寸。
+    public required string Status { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public int? Width { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public int? Height { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? Error { get; init; }
 }
 
 public sealed record ManagedResourceSerializationModel
