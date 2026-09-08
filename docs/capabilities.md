@@ -6,6 +6,8 @@
 
 ## 目前能做什麼
 
+- 讀取 `.resources` 位元組陣列、stream 與支援的預序列化 payload 中的 PNG／GIF 檔頭尺寸；PNG 會核對 IHDR CRC，損壞檔頭會保留原因。只讀檔頭，不解壓像素或載入資源型別，見[圖片檔頭摘要](resource-image-headers.md)。
+
 - 桌面版依選來源、設定結果、分析與查看結果分成三步；進度與結果固定顯示，支援拖放、最近來源、取消、直接查看注意事項與開啟報告。詳細操作見[桌面版說明](desktop-guide.md)。
 
 - 分析單一檔案、完整資料夾、ZIP 或 Electron ASAR；資料夾與 ZIP 內的 ASAR、以及有上限的巢狀 ASAR 也會展開；若直接輸入 .NET apphost，偵測到同名 DLL 與 `.runtimeconfig.json` 時會一併分析該受管 DLL
@@ -42,7 +44,7 @@
 
 ## 報告內容
 
-`blueprint.json` 目前使用 schema `0.18`，是後續專案重建和轉語言要共用的資料格式，內容包含：
+`blueprint.json` 目前使用 schema `0.19`，是後續專案重建和轉語言要共用的資料格式，內容包含：
 
 - 輸入套件摘要
 - 每個檔案的格式、雜湊與來源資訊（provenance；直接輸入、資料夾、ZIP 或 ASAR，以及直接容器、項目和深度）

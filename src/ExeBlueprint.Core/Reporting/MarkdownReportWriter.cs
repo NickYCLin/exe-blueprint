@@ -629,7 +629,7 @@ public static class MarkdownReportWriter
                 return $"預序列化 {format}，原始文字 `{EscapeInline(EscapeCell(value))}`{suffix}，{payload}{completeness}";
             }
 
-            return $"預序列化 {format}，{payload}{completeness}";
+            return $"預序列化 {format}，{payload}{completeness}{FormatImageHeader(entry.ImageHeader)}";
         }
 
         if (entry.Status == "binary")
@@ -671,7 +671,7 @@ public static class MarkdownReportWriter
             }
 
             return entry.DataSize is { } binarySize
-                ? $"二進位，{FormatBytes(binarySize)}"
+                ? $"二進位，{FormatBytes(binarySize)}{FormatImageHeader(entry.ImageHeader)}"
                 : "二進位";
         }
 
@@ -679,6 +679,14 @@ public static class MarkdownReportWriter
         var error = entry.Error is null ? string.Empty : $"：{EscapeCell(entry.Error)}";
         return $"{(entry.Status == "invalid" ? "無法解碼" : "未解碼")}{size}{error}";
     }
+
+    private static string FormatImageHeader(ResourceImageHeaderModel? image) => image switch
+    {
+        { Status: "parsed", Width: { } width, Height: { } height } =>
+            $"，{EscapeCell(image.Format.ToUpperInvariant())} 檔頭尺寸 {width} × {height} px（未驗證像素內容）",
+        { } => $"，{EscapeCell(image.Format.ToUpperInvariant())} 檔頭無效：{EscapeCell(image.Error ?? "無法讀取尺寸")}",
+        _ => string.Empty
+    };
 
     private static string FormatBamlElement(BamlPropertyValueModel value)
     {

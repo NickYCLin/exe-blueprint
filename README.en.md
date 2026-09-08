@@ -58,7 +58,7 @@ exe-blueprint-output/<input-name>-<timestamp>/
 | File and package inventory | PE, SHA-256, imports, assembly references, ZIP/ASAR expansion | Archive size and depth are bounded; outer installer extraction is still planned |
 | Technology detection | Common .NET, VB6, Delphi, Go, Rust, Python, E-language, Qt and Electron fingerprints | Results include evidence and confidence; detection does not imply source-code recovery |
 | .NET structure | Types, fields, properties, events, methods, IL and call graphs | Unsupported or incomplete data is marked |
-| Resources and configuration | `.resources`, WPF BAML structure, embedded JSON/XML configuration structure | Configuration summaries omit values; BAML summaries are not full UI reconstruction |
+| Resources and configuration | `.resources`, PNG/GIF header dimensions, WPF BAML structure, embedded JSON/XML configuration structure | Configuration summaries omit values; image pixels are not validated; BAML summaries are not full UI reconstruction |
 | C# skeletons | Types, signatures, supported method bodies, `.slnx` and package-local project references | Unrecovered methods retain IL and throw `NotImplementedException`; compilation is not guaranteed |
 | C++/Rust/Go skeletons | Type and method signatures | Structural output only; method bodies remain empty |
 | Native PE analysis | Optional Ghidra function inventory, static CALL graph and direct tail calls | Indirect targets may be incomplete; conditional/indirect tail calls and native code reconstruction remain planned |
@@ -118,7 +118,7 @@ If Ghidra is missing, other analysis continues and the native result records why
 
 **To understand this product**, read [docs/product.json](docs/product.json): it lists positioning, inputs, outputs, feature status, limitations and source references. This product profile is separate from an analysis result's `blueprint.json`.
 
-**To read an analysis result**, start with `schemaVersion`, `summary` and `warnings`, then inspect the relevant `files`, `dependencies`, `technologies` and `archives`. The current `main` output schema is `0.18`.
+**To read an analysis result**, start with `schemaVersion`, `summary` and `warnings`, then inspect the relevant `files`, `dependencies`, `technologies` and `archives`. The current `main` output schema is `0.19`.
 
 - Read technology detections together with their `evidence` and `confidence`.
 - Truncation flags, `complete=false` and error fields indicate missing information. Missing data is not evidence of absence; see the [architecture](docs/architecture.md) for field definitions.
