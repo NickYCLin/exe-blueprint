@@ -192,6 +192,10 @@ jobs:
           "$stage_dir/exe-blueprint-cli" --version
           (cd "$stage_dir" && zip -qry "$asset_dir/ExeBlueprint-$RELEASE_TAG-$ASSET_SUFFIX.zip" .)
 
+          architecture="${ASSET_SUFFIX#macos-}"
+          dmg_path="$(bash ./scripts/packaging/build-macos-dmg.sh "$stage_dir" "$asset_dir" "$version" "$architecture")"
+          bash ./scripts/packaging/test-macos-dmg.sh "$dmg_path" "$stage_dir" "$version" "$architecture" "$RUNNER_TEMP/dmg-acceptance"
+
       - name: Upload package
         uses: actions/upload-artifact@v7
         with:
@@ -200,6 +204,7 @@ jobs:
             ${{ runner.temp }}/release-assets/*.zip
             ${{ runner.temp }}/release-assets/*.tar.gz
             ${{ runner.temp }}/release-assets/*.exe
+            ${{ runner.temp }}/release-assets/*.dmg
           if-no-files-found: error
           retention-days: 7
 

@@ -73,7 +73,7 @@ exe-blueprint-output/<輸入名稱>-<時間>/
 2. 選擇或拖入分析來源，確認儲存位置。第一次使用可保留預設選項；其他語言與 Ghidra 設定在進階選項。
 3. 開始分析後，右側會顯示進度、結果摘要與注意事項，再按「閱讀報告」或「開啟結果資料夾」。新版操作流程見[桌面版說明](docs/desktop-guide.md)，下載版請以該版本說明為準。
 
-`main` 已加入 [Windows 安裝程式](docs/windows-installer.md)的建置與驗收流程；`win-x64-setup.exe` 會從下一次版本發布起提供，ZIP 版仍保留。
+`main` 已加入 [Windows 安裝程式](docs/windows-installer.md)與 [macOS DMG](docs/macos-dmg.md)的建置及驗收流程；`win-x64-setup.exe`、`macos-x64.dmg` 與 `macos-arm64.dmg` 會從下一次版本發布起提供，ZIP 版仍保留。
 
 | 執行環境 | 下載套件名稱結尾 | 啟動檔 |
 | --- | --- | --- |
