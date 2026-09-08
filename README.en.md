@@ -132,4 +132,4 @@ Use concise Traditional Chinese Conventional Commits and pull/integrate remote c
 
 Analyze only software you own or are authorized to inspect. Reports can still contain program strings and embedded resource content: review them before sharing with other people or external AI services. Keep customer binaries, reconstructed proprietary code, credentials and internal configuration out of the repository. See [SECURITY.md](SECURITY.md) for security reporting.
 
-Licensed under the [MIT License](LICENSE).
+Licensed under the [MIT License](LICENSE). The bundled Noto Sans TC fonts use the SIL Open Font License; see [font sources and license](src/ExeBlueprint.Desktop/Assets/Fonts/README.md).

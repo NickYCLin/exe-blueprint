@@ -132,4 +132,4 @@ Commit 使用自然、簡潔的繁體中文 `<type>(<scope>): <主旨>`；push �
 
 只分析自己擁有或已獲授權的程式。分析報告仍可能包含程式字串與內嵌資源內容，分享給他人或外部 AI 前請先檢查；不要將客戶程式、反編譯結果、帳密或內部設定提交到 repository。安全問題的回報方式見 [SECURITY.md](SECURITY.md)。
 
-本專案採用 [MIT License](LICENSE)。
+本專案採用 [MIT License](LICENSE)。桌面版隨附的 Noto Sans TC 字型採用 SIL Open Font License，詳見[字型來源與授權](src/ExeBlueprint.Desktop/Assets/Fonts/README.md)。
