@@ -35,7 +35,7 @@ if (Test-Path -LiteralPath $shortcutPath) {
 function Invoke-Installer([string] $Path, [string] $LogName) {
     $logPath = Join-Path $evidenceDir $LogName
     $arguments = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-',
-        '/NOCLOSEAPPLICATIONS', '/NORESTARTAPPLICATIONS', '/LANG=zh-TW',
+        '/NOCLOSEAPPLICATIONS', '/NORESTARTAPPLICATIONS', '/LANG=zh_TW',
         ('/DIR="' + $installDir + '"'), ('/LOG="' + $logPath + '"'))
     $process = Start-Process -FilePath $Path -ArgumentList $arguments -WindowStyle Hidden -Wait -PassThru
     if ($process.ExitCode -ne 0) { throw "安裝程式結束碼為 $($process.ExitCode)，請查看 $logPath。" }

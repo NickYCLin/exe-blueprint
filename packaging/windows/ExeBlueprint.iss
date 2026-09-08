@@ -32,7 +32,7 @@ RestartApplications=no
 LicenseFile=..\..\LICENSE
 
 [Languages]
-Name: "zh-TW"; MessagesFile: "{#ChineseMessages}"
+Name: "zh_TW"; MessagesFile: "{#ChineseMessages}"
 Name: "en"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
