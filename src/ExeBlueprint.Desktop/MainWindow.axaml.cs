@@ -304,26 +304,26 @@ public sealed partial class MainWindow : Window
 
         try
         {
-            var result = await _runAnalysis(
-                new BlueprintExportRequest
-                {
-                    InputPath = inputPath,
-                    BaseDirectory = _outputBaseDirectory,
-                    OutputDirectory = NullIfWhiteSpace(OutputPathBox.Text),
-                    Overwrite = OverwriteCheckBox.IsChecked == true,
-                    JsonOnly = ReportCheckBox.IsChecked != true,
-                    EmitCSharp = CSharpCheckBox.IsChecked == true,
-                    EmitCpp = CppCheckBox.IsChecked == true,
-                    EmitRust = RustCheckBox.IsChecked == true,
-                    EmitGo = GoCheckBox.IsChecked == true,
-                    EnableNativeAnalysis = NativeCheckBox.IsChecked == true,
-                    GhidraInstallDir = NullIfWhiteSpace(GhidraPathBox.Text)
-                },
-                progress,
+            var request = new BlueprintExportRequest
+            {
+                InputPath = inputPath,
+                BaseDirectory = _outputBaseDirectory,
+                OutputDirectory = NullIfWhiteSpace(OutputPathBox.Text),
+                Overwrite = OverwriteCheckBox.IsChecked == true,
+                JsonOnly = ReportCheckBox.IsChecked != true,
+                EmitCSharp = CSharpCheckBox.IsChecked == true,
+                EmitCpp = CppCheckBox.IsChecked == true,
+                EmitRust = RustCheckBox.IsChecked == true,
+                EmitGo = GoCheckBox.IsChecked == true,
+                EnableNativeAnalysis = NativeCheckBox.IsChecked == true,
+                GhidraInstallDir = NullIfWhiteSpace(GhidraPathBox.Text)
+            };
+            var result = await Task.Run(
+                () => _runAnalysis(request, progress, cancellation.Token),
                 cancellation.Token);
 
             _lastOutputDirectory = result.OutputDirectory;
-            _lastReportPath = ReportCheckBox.IsChecked == true ? Path.Combine(result.OutputDirectory, "REPORT.md") : null;
+            _lastReportPath = request.JsonOnly ? null : Path.Combine(result.OutputDirectory, "REPORT.md");
             _settingSuggestedOutput = true;
             try { OutputPathBox.Text = result.OutputDirectory; }
             finally { _settingSuggestedOutput = false; }

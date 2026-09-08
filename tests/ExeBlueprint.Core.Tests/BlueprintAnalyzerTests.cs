@@ -8,6 +8,23 @@ namespace ExeBlueprint.Core.Tests;
 
 public sealed class BlueprintAnalyzerTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PreCancelledInputDoesNotReturnAnEmptySuccessfulAnalysis(bool useFile)
+    {
+        await using var temp = new TemporaryDirectory();
+        var inputPath = temp.Path;
+        if (useFile)
+        {
+            inputPath = Path.Combine(temp.Path, "empty.txt");
+            await File.WriteAllTextAsync(inputPath, "");
+        }
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            new BlueprintAnalyzer().AnalyzeAsync(inputPath, cancellationToken: new CancellationToken(canceled: true)));
+    }
+
     [Fact]
     public async Task AnalyzeManagedAssemblyReadsMetadataAndReferences()
     {

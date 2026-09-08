@@ -52,6 +52,7 @@ internal sealed class InputWorkspace : IAsyncDisposable
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(inputPath);
         ArgumentNullException.ThrowIfNull(options);
+        cancellationToken.ThrowIfCancellationRequested();
 
         var fullPath = Path.GetFullPath(inputPath);
         var warnings = new WarningCollector();
@@ -64,7 +65,7 @@ internal sealed class InputWorkspace : IAsyncDisposable
         {
             if (Directory.Exists(fullPath))
             {
-                states.AddRange(EnumerateDirectoryFiles(fullPath, options, warnings));
+                states.AddRange(EnumerateDirectoryFiles(fullPath, options, warnings, cancellationToken));
                 kind = "directory";
                 name = new DirectoryInfo(fullPath).Name;
             }
@@ -193,7 +194,8 @@ internal sealed class InputWorkspace : IAsyncDisposable
     private static IReadOnlyList<WorkspaceFileState> EnumerateDirectoryFiles(
         string rootPath,
         AnalysisOptions options,
-        WarningCollector warnings)
+        WarningCollector warnings,
+        CancellationToken cancellationToken)
     {
         var files = new List<WorkspaceFileState>();
         var pending = new Stack<string>();
@@ -204,6 +206,7 @@ internal sealed class InputWorkspace : IAsyncDisposable
 
         while (pending.Count > 0)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var current = pending.Pop();
             FileSystemInfo[] entries;
             try
@@ -218,6 +221,7 @@ internal sealed class InputWorkspace : IAsyncDisposable
 
             foreach (var entry in entries.OrderBy(item => item.Name, StringComparer.OrdinalIgnoreCase))
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 visitedNodes++;
                 if (visitedNodes > 100_000)
                 {
