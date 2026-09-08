@@ -10,7 +10,7 @@
   "license": "MIT",
   "descriptionScope": {
     "sourceBranch": "main",
-    "analysisOutputSchemaVersion": "0.17",
+    "analysisOutputSchemaVersion": "0.18",
     "releasePolicy": "Capabilities describe the current main source, not every downloadable release. Consult the selected release notes.",
     "releaseUrl": "https://github.com/NickYCLin/exe-blueprint/releases",
     "maintenance": "Update this profile with README.md, README.en.md and the source contracts when capabilities change.",
@@ -46,7 +46,7 @@
   "execution": {
     "runsInputApplication": false,
     "builtInAiModel": false,
-    "optionalAnalysisBackend": "Ghidra headless for native PE functions and static CALL references",
+    "optionalAnalysisBackend": "Ghidra headless for native PE functions, static CALL references and direct tail calls",
     "missingOptionalBackend": "Continue other analysis and record why native analysis was skipped."
   },
   "outputs": [
@@ -169,8 +169,8 @@
       "id": "native-call-graph",
       "status": "optional",
       "verificationLimit": "Parser and exporter fixture tests are available; real Ghidra execution acceptance is still pending.",
-      "summary": "Ghidra function inventory and static CALL references with call sites and direct/indirect flags.",
-      "limitation": "Unresolved targets and truncation are recorded. Indirect runtime targets may be incomplete; jump-based tail calls and native code reconstruction are not supported.",
+      "summary": "Ghidra function inventory, static CALL references and unconditional direct tail calls with call sites, direct/indirect and tail-call flags.",
+      "limitation": "Unresolved targets and truncation are recorded. Indirect runtime targets may be incomplete. Tail calls require a unique function-entry target outside the caller body with no fall-through; ABI and stack state are not verified. Conditional/indirect tail calls and native code reconstruction are not supported.",
       "sourcePaths": [
         "scripts/ghidra/ExportFunctions.py",
         "src/ExeBlueprint.Core/Models/NativeCodeModel.cs"
@@ -187,7 +187,7 @@
   ],
   "planned": [
     "Outer Inno Setup, NSIS, MSI, PyInstaller and Electron installer extraction",
-    "Native tail-call analysis and code reconstruction",
+    "Conditional/indirect native tail-call analysis and code reconstruction",
     "Deeper type-specific UI and resource summaries",
     "Broader support for compilable multi-project C# reconstruction",
     "E-language, VB6 and Delphi to C# conversion",
@@ -215,7 +215,8 @@
     "nativeNullSemantics": {
       "files[].nativeCode": "No native analysis result was supplied for this file.",
       "files[].nativeCode.callGraph": "No call graph was supplied; not the same as a scanned graph with zero calls.",
-      "files[].nativeCode.callGraph.calls[].targetAddress": "This retained call's target was unresolved."
+      "files[].nativeCode.callGraph.calls[].targetAddress": "This retained CALL target was unresolved; retained direct tail calls always have a target.",
+      "files[].nativeCode.callGraph.tailCallsAnalyzed": "False for legacy CALL-only output. True means direct tail-call analysis is supported; inspect truncated separately."
     },
     "sensitiveContent": "Reports may contain program strings and embedded resources. Review before sharing with people or external AI services."
   },

@@ -61,7 +61,7 @@ exe-blueprint-output/<input-name>-<timestamp>/
 | Resources and configuration | `.resources`, WPF BAML structure, embedded JSON/XML configuration structure | Configuration summaries omit values; BAML summaries are not full UI reconstruction |
 | C# skeletons | Types, signatures, supported method bodies, `.slnx` and package-local project references | Unrecovered methods retain IL and throw `NotImplementedException`; compilation is not guaranteed |
 | C++/Rust/Go skeletons | Type and method signatures | Structural output only; method bodies remain empty |
-| Native PE analysis | Optional Ghidra function inventory and static CALL graph | Indirect targets may be incomplete; tail calls and native code reconstruction remain planned |
+| Native PE analysis | Optional Ghidra function inventory, static CALL graph and direct tail calls | Indirect targets may be incomplete; conditional/indirect tail calls and native code reconstruction remain planned |
 
 See the [detailed capabilities and roadmap](docs/capabilities.md) and [architecture](docs/architecture.md) for the full scope and data contracts. These detailed documents are in Traditional Chinese.
 
@@ -116,7 +116,7 @@ If Ghidra is missing, other analysis continues and the native result records why
 
 **To understand this product**, read [docs/product.json](docs/product.json): it lists positioning, inputs, outputs, feature status, limitations and source references. This product profile is separate from an analysis result's `blueprint.json`.
 
-**To read an analysis result**, start with `schemaVersion`, `summary` and `warnings`, then inspect the relevant `files`, `dependencies`, `technologies` and `archives`. The current `main` output schema is `0.17`.
+**To read an analysis result**, start with `schemaVersion`, `summary` and `warnings`, then inspect the relevant `files`, `dependencies`, `technologies` and `archives`. The current `main` output schema is `0.18`.
 
 - Read technology detections together with their `evidence` and `confidence`.
 - Truncation flags, `complete=false` and error fields indicate missing information. Missing data is not evidence of absence; see the [architecture](docs/architecture.md) for field definitions.

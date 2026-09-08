@@ -3,7 +3,7 @@ using ExeBlueprint.Models;
 
 namespace ExeBlueprint.Analysis;
 
-// v1 是函式清單；v2 另含以函式位址連結的 callGraph。
+// v1 是函式清單；v2 另含 callGraph；v3 區分 CALL 與直接 JUMP tail call。
 internal static class GhidraOutputParser
 {
     internal const int MaxJsonBytes = 32 * 1024 * 1024;
@@ -56,7 +56,7 @@ internal static class GhidraOutputParser
                 || !root.TryGetProperty("schemaVersion", out var schemaVersion)
                 || schemaVersion.ValueKind != JsonValueKind.Number
                 || !schemaVersion.TryGetInt32(out var schemaVersionNumber)
-                || schemaVersionNumber is not (1 or 2)
+                || schemaVersionNumber is not (1 or 2 or 3)
                 || !root.TryGetProperty("functionCount", out var functionCountValue)
                 || functionCountValue.ValueKind != JsonValueKind.Number
                 || !functionCountValue.TryGetInt32(out var functionCount)
@@ -109,7 +109,7 @@ internal static class GhidraOutputParser
                 }
 
                 // 位址是 v2 呼叫圖的 identity，不能像顯示文字一樣截短。
-                if (schemaVersionNumber == 2
+                if (schemaVersionNumber >= 2
                     && (!TryGetAddress(element, "address", out address)
                         || !functionAddresses.TryAdd(address, external.GetBoolean())))
                 {
@@ -136,9 +136,9 @@ internal static class GhidraOutputParser
             }
 
             NativeCallGraph? callGraph = null;
-            if (schemaVersionNumber == 2)
+            if (schemaVersionNumber >= 2)
             {
-                callGraph = ParseCallGraph(root, functionAddresses, retainedAddresses, truncated, maxCalls);
+                callGraph = ParseCallGraph(root, functionAddresses, retainedAddresses, truncated, maxCalls, schemaVersionNumber);
                 if (callGraph is null)
                 {
                     return GhidraOutputParseResult.Invalid("Ghidra JSON 的 callGraph schema 或函式參照不正確。");
@@ -165,7 +165,8 @@ internal static class GhidraOutputParser
         IReadOnlyDictionary<string, bool> functionAddresses,
         HashSet<string> retainedAddresses,
         bool functionsTruncated,
-        int maxCalls)
+        int maxCalls,
+        int schemaVersion)
     {
         if (!root.TryGetProperty("callGraph", out var graph)
             || graph.ValueKind != JsonValueKind.Object
@@ -182,6 +183,7 @@ internal static class GhidraOutputParser
         var result = new List<NativeCall>(Math.Min(calls.GetArrayLength(), maxCalls));
         // 同一 call site 可有多個已知目標，但相同 edge 不可重複計數。
         var identities = new HashSet<(string Caller, string Site, string? Target)>();
+        var sites = new Dictionary<(string Caller, string Site), (bool Indirect, bool Tail)>();
         foreach (var call in calls.EnumerateArray())
         {
             if (call.ValueKind != JsonValueKind.Object
@@ -205,6 +207,34 @@ internal static class GhidraOutputParser
                 return null;
             }
 
+            var tail = false;
+            if (schemaVersion >= 3)
+            {
+                if (!call.TryGetProperty("isTailCall", out var tailValue)
+                    || tailValue.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+                {
+                    return null;
+                }
+                tail = tailValue.GetBoolean();
+            }
+            else if (call.TryGetProperty("isTailCall", out _))
+            {
+                return null;
+            }
+
+            if (tail && (indirect.GetBoolean() || target is null || target == caller))
+            {
+                return null;
+            }
+
+            var siteKind = (indirect.GetBoolean(), tail);
+            if (sites.TryGetValue((caller, site), out var previousKind)
+                && (previousKind != siteKind || tail))
+            {
+                return null;
+            }
+            sites[(caller, site)] = siteKind;
+
             if (!identities.Add((caller, site, target)))
             {
                 return null;
@@ -223,11 +253,12 @@ internal static class GhidraOutputParser
                 CallerAddress = caller,
                 CallSiteAddress = site,
                 TargetAddress = target,
-                IsIndirect = indirect.GetBoolean()
+                IsIndirect = indirect.GetBoolean(),
+                IsTailCall = tail
             });
         }
 
-        return new NativeCallGraph { Calls = result, Truncated = truncated };
+        return new NativeCallGraph { Calls = result, Truncated = truncated, TailCallsAnalyzed = schemaVersion >= 3 };
     }
 
     private static bool TryGetAddress(JsonElement element, string property, out string value)

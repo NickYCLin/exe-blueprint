@@ -11,25 +11,31 @@ import unittest
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts/ghidra/ExportFunctions.py"
 
 
-def flow(call=True, indirect=False):
-    return SimpleNamespace(isCall=lambda: call, isComputed=lambda: indirect)
+def flow(call=True, indirect=False, jump=False, conditional=False):
+    return SimpleNamespace(isCall=lambda: call, isComputed=lambda: indirect,
+                           isJump=lambda: jump, isConditional=lambda: conditional)
 
 
-def instruction(address, call=True, indirect=False):
-    return SimpleNamespace(getAddress=lambda: address, getFlowType=lambda: flow(call, indirect))
+def instruction(address, call=True, indirect=False, jump=False, conditional=False, fallthrough=None):
+    return SimpleNamespace(getAddress=lambda: address,
+                           getFlowType=lambda: flow(call, indirect, jump, conditional),
+                           getFallThrough=lambda: fallthrough)
 
 
-def reference(target, call=True):
-    return SimpleNamespace(getToAddress=lambda: target, getReferenceType=lambda: flow(call))
+def reference(target, call=True, indirect=False, jump=False, conditional=False):
+    return SimpleNamespace(getToAddress=lambda: target,
+                           getReferenceType=lambda: flow(call, indirect, jump, conditional))
 
 
-def function(address, name="worker", external=False, instructions=()):
+def function(address, name="worker", external=False, instructions=(), body_addresses=()):
+    addresses = {address, *body_addresses, *(item.getAddress() for item in instructions)}
+    body = SimpleNamespace(instructions=instructions, contains=lambda target: target in addresses)
     return SimpleNamespace(
         getEntryPoint=lambda: address,
         getName=lambda: name,
         getPrototypeString=lambda *_: "void worker()",
         isExternal=lambda: external,
-        getBody=lambda: instructions,
+        getBody=lambda: body,
     )
 
 
@@ -73,7 +79,7 @@ class ExportFunctionsTests(unittest.TestCase):
         )
         program = SimpleNamespace(
             getFunctionManager=lambda: manager,
-            getListing=lambda: SimpleNamespace(getInstructions=lambda body, _: iter(body)),
+            getListing=lambda: SimpleNamespace(getInstructions=lambda body, _: iter(body.instructions)),
             getReferenceManager=lambda: reference_manager,
         )
         source = SCRIPT.read_text(encoding="utf-8")
@@ -93,11 +99,12 @@ class ExportFunctionsTests(unittest.TestCase):
 
     def test_exports_direct_external_recursive_and_unresolved_calls(self):
         result, _ = self.export()
-        self.assertEqual(2, result["schemaVersion"])
+        self.assertEqual(3, result["schemaVersion"])
         self.assertEqual(3, result["functionCount"])
         self.assertFalse(result["truncated"])
         graph = result["callGraph"]
         self.assertFalse(graph["truncated"])
+        self.assertTrue(all(c["isTailCall"] is False for c in graph["calls"]))
         self.assertEqual([
             ("00401000", "00401004", "00402000", False),
             ("00401000", "00401008", "EXTERNAL:00000001", True),
@@ -105,6 +112,77 @@ class ExportFunctionsTests(unittest.TestCase):
             ("00401000", "00401010", None, False),
             ("00402000", "00402004", "00402000", False),
         ], [(c["callerAddress"], c["callSiteAddress"], c["targetAddress"], c["isIndirect"]) for c in graph["calls"]])
+
+    def test_exports_direct_and_external_tail_calls_without_following_thunks(self):
+        functions = [
+            function("1000", instructions=[instruction("1004", call=False, jump=True)]),
+            function("2000", instructions=[instruction("2004", call=False, jump=True)]),
+            function("EXTERNAL:1", external=True),
+        ]
+        refs = {
+            "1004": [reference("2000", call=False, jump=True),
+                     reference("2000", call=False, jump=True), reference("data", call=False)],
+            "2004": [reference("EXTERNAL:1", call=False, jump=True)],
+        }
+        result, _ = self.export(functions, refs)
+        self.assertFalse(result["callGraph"]["truncated"])
+        calls = result["callGraph"]["calls"]
+        self.assertEqual([("1000", "1004", "2000"), ("2000", "2004", "EXTERNAL:1")],
+                         [(c["callerAddress"], c["callSiteAddress"], c["targetAddress"]) for c in calls])
+        self.assertTrue(all(c["isTailCall"] and not c["isIndirect"] for c in calls))
+
+    def test_does_not_infer_tail_calls_from_ambiguous_or_local_jumps(self):
+        jump = lambda target, **kwargs: reference(target, call=False, jump=True, **kwargs)
+        cases = [
+            ({}, [], ()),
+            ({}, [reference("2000")], ()),
+            ({}, [reference("2000", call=False)], ()),
+            ({}, [jump("1000")], ()),  # branch to the current entry is a loop
+            ({}, [jump("1004")], ()),
+            ({}, [jump("2001")], ()),  # interior of another function
+            ({}, [jump("unknown")], ()),
+            ({}, [jump("2000")], ("2000",)),  # overlapping function body
+            ({}, [jump("2000"), jump("EXTERNAL:1")], ()),
+            ({}, [jump("2000"), jump("unknown")], ()),
+            ({}, [jump("unknown"), jump("2000")], ()),
+            ({}, [jump("2000", indirect=True)], ()),
+            ({}, [jump("2000", conditional=True)], ()),
+            ({"conditional": True}, [jump("2000")], ()),
+            ({"indirect": True}, [jump("2000")], ()),
+            ({"fallthrough": "1008"}, [jump("2000")], ()),
+        ]
+        for options, refs, body_addresses in cases:
+            with self.subTest(options=options, refs=refs, body_addresses=body_addresses):
+                functions = [
+                    function("1000", instructions=[instruction("1004", call=False, jump=True, **options)],
+                             body_addresses=body_addresses),
+                    function("2000"), function("EXTERNAL:1", external=True),
+                ]
+                result, _ = self.export(functions, {"1004": refs})
+                self.assertEqual([], result["callGraph"]["calls"])
+                self.assertFalse(result["callGraph"]["truncated"])
+
+    def test_tail_calls_share_call_reference_instruction_and_output_budgets(self):
+        functions = [
+            function("1000", instructions=[instruction("1004", call=False, jump=True), instruction("1008")]),
+            function("2000"),
+        ]
+        refs = {"1004": [reference("2000", call=False, jump=True)], "1008": [reference("2000")]}
+        for limits, count in [({"max_calls": 1}, 1), ({"max_instructions": 1}, 1),
+                              ({"max_references": 1}, 1), ({"max_references_per_instruction": 0}, 0),
+                              ({"max_functions": 1}, 1), ({"max_json_chars": 750}, 0)]:
+            with self.subTest(limits=limits):
+                result, size = self.export(functions, refs, limits=limits)
+                graph = result["callGraph"]
+                self.assertTrue(graph["truncated"])
+                self.assertEqual(count, len(graph["calls"]))
+                if limits == {"max_functions": 1}:
+                    self.assertFalse(graph["calls"][0]["isTailCall"])
+                    self.assertIsNone(graph["calls"][0]["targetAddress"])
+                elif count:
+                    self.assertTrue(graph["calls"][0]["isTailCall"])
+                if "max_json_chars" in limits:
+                    self.assertLessEqual(size, limits["max_json_chars"])
 
     def test_no_functions_is_an_empty_scanned_graph(self):
         result, _ = self.export(functions=[])

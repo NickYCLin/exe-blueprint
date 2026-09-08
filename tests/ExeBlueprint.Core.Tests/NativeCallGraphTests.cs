@@ -33,6 +33,8 @@ public sealed class NativeCallGraphTests
         Assert.True(parsed.IsValid, parsed.Error);
         var graph = Assert.IsType<NativeCallGraph>(parsed.CallGraph);
         Assert.False(graph.Truncated);
+        Assert.False(graph.TailCallsAnalyzed);
+        Assert.All(graph.Calls, call => Assert.False(call.IsTailCall));
         Assert.Equal(5, graph.Calls.Count);
         Assert.Equal(2, graph.UnresolvedCallCount);
         Assert.Equal("00401000", graph.Calls[0].CallerAddress);
@@ -41,6 +43,139 @@ public sealed class NativeCallGraphTests
         Assert.Equal("EXTERNAL:00000001", graph.Calls[2].TargetAddress);
         Assert.True(graph.Calls[2].IsIndirect);
         Assert.False(graph.Calls[4].IsIndirect);
+    }
+
+    internal static string TailOutputJson => CreateTailOutput().ToJsonString();
+
+    private static JsonNode CreateTailOutput()
+    {
+        var root = JsonNode.Parse(OutputJson)!;
+        root["schemaVersion"] = 3;
+        foreach (var call in root["callGraph"]!["calls"]!.AsArray())
+        {
+            call!["isTailCall"] = false;
+        }
+        root["callGraph"]!["calls"]![0]!["isTailCall"] = true;
+        return root;
+    }
+
+    [Fact]
+    public void PreservesTailCallCoverageEvenWhenEmptyOrTruncated()
+    {
+        var root = CreateTailOutput();
+        var parsed = GhidraOutputParser.Parse(root.ToJsonString());
+        Assert.True(parsed.IsValid, parsed.Error);
+        Assert.True(parsed.CallGraph!.TailCallsAnalyzed);
+        Assert.True(parsed.CallGraph.Calls[0].IsTailCall);
+        Assert.All(parsed.CallGraph.Calls.Skip(1), call => Assert.False(call.IsTailCall));
+
+        var bounded = GhidraOutputParser.Parse(root.ToJsonString(), 32_000, 10, 100, maxCalls: 1);
+        Assert.True(bounded.IsValid, bounded.Error);
+        Assert.True(bounded.CallGraph!.TailCallsAnalyzed);
+        Assert.True(bounded.CallGraph.Truncated);
+        Assert.True(Assert.Single(bounded.CallGraph.Calls).IsTailCall);
+
+        var functionsBounded = GhidraOutputParser.Parse(root.ToJsonString(), 32_000, 1, 100);
+        Assert.True(functionsBounded.IsValid, functionsBounded.Error);
+        Assert.True(functionsBounded.CallGraph!.Truncated);
+        Assert.DoesNotContain(functionsBounded.CallGraph.Calls, call => call.IsTailCall);
+
+        root["callGraph"]!["calls"] = new JsonArray();
+        var empty = GhidraOutputParser.Parse(root.ToJsonString());
+        Assert.True(empty.IsValid, empty.Error);
+        Assert.True(empty.CallGraph!.TailCallsAnalyzed);
+        Assert.False(empty.CallGraph.Truncated);
+        Assert.Empty(empty.CallGraph.Calls);
+    }
+
+    [Theory]
+    [InlineData("missing-flag")]
+    [InlineData("invalid-flag")]
+    [InlineData("null-flag")]
+    [InlineData("indirect-tail")]
+    [InlineData("unknown-tail")]
+    [InlineData("recursive-tail")]
+    [InlineData("multiple-tail-targets")]
+    [InlineData("conflicting-site-kind")]
+    [InlineData("conflicting-indirect-kind")]
+    [InlineData("v2-with-tail-flag")]
+    [InlineData("v2-with-false-tail-flag")]
+    [InlineData("duplicate-flag")]
+    [InlineData("invalid-after-limit")]
+    public void RejectsInvalidTailCallEvidence(string mutation)
+    {
+        var root = CreateTailOutput();
+        var calls = root["callGraph"]!["calls"]!.AsArray();
+        var call = calls[0]!;
+        switch (mutation)
+        {
+            case "missing-flag": call.AsObject().Remove("isTailCall"); break;
+            case "invalid-flag": call["isTailCall"] = "true"; break;
+            case "null-flag": call["isTailCall"] = null; break;
+            case "indirect-tail": call["isIndirect"] = true; break;
+            case "unknown-tail": call["targetAddress"] = null; break;
+            case "recursive-tail": call["targetAddress"] = "00401000"; break;
+            case "multiple-tail-targets":
+                var secondTail = call.DeepClone();
+                secondTail["targetAddress"] = "EXTERNAL:00000001";
+                calls.Add(secondTail);
+                break;
+            case "conflicting-site-kind":
+                var secondKind = call.DeepClone();
+                secondKind["isTailCall"] = false;
+                secondKind["targetAddress"] = "EXTERNAL:00000001";
+                calls.Add(secondKind);
+                break;
+            case "conflicting-indirect-kind":
+                var secondIndirect = calls[2]!.DeepClone();
+                secondIndirect["isIndirect"] = false;
+                secondIndirect["targetAddress"] = "00402000";
+                calls.Add(secondIndirect);
+                break;
+            case "v2-with-tail-flag": root["schemaVersion"] = 2; break;
+            case "v2-with-false-tail-flag": root["schemaVersion"] = 2; call["isTailCall"] = false; break;
+            case "duplicate-flag": break;
+            case "invalid-after-limit": calls[4]!.AsObject().Remove("isTailCall"); break;
+            default: throw new ArgumentOutOfRangeException(nameof(mutation));
+        }
+
+        var json = root.ToJsonString();
+        if (mutation == "duplicate-flag")
+        {
+            json = json.Replace("\"isTailCall\":true", "\"isTailCall\":false,\"isTailCall\":true", StringComparison.Ordinal);
+        }
+        var parsed = GhidraOutputParser.Parse(json, 32_000, 10, 100, maxCalls: 1);
+        Assert.False(parsed.IsValid);
+        Assert.Empty(parsed.Functions);
+        Assert.Null(parsed.CallGraph);
+    }
+
+    [Fact]
+    public async Task WritesTailCallFlagsAndCoverageToJsonAndReport()
+    {
+        await using var temp = new TemporaryDirectory();
+        var parsed = GhidraOutputParser.Parse(TailOutputJson);
+        Assert.True(parsed.IsValid, parsed.Error);
+        var document = CreateDocument(new NativeCodeModel
+        {
+            Backend = "ghidra",
+            FunctionCount = parsed.FunctionCount,
+            Functions = parsed.Functions,
+            CallGraph = parsed.CallGraph
+        });
+        var report = MarkdownReportWriter.Build(document);
+        Assert.Contains("worker (00402000) | 直接 tail call |", report);
+        Assert.Contains("未驗證呼叫慣例或堆疊狀態", report);
+        Assert.Contains("間接與條件跳躍未納入", report);
+
+        var output = Path.Combine(temp.Path, "blueprint.json");
+        await BlueprintJsonWriter.WriteAsync(document, output);
+        using var json = JsonDocument.Parse(await File.ReadAllTextAsync(output));
+        var graph = json.RootElement.GetProperty("files")[0].GetProperty("nativeCode").GetProperty("callGraph");
+        Assert.True(graph.GetProperty("tailCallsAnalyzed").GetBoolean());
+        Assert.True(graph.GetProperty("calls")[0].GetProperty("isTailCall").GetBoolean());
+        Assert.False(graph.GetProperty("calls")[1].GetProperty("isTailCall").GetBoolean());
+        Assert.Equal(2, graph.GetProperty("unresolvedCallCount").GetInt32());
     }
 
     [Fact]
@@ -179,15 +314,17 @@ public sealed class NativeCallGraphTests
         var output = Path.Combine(temp.Path, "blueprint.json");
         await BlueprintJsonWriter.WriteAsync(document, output);
         using var json = JsonDocument.Parse(await File.ReadAllTextAsync(output));
-        Assert.Equal("0.17", json.RootElement.GetProperty("schemaVersion").GetString());
+        Assert.Equal("0.18", json.RootElement.GetProperty("schemaVersion").GetString());
         var graph = json.RootElement.GetProperty("files")[0].GetProperty("nativeCode").GetProperty("callGraph");
         Assert.Equal(102, graph.GetProperty("calls").GetArrayLength());
+        Assert.False(graph.GetProperty("tailCallsAnalyzed").GetBoolean());
         Assert.Equal(1, graph.GetProperty("unresolvedCallCount").GetInt32());
         Assert.Equal(JsonValueKind.Null, graph.GetProperty("calls")[101].GetProperty("targetAddress").ValueKind);
 
         var ordinaryReport = MarkdownReportWriter.Build(CreateDocument(native with { CallGraph = parsed.CallGraph }));
         Assert.Contains("未解析 | 間接", ordinaryReport);
         Assert.Contains("未解析 | 直接", ordinaryReport);
+        Assert.Contains("未分析 tail call", ordinaryReport);
         var legacyReport = MarkdownReportWriter.Build(CreateDocument(native with { CallGraph = null }));
         Assert.Contains("未提供原生呼叫圖", legacyReport);
     }

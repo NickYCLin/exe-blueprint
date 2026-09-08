@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
-# ExeBlueprint 的 Ghidra 後置腳本：匯出函式與靜態 CALL 參照，不執行輸入程式。
+# ExeBlueprint 的 Ghidra 後置腳本：匯出函式、靜態 CALL 與直接 tail call，不執行輸入程式。
 #
 # 用法（NativeAnalyzer 會自動帶入，也可手動執行）：
 #   analyzeHeadless <proj-dir> <proj-name> -import <file> \
 #       -scriptPath <此檔所在目錄> -postScript ExportFunctions.py <輸出 json 路徑> -deleteProject
 #
 # 輸出格式：
-# v2 保留函式清單，另以 callGraph.calls 記錄 callerAddress、callSiteAddress、
-# targetAddress（無法確認時為 null）及 isIndirect。跳躍／tail call 不在這一版範圍。
+# v3 在 v2 的 callGraph.calls 加上 isTailCall；只把無 fall-through、無條件且
+# 唯一目標為函式範圍外另一個入口的直接 JUMP 記為 tail call，不推測 ABI 或資料指標。
 
 import json
 
@@ -79,7 +79,7 @@ known_addresses = set(item["address"] for item in funcs)
 listing = currentProgram.getListing()
 references = currentProgram.getReferenceManager()
 
-def append_call(caller, site, target, indirect):
+def append_call(caller, site, target, indirect, tail=False):
     global graph_truncated
     global estimated_json_chars
     item = {
@@ -87,6 +87,7 @@ def append_call(caller, site, target, indirect):
         "callSiteAddress": site,
         "targetAddress": target,
         "isIndirect": indirect,
+        "isTailCall": tail,
     }
     item_json_chars = len(json.dumps(item, separators=(",", ":"))) + 1
     if len(calls) >= max_calls or estimated_json_chars + item_json_chars > max_json_chars:
@@ -105,14 +106,17 @@ def export_calls():
         if f.isExternal():
             continue
         caller = address_text(f.getEntryPoint())
-        for instruction in listing.getInstructions(f.getBody(), True):
+        body = f.getBody()
+        for instruction in listing.getInstructions(body, True):
             monitor.checkCancelled()
             if instruction_count >= max_instructions:
                 graph_truncated = True
                 return
             instruction_count += 1
             flow = instruction.getFlowType()
-            if not flow.isCall():
+            tail = (not flow.isCall() and flow.isJump() and not flow.isConditional()
+                    and not flow.isComputed() and instruction.getFallThrough() is None)
+            if not flow.isCall() and not tail:
                 continue
             site = address_text(instruction.getAddress())
             indirect = flow.isComputed()
@@ -123,12 +127,31 @@ def export_calls():
                 return
             targets = set()
             saw_call = False
+            tail_valid = True
             for reference in references.getReferencesFrom(instruction.getAddress()):
                 monitor.checkCancelled()
                 if reference_count >= max_references:
                     graph_truncated = True
                     return
                 reference_count += 1
+                if tail:
+                    ref_flow = reference.getReferenceType()
+                    if not ref_flow.isJump():
+                        continue
+                    destination = reference.getToAddress()
+                    target_function = fm.getFunctionAt(destination)
+                    if (ref_flow.isConditional() or ref_flow.isComputed()
+                            or body.contains(destination) or target_function is None):
+                        tail_valid = False
+                        continue
+                    target = address_text(target_function.getEntryPoint())
+                    if target == caller:
+                        tail_valid = False
+                    if target not in known_addresses:
+                        graph_truncated = True
+                        tail_valid = False
+                    targets.add(target)
+                    continue
                 if not reference.getReferenceType().isCall():
                     continue
                 # 只接受 Ghidra 已指向函式入口的 CALL；不沿資料指標猜測目標。
@@ -143,14 +166,19 @@ def export_calls():
                 saw_call = True
                 if not append_call(caller, site, target, indirect):
                     return
-            if not saw_call and not append_call(caller, site, None, indirect):
+            if tail:
+                # 所有 JUMP 參照必須一致；未知目標不會變成虛構的未解析 tail call。
+                if tail_valid and len(targets) == 1:
+                    if not append_call(caller, site, next(iter(targets)), False, tail=True):
+                        return
+            elif not saw_call and not append_call(caller, site, None, indirect):
                 return
 
 export_calls()
 monitor.checkCancelled()
 with open(out, "w") as fh:
     json.dump({
-        "schemaVersion": 2,
+        "schemaVersion": 3,
         "functionCount": function_count,
         "functions": funcs,
         "truncated": truncated,

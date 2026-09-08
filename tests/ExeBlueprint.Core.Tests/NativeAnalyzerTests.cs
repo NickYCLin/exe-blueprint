@@ -150,8 +150,10 @@ public sealed class NativeAnalyzerTests
         Assert.False(Directory.Exists(workspace));
     }
 
-    [Fact]
-    public async Task ReturnsCallGraphAndWarnsAboutUnresolvedTargets()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ReturnsCallGraphAndWarnsAboutUnresolvedTargets(bool tailCallsAnalyzed)
     {
         await using var temp = new TemporaryDirectory();
         await WriteLauncherAsync(temp.Path, "#!/bin/sh\nexit 0\n", "@exit /b 0\r\n");
@@ -160,7 +162,8 @@ public sealed class NativeAnalyzerTests
             CreateOptions(temp.Path),
             async (request, cancellationToken) =>
             {
-                await File.WriteAllTextAsync(request.OutputPath, NativeCallGraphTests.OutputJson, cancellationToken);
+                var json = tailCallsAnalyzed ? NativeCallGraphTests.TailOutputJson : NativeCallGraphTests.OutputJson;
+                await File.WriteAllTextAsync(request.OutputPath, json, cancellationToken);
                 return new GhidraRunResult(0, string.Empty, string.Empty);
             },
             CancellationToken.None);
@@ -169,6 +172,8 @@ public sealed class NativeAnalyzerTests
         Assert.Equal(3, result.FunctionCount);
         Assert.False(result.FunctionsTruncated);
         Assert.Equal(5, result.CallGraph!.Calls.Count);
+        Assert.Equal(tailCallsAnalyzed, result.CallGraph.TailCallsAnalyzed);
+        Assert.Equal(tailCallsAnalyzed, result.CallGraph.Calls[0].IsTailCall);
         Assert.Contains("2 筆已保留紀錄無法確認目標", result.Note);
     }
 

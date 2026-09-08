@@ -21,6 +21,9 @@ public sealed record NativeCallGraph
 {
     public IReadOnlyList<NativeCall> Calls { get; init; } = [];
 
+    // false 表示舊版後端只掃描 CALL；true 仍受 Truncated 與直接跳躍的支援範圍限制。
+    public bool TailCallsAnalyzed { get; init; }
+
     public bool Truncated { get; init; }
 
     // 只計算已保留的紀錄；間接呼叫即使有目標，也不代表所有執行期目標已知。
@@ -36,6 +39,9 @@ public sealed record NativeCall
     public string? TargetAddress { get; init; }
 
     public bool IsIndirect { get; init; }
+
+    // 依 Ghidra 函式邊界與直接 JUMP 判定，不代表已驗證 calling convention 或堆疊狀態。
+    public bool IsTailCall { get; init; }
 }
 
 public sealed record NativeFunction

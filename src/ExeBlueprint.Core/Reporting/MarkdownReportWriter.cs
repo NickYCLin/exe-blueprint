@@ -232,7 +232,9 @@ public static class MarkdownReportWriter
         }
 
         builder.AppendLine($"原生呼叫圖：保留 {graph.Calls.Count} 筆呼叫紀錄，其中 {graph.UnresolvedCallCount} 筆目標未解析。");
-        builder.AppendLine("僅列出 Ghidra 的靜態 CALL 參照；間接呼叫的目標可能不完整，不含跳躍形式的 tail call。");
+        builder.AppendLine(graph.TailCallsAnalyzed
+            ? "列出 Ghidra 的靜態 CALL 參照與直接 tail call。tail call 限無條件、無接續指令且唯一目標為函式範圍外另一個入口的跳躍；未驗證呼叫慣例或堆疊狀態。間接與條件跳躍未納入，間接 CALL 的目標也可能不完整。"
+            : "此後端版本僅提供靜態 CALL 參照，未分析 tail call；間接呼叫的目標可能不完整。");
         if (graph.Truncated)
         {
             builder.AppendLine("呼叫圖已達安全上限或函式清單不完整；blueprint.json 也只保留部分紀錄。");
@@ -257,7 +259,8 @@ public static class MarkdownReportWriter
         const int maxReportCalls = 100;
         foreach (var call in graph.Calls.Take(maxReportCalls))
         {
-            builder.AppendLine($"| {EscapeCell(DisplayFunction(call.CallerAddress))} | {EscapeCell(call.CallSiteAddress)} | {EscapeCell(DisplayFunction(call.TargetAddress))} | {(call.IsIndirect ? "間接" : "直接")} |");
+            var kind = call.IsTailCall ? "直接 tail call" : call.IsIndirect ? "間接" : "直接";
+            builder.AppendLine($"| {EscapeCell(DisplayFunction(call.CallerAddress))} | {EscapeCell(call.CallSiteAddress)} | {EscapeCell(DisplayFunction(call.TargetAddress))} | {kind} |");
         }
         if (graph.Calls.Count > maxReportCalls)
         {
