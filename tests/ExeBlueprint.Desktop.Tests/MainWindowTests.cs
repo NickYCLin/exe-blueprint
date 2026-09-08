@@ -56,6 +56,8 @@ public sealed class MainWindowTests(DesktopTestSession desktopSession) : IDispos
                 Input(window).Text = "";
                 Assert.False(Control<Button>(window, "AnalyzeButton").IsEnabled);
                 Assert.Equal(custom, Output(window).Text);
+                Input(window).Text = "\"\"";
+                Assert.False(Control<Button>(window, "AnalyzeButton").IsEnabled);
                 Output(window).Text = "";
                 Input(window).Text = Path.Combine(_temporaryDirectory, "fourth.exe");
                 Assert.Contains("fourth-", Output(window).Text);
@@ -306,6 +308,41 @@ public sealed class MainWindowTests(DesktopTestSession desktopSession) : IDispos
                 await WaitUntil(() => Control<Button>(window, "AnalyzeButton").IsVisible);
                 Assert.Equal("已取消", Control<TextBlock>(window, "StatusBadgeText").Text);
                 Assert.True(Input(window).IsEnabled);
+                return true;
+            }
+            finally { window.Close(); }
+        }, TestContextToken);
+    }
+
+    [Fact]
+    public async Task PastedQuotedPathsReachAnalysisWithoutTheirWrapperQuotes()
+    {
+        var session = desktopSession.Session;
+        await session.Dispatch(async () =>
+        {
+            BlueprintExportRequest? observed = null;
+            var source = Path.Combine(_temporaryDirectory, "Example App.exe");
+            var output = Path.Combine(_temporaryDirectory, "My Results");
+            var ghidra = Path.Combine(_temporaryDirectory, "Ghidra Install");
+            var window = CreateWindow((request, _, _) =>
+            {
+                observed = request;
+                return Task.FromResult(Result(request.OutputDirectory!));
+            });
+            try
+            {
+                Input(window).Text = $"  \"{source}\"  ";
+                Assert.Contains("Example App-", Output(window).Text);
+                Output(window).Text = $"\"{output}\"";
+                Control<TextBox>(window, "GhidraPathBox").Text = $"\"{ghidra}\"";
+                Control<CheckBox>(window, "NativeCheckBox").IsChecked = true;
+                Click(window, "AnalyzeButton");
+                await WaitUntil(() => Control<Button>(window, "AnalyzeButton").IsVisible);
+                Assert.NotNull(observed);
+                Assert.Equal(source, observed.InputPath);
+                Assert.Equal(output, observed.OutputDirectory);
+                Assert.Equal(ghidra, observed.GhidraInstallDir);
+                Assert.Equal(output, Output(window).Text);
                 return true;
             }
             finally { window.Close(); }
