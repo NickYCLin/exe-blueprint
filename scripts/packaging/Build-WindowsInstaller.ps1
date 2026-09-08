@@ -32,11 +32,7 @@ if (-not $CompilerPath) {
 if (-not (Test-Path -LiteralPath $CompilerPath -PathType Leaf)) {
     throw '找不到 Inno Setup 6.3 以上的 ISCC.exe；請用 -CompilerPath 指定。'
 }
-$compilerVersion = (Get-Item -LiteralPath $CompilerPath).VersionInfo
-if ($compilerVersion.FileMajorPart -lt 6 -or
-    ($compilerVersion.FileMajorPart -eq 6 -and $compilerVersion.FileMinorPart -lt 3)) {
-    throw 'Inno Setup 版本必須為 6.3 以上。'
-}
+# ISCC.exe 本身的檔案版本不等於 Inno Setup 產品版本；由編譯器檢查腳本需要的功能。
 
 $outputDir = [IO.Path]::GetFullPath($OutputDirectory)
 $installerPath = Join-Path $outputDir "ExeBlueprint-v$Version-win-x64-setup.exe"
