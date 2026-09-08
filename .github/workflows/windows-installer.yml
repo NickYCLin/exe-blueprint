@@ -1,0 +1,68 @@
+name: Windows installer
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/windows-installer.yml
+      - .github/workflows/release.yml
+      - packaging/**
+      - scripts/packaging/**
+      - src/**
+      - Directory.Build.props
+      - global.json
+  pull_request:
+    paths:
+      - .github/workflows/windows-installer.yml
+      - .github/workflows/release.yml
+      - packaging/**
+      - scripts/packaging/**
+      - src/**
+      - Directory.Build.props
+      - global.json
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  install-upgrade-uninstall:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.x
+      - name: Build installers
+        id: build
+        shell: pwsh
+        run: |
+          $outputDir = Join-Path $env:RUNNER_TEMP 'installer'
+          $installer = ./scripts/packaging/Build-WindowsInstaller.ps1 -OutputDirectory $outputDir
+          "installer=$installer" >> $env:GITHUB_OUTPUT
+          ./scripts/packaging/Build-WindowsInstaller.ps1 -OutputDirectory $outputDir `
+            -StageDirectory (Join-Path $outputDir 'stage') -Version 0.0.0
+      - name: Verify installation, upgrade and uninstall
+        shell: pwsh
+        run: |
+          [xml] $props = Get-Content ./Directory.Build.props -Raw
+          $version = [string] $props.Project.PropertyGroup.Version
+          $outputDir = Join-Path $env:RUNNER_TEMP 'installer'
+          ./scripts/packaging/Test-WindowsInstaller.ps1 `
+            -InstallerPath (Join-Path $outputDir "ExeBlueprint-v$version-win-x64-setup.exe") `
+            -PreviousInstallerPath (Join-Path $outputDir 'ExeBlueprint-v0.0.0-win-x64-setup.exe') `
+            -StageDirectory (Join-Path $outputDir 'stage') `
+            -ExpectedVersion $version `
+            -EvidenceDirectory (Join-Path $env:RUNNER_TEMP 'installer-acceptance')
+      - name: Upload installer and verification evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-installer
+          path: |
+            ${{ steps.build.outputs.installer }}
+            ${{ runner.temp }}/installer-acceptance/*.log
+            ${{ runner.temp }}/installer-acceptance/acceptance.json
+          if-no-files-found: warn
+          retention-days: 7

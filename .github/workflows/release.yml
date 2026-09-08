@@ -139,6 +139,16 @@ jobs:
           & (Join-Path $stageDir 'exe-blueprint-cli.exe') --version
           if ($LASTEXITCODE -ne 0) { throw 'Windows CLI smoke test 失敗。' }
 
+          $version = $env:RELEASE_TAG.TrimStart('v')
+          $installer = ./scripts/packaging/Build-WindowsInstaller.ps1 `
+              -StageDirectory $stageDir -OutputDirectory $assetDir -Version $version
+          $previousInstaller = ./scripts/packaging/Build-WindowsInstaller.ps1 `
+              -StageDirectory $stageDir -OutputDirectory (Join-Path $env:RUNNER_TEMP 'previous-installer') -Version 0.0.0
+          ./scripts/packaging/Test-WindowsInstaller.ps1 `
+              -InstallerPath $installer -PreviousInstallerPath $previousInstaller `
+              -StageDirectory $stageDir -ExpectedVersion $version `
+              -EvidenceDirectory (Join-Path $env:RUNNER_TEMP 'installer-acceptance')
+
       - name: Package Linux
         if: matrix.rid == 'linux-x64'
         shell: bash
@@ -186,7 +196,10 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: release-${{ matrix.rid }}
-          path: ${{ runner.temp }}/release-assets/*
+          path: |
+            ${{ runner.temp }}/release-assets/*.zip
+            ${{ runner.temp }}/release-assets/*.tar.gz
+            ${{ runner.temp }}/release-assets/*.exe
           if-no-files-found: error
           retention-days: 7
 
