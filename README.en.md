@@ -69,17 +69,17 @@ See the [detailed capabilities and roadmap](docs/capabilities.md) and [architect
 
 ### Desktop app
 
-1. Download your platform's package from [Releases](https://github.com/NickYCLin/exe-blueprint/releases/latest), verify it against `SHA256SUMS.txt`, and extract it.
+1. Download your platform's package from [Releases](https://github.com/NickYCLin/exe-blueprint/releases/latest), verify it against `SHA256SUMS.txt`, and install or extract it.
 2. Select or drop an input and confirm the output folder. Keep the defaults for a first analysis; additional languages and Ghidra are under advanced options.
 3. Progress, result counts and warnings appear on the right. Open the report or output folder from there. See the [desktop guide](docs/desktop-guide.md) for the current main interface; downloadable versions follow their release notes.
 
-The current `main` includes build and verification workflows for the [Windows installer](docs/windows-installer.md) and [macOS DMG](docs/macos-dmg.md). The next release will add `win-x64-setup.exe`, `macos-x64.dmg` and `macos-arm64.dmg`; ZIP packages remain available.
+Starting with v0.3.0, releases include a [Windows installer](docs/windows-installer.md) and [macOS DMG](docs/macos-dmg.md). Portable ZIP packages remain available.
 
 | Host platform | Package name ends with | Launch |
 | --- | --- | --- |
-| Windows 10/11 x64 | `win-x64.zip` | `ExeBlueprint.exe` |
-| macOS Apple Silicon | `macos-arm64.zip` | `ExeBlueprint.app` |
-| macOS Intel | `macos-x64.zip` | `ExeBlueprint.app` |
+| Windows 10/11 x64 | `win-x64-setup.exe` or `win-x64.zip` | Use the Start menu after installation, or run `ExeBlueprint.exe` |
+| macOS Apple Silicon | `macos-arm64.dmg` or `macos-arm64.zip` | Copy `ExeBlueprint.app` to Applications, then open it |
+| macOS Intel | `macos-x64.dmg` or `macos-x64.zip` | Copy `ExeBlueprint.app` to Applications, then open it |
 | Linux x64 | `linux-x64.tar.gz` | `ExeBlueprint` |
 
 Packages include the .NET runtime and an `exe-blueprint-cli` command-line version. The packaged `README.txt` explains first launch and Linux dependencies. Windows/macOS builds are unsigned; macOS builds are not notarized.

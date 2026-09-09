@@ -69,17 +69,17 @@ exe-blueprint-output/<輸入名稱>-<時間>/
 
 ### 桌面版
 
-1. 到 [Releases](https://github.com/NickYCLin/exe-blueprint/releases/latest) 下載對應平台的套件，依 `SHA256SUMS.txt` 核對後解壓縮。
+1. 到 [Releases](https://github.com/NickYCLin/exe-blueprint/releases/latest) 下載對應平台的套件，依 `SHA256SUMS.txt` 核對後安裝或解壓縮。
 2. 選擇或拖入分析來源，確認儲存位置。第一次使用可保留預設選項；其他語言與 Ghidra 設定在進階選項。
 3. 開始分析後，右側會顯示進度、結果摘要與注意事項，再按「閱讀報告」或「開啟結果資料夾」。新版操作流程見[桌面版說明](docs/desktop-guide.md)，下載版請以該版本說明為準。
 
-`main` 已加入 [Windows 安裝程式](docs/windows-installer.md)與 [macOS DMG](docs/macos-dmg.md)的建置及驗收流程；`win-x64-setup.exe`、`macos-x64.dmg` 與 `macos-arm64.dmg` 會從下一次版本發布起提供，ZIP 版仍保留。
+v0.3.0 起提供 [Windows 安裝程式](docs/windows-installer.md)與 [macOS DMG](docs/macos-dmg.md)，ZIP 免安裝版仍保留。
 
 | 執行環境 | 下載套件名稱結尾 | 啟動檔 |
 | --- | --- | --- |
-| Windows 10／11 x64 | `win-x64.zip` | `ExeBlueprint.exe` |
-| macOS Apple Silicon | `macos-arm64.zip` | `ExeBlueprint.app` |
-| macOS Intel | `macos-x64.zip` | `ExeBlueprint.app` |
+| Windows 10／11 x64 | `win-x64-setup.exe` 或 `win-x64.zip` | 安裝後從開始功能表開啟，或執行 `ExeBlueprint.exe` |
+| macOS Apple Silicon | `macos-arm64.dmg` 或 `macos-arm64.zip` | 將 `ExeBlueprint.app` 放入「應用程式」後開啟 |
+| macOS Intel | `macos-x64.dmg` 或 `macos-x64.zip` | 將 `ExeBlueprint.app` 放入「應用程式」後開啟 |
 | Linux x64 | `linux-x64.tar.gz` | `ExeBlueprint` |
 
 下載套件已包含 .NET runtime，也附有 `exe-blueprint-cli` 命令列版本。首次開啟與 Linux 相依套件的說明在壓縮檔內的 `README.txt`；目前 Windows／macOS 產物未做商業程式碼簽章，macOS 未經公證。

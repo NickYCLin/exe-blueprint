@@ -1,6 +1,6 @@
 # macOS DMG
 
-macOS 桌面版提供 Intel（`macos-x64.dmg`）與 Apple Silicon（`macos-arm64.dmg`）兩種磁碟映像，從下一次版本發布起加入 Release；原有 ZIP 版仍保留。套件包含 .NET runtime，不需要另外安裝。
+v0.3.0 起，Release 提供 macOS Intel（`macos-x64.dmg`）與 Apple Silicon（`macos-arm64.dmg`）兩種磁碟映像，也保留 ZIP 版。套件包含 .NET runtime，不需要另外安裝。
 
 ## 安裝與更新
 
@@ -28,7 +28,7 @@ stage/
 再執行以下命令，版本必須與 `Info.plist` 一致，架構可選 `x64` 或 `arm64`：
 
 ```bash
-bash scripts/packaging/build-macos-dmg.sh stage artifacts/packages 0.2.1 arm64
+bash scripts/packaging/build-macos-dmg.sh stage artifacts/packages 0.3.0 arm64
 ```
 
 腳本會檢查 bundle 版本及主程式／CLI 架構，用 `ditto` 保留 app bundle 內容，加入指向 `/Applications` 的連結，再以 `hdiutil` 建立壓縮唯讀映像。輸出檔已存在時會停止，不會覆寫。格式與複製方式依照 [Apple 的發佈封裝說明](https://developer.apple.com/documentation/xcode/packaging-mac-software-for-distribution)。

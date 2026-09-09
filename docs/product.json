@@ -188,7 +188,7 @@
     {
       "id": "windows-installer",
       "status": "available",
-      "summary": "Per-user Windows x64 installer with Traditional Chinese and English, Start Menu integration and uninstall; available from the next release.",
+      "summary": "Per-user Windows x64 installer with Traditional Chinese and English, Start Menu integration and uninstall; available starting with v0.3.0.",
       "verificationLimit": "GitHub Windows runner verified install, simulated 0.0.0 upgrade, payload hashes, installed CLI version, uninstall and preservation of user-added files. Unsigned.",
       "sourcePaths": ["packaging/windows/ExeBlueprint.iss", "scripts/packaging/Test-WindowsInstaller.ps1"]
     }

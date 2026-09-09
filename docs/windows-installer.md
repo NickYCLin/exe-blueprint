@@ -1,6 +1,6 @@
 # Windows 安裝程式
 
-Windows x64 桌面版可打包成 `ExeBlueprint-v<版本>-win-x64-setup.exe`。ZIP 免安裝版仍會保留，安裝程式從下一次版本發布起加入 Release。
+v0.3.0 起，Release 提供 Windows x64 桌面版安裝程式 `ExeBlueprint-v<版本>-win-x64-setup.exe`，也保留 ZIP 免安裝版。
 
 安裝精靈提供繁體中文與英文，預設安裝到目前使用者的 `%LOCALAPPDATA%\Programs\ExeBlueprint`，不需要系統管理員權限。開始功能表會加入 ExeBlueprint；桌面捷徑可自行勾選。桌面版與 CLI 都已包含 .NET runtime。
 
