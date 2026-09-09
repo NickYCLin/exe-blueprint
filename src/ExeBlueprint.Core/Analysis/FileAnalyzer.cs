@@ -27,13 +27,12 @@ internal sealed class FileAnalyzer
         ArgumentNullException.ThrowIfNull(origin);
 
         var info = new FileInfo(fullPath);
-        if (info.Length > _options.MaxFileBytes)
-        {
-            return CreateSkippedArtifact(relativePath, info, origin, "檔案超過單檔分析上限");
-        }
-
         try
         {
+            if (info.Length > _options.MaxFileBytes)
+            {
+                return CreateSkippedArtifact(relativePath, info, origin, "檔案超過單檔分析上限");
+            }
             var sha256 = await ComputeSha256Async(fullPath, cancellationToken).ConfigureAwait(false);
             var signals = await BinarySignalReader.CreateAsync(
                 fullPath,
@@ -45,10 +44,10 @@ internal sealed class FileAnalyzer
                 ? FileClassifier.Classify(relativePath, signals.Header)
                 : (pe.IsLibrary ? "library" : "executable", pe.IsManaged ? ".NET Portable Executable" : "Native Portable Executable");
             var technologies = TechnologyDetector.DetectFile(relativePath, pe, signals);
-            var code = pe?.IsManaged == true
+            var code = pe?.IsManaged == true && !_options.InventoryOnly
                 ? await ManagedSymbolReader.TryReadAsync(fullPath, cancellationToken).ConfigureAwait(false)
                 : null;
-            var nativeCode = _options.EnableNativeAnalysis && pe is not null && !pe.IsManaged
+            var nativeCode = !_options.InventoryOnly && _options.EnableNativeAnalysis && pe is not null && !pe.IsManaged
                 ? await NativeAnalyzer.AnalyzeAsync(fullPath, _options, cancellationToken).ConfigureAwait(false)
                 : null;
 

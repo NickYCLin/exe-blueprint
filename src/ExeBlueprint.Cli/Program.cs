@@ -37,13 +37,15 @@ static async Task<int> RunAsync(string[] args, CancellationToken cancellationTok
             OutputDirectory = parsed.OutputDirectory,
             Overwrite = parsed.Force,
             JsonOnly = parsed.JsonOnly,
+            InventoryOnly = parsed.InventoryOnly,
+            SourceMode = parsed.SourceMode,
             EmitCSharp = parsed.EmitCSharp,
             EmitCpp = parsed.EmitCpp,
             EmitRust = parsed.EmitRust,
             EmitGo = parsed.EmitGo,
             EnableNativeAnalysis = parsed.Native,
             GhidraInstallDir = parsed.GhidraDir
-        }, cancellationToken: cancellationToken);
+        }, new ConsoleAnalysisProgress(), cancellationToken);
 
         foreach (var skeleton in result.Skeletons)
         {
@@ -59,6 +61,8 @@ static async Task<int> RunAsync(string[] args, CancellationToken cancellationTok
         Console.WriteLine($"PE 執行檔：{document.Summary.ExecutableCount:N0}");
         Console.WriteLine($"程式庫：{document.Summary.LibraryCount:N0}");
         Console.WriteLine($"型別／方法：{document.Summary.TypeCount:N0}／{document.Summary.MethodCount:N0}");
+        Console.WriteLine($"專案／組件：{document.ProjectGraph.Components.Count:N0}；參照：{document.ProjectGraph.References.Count:N0}");
+        if (parsed.InventoryOnly) Console.WriteLine("本次為結構盤點，未深入分析型別、方法或內嵌資源。");
         Console.WriteLine($"辨識結果：{FormatTechnologies(document.Technologies.Select(item => item.Name))}");
         if (document.Warnings.Count > 0)
         {
@@ -91,6 +95,8 @@ static ParsedArguments ParseArguments(string[] args)
     string? outputDirectory = null;
     var force = false;
     var jsonOnly = false;
+    var inventoryOnly = false;
+    var sourceMode = false;
     var emitCSharp = false;
     var emitCpp = false;
     var emitRust = false;
@@ -130,6 +136,12 @@ static ParsedArguments ParseArguments(string[] args)
             case "--json-only":
                 jsonOnly = true;
                 break;
+            case "--inventory":
+                inventoryOnly = true;
+                break;
+            case "--source":
+                sourceMode = true;
+                break;
             case "--emit-csharp":
                 emitCSharp = true;
                 break;
@@ -147,7 +159,9 @@ static ParsedArguments ParseArguments(string[] args)
         }
     }
 
-    return new ParsedArguments(inputPath, outputDirectory, force, jsonOnly, emitCSharp, emitCpp, emitRust, emitGo, native, ghidraDir);
+    if (inventoryOnly && (emitCSharp || emitCpp || emitRust || emitGo || native))
+        throw new ArgumentException("--inventory 只盤點結構，不能同時產生骨架或啟用 Ghidra；請另做深入分析。");
+    return new ParsedArguments(inputPath, outputDirectory, force, jsonOnly, emitCSharp, emitCpp, emitRust, emitGo, native, ghidraDir, inventoryOnly, sourceMode);
 }
 
 static string FormatTechnologies(IEnumerable<string> technologies)
@@ -170,6 +184,9 @@ static void PrintHelp()
     Console.WriteLine("選項：");
     Console.WriteLine("  -o, --output <目錄>  指定輸出目錄");
     Console.WriteLine("  --json-only          只輸出 blueprint.json");
+    Console.WriteLine("  --inventory          大型系統先盤點結構，略過 IL、資源內容與 Ghidra");
+    Console.WriteLine("  --source             原始碼資料夾略過 bin、obj、版本控制與已安裝套件");
+    Console.WriteLine("                       也可直接選擇 .sln、.slnx 或 .csproj 等專案描述檔");
     Console.WriteLine("  --emit-csharp        另外產生 .NET 型別的 C# 骨架（含還原的方法體）");
     Console.WriteLine("  --emit-cpp           另外產生 C++ 型別骨架");
     Console.WriteLine("  --emit-rust          另外產生 Rust 型別骨架");
@@ -193,4 +210,22 @@ internal sealed record ParsedArguments(
     bool EmitRust,
     bool EmitGo,
     bool Native,
-    string? GhidraDir);
+    string? GhidraDir,
+    bool InventoryOnly,
+    bool SourceMode);
+
+internal sealed class ConsoleAnalysisProgress : IProgress<BlueprintExportProgress>
+{
+    private long _lastReport;
+    public void Report(BlueprintExportProgress value)
+    {
+        if (value.CompletedFiles is null) return;
+        var now = System.Diagnostics.Stopwatch.GetTimestamp();
+        if (value.CompletedFiles == 0 || value.CompletedFiles == value.TotalFiles ||
+            System.Diagnostics.Stopwatch.GetElapsedTime(_lastReport, now).TotalSeconds >= 1)
+        {
+            Console.WriteLine(value.Message);
+            _lastReport = now;
+        }
+    }
+}

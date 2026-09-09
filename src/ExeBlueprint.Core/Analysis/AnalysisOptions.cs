@@ -2,6 +2,14 @@ namespace ExeBlueprint.Analysis;
 
 public sealed record AnalysisOptions
 {
+    // 先盤點組件與專案關係，不讀取 IL、內嵌資源或啟動 Ghidra。
+    public bool InventoryOnly { get; init; }
+
+    // 原始碼目錄略過版本控制、建置輸出及已安裝的相依套件。
+    public bool SourceMode { get; init; }
+
+    internal string? ExcludedOutputDirectory { get; init; }
+
     public int MaxFiles { get; init; } = 25_000;
 
     public long MaxTotalBytes { get; init; } = 20L * 1024 * 1024 * 1024;

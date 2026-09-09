@@ -1,5 +1,6 @@
 using ExeBlueprint.Input;
 using ExeBlueprint.Models;
+using System.Diagnostics;
 
 namespace ExeBlueprint.Analysis;
 
@@ -8,7 +9,8 @@ public sealed class BlueprintAnalyzer
     public async Task<BlueprintDocument> AnalyzeAsync(
         string inputPath,
         AnalysisOptions? options = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        IProgress<AnalysisProgress>? progress = null)
     {
         options ??= new AnalysisOptions();
         ValidateOptions(options);
@@ -20,33 +22,66 @@ public sealed class BlueprintAnalyzer
 
         var warnings = workspace.Warnings.ToList();
         var fileAnalyzer = new FileAnalyzer(options);
-        var artifacts = new List<FileArtifact>(workspace.Files.Count);
-        foreach (var file in workspace.Files)
+        var results = new FileArtifact[workspace.Files.Count];
+        var completedFiles = 0;
+        var progressLock = new object();
+        progress?.Report(new AnalysisProgress(0, workspace.Files.Count, null));
+        var lastProgress = Stopwatch.GetTimestamp();
+        if (options.InventoryOnly)
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            var artifact = await fileAnalyzer.AnalyzeAsync(
+            await Parallel.ForEachAsync(Enumerable.Range(0, workspace.Files.Count), new ParallelOptions
+            {
+                MaxDegreeOfParallelism = Math.Min(4, Environment.ProcessorCount),
+                CancellationToken = cancellationToken
+            }, AnalyzeFileAsync).ConfigureAwait(false);
+        }
+        else
+        {
+            for (var index = 0; index < workspace.Files.Count; index++)
+                await AnalyzeFileAsync(index, cancellationToken).ConfigureAwait(false);
+        }
+        var artifacts = results.ToList();
+        foreach (var artifact in artifacts)
+        {
+            if (!string.IsNullOrWhiteSpace(artifact.AnalysisError))
+                warnings.Add($"{artifact.RelativePath}：{artifact.AnalysisError}");
+            if (artifact.NativeCode is { Note: { Length: > 0 } note }) warnings.Add(note);
+        }
+
+        async ValueTask AnalyzeFileAsync(int index, CancellationToken token)
+        {
+            token.ThrowIfCancellationRequested();
+            var file = workspace.Files[index];
+            results[index] = await fileAnalyzer.AnalyzeAsync(
                 file.PhysicalPath,
                 file.LogicalPath,
                 file.Origin,
-                cancellationToken).ConfigureAwait(false);
-            artifacts.Add(artifact);
-            if (!string.IsNullOrWhiteSpace(artifact.AnalysisError))
+                token).ConfigureAwait(false);
+            lock (progressLock)
             {
-                warnings.Add($"{artifact.RelativePath}：{artifact.AnalysisError}");
-            }
-
-            if (artifact.NativeCode is { Note: { Length: > 0 } note })
-            {
-                warnings.Add(note);
+                completedFiles++;
+                if (completedFiles == workspace.Files.Count || Stopwatch.GetElapsedTime(lastProgress).TotalMilliseconds >= 100)
+                {
+                    progress?.Report(new AnalysisProgress(completedFiles, workspace.Files.Count, file.LogicalPath));
+                    lastProgress = Stopwatch.GetTimestamp();
+                }
             }
         }
 
+        progress?.Report(new AnalysisProgress(artifacts.Count, workspace.Files.Count, null, "projects"));
         var technologies = TechnologyDetector.DetectPackage(artifacts);
         var dependencies = DependencyGraphBuilder.Build(artifacts);
+        var projectGraph = await ProjectGraphAnalyzer.AnalyzeAsync(workspace.Files, artifacts, dependencies, cancellationToken)
+            .ConfigureAwait(false);
+        var notedProjects = projectGraph.Components.Count(component => component.Notes.Count > 0);
+        if (notedProjects > 0) warnings.Add($"有 {notedProjects:N0} 個專案描述檔含未求值或未完整解析項目，請查看專案總覽的注意事項。");
+        if (projectGraph.Truncated) warnings.Add("專案圖已達安全上限，請查看 projectGraph.truncated；目前結果不是完整專案圖。");
         var summary = CreateSummary(artifacts, dependencies);
 
         return new BlueprintDocument
         {
+            AnalysisMode = options.InventoryOnly ? "inventory" : "full",
+            ProjectGraph = projectGraph,
             Input = new InputDescriptor
             {
                 Name = workspace.Name,

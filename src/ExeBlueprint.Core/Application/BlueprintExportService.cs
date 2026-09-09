@@ -17,6 +17,10 @@ public sealed record BlueprintExportRequest
 
     public bool JsonOnly { get; init; }
 
+    public bool InventoryOnly { get; init; }
+
+    public bool SourceMode { get; init; }
+
     public bool EmitCSharp { get; init; }
 
     public bool EmitCpp { get; init; }
@@ -30,7 +34,7 @@ public sealed record BlueprintExportRequest
     public string? GhidraInstallDir { get; init; }
 }
 
-public sealed record BlueprintExportProgress(string Message);
+public sealed record BlueprintExportProgress(string Message, int? CompletedFiles = null, int? TotalFiles = null);
 
 public sealed record SkeletonExportResult(string Language, string Directory, int FileCount);
 
@@ -73,10 +77,18 @@ public sealed class BlueprintExportService
         var analyzer = new BlueprintAnalyzer();
         var analysisOptions = new AnalysisOptions
         {
+            InventoryOnly = request.InventoryOnly,
+            SourceMode = request.SourceMode,
+            ExcludedOutputDirectory = outputDirectory,
             EnableNativeAnalysis = request.EnableNativeAnalysis,
             GhidraInstallDir = NullIfWhiteSpace(request.GhidraInstallDir)
         };
-        var document = await analyzer.AnalyzeAsync(inputPath, analysisOptions, cancellationToken)
+        var fileProgress = new InlineProgress<AnalysisProgress>(value => progress?.Report(value.Stage == "projects"
+            ? new BlueprintExportProgress("正在整理專案與組件相依關係…")
+            : new BlueprintExportProgress(
+                $"正在分析檔案（{value.CompletedFiles:N0}/{value.TotalFiles:N0}）：{value.CurrentFile ?? "準備開始"}",
+                value.CompletedFiles, value.TotalFiles)));
+        var document = await analyzer.AnalyzeAsync(inputPath, analysisOptions, cancellationToken, fileProgress)
             .ConfigureAwait(false);
 
         progress?.Report(new BlueprintExportProgress("正在寫入 blueprint.json…"));
@@ -102,7 +114,7 @@ public sealed class BlueprintExportService
             string directoryName,
             Func<BlueprintDocument, IReadOnlyList<GeneratedFile>> generator)
         {
-            if (!enabled)
+            if (!enabled || request.InventoryOnly)
             {
                 return;
             }

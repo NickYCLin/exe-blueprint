@@ -425,6 +425,52 @@ public sealed class MainWindowTests(DesktopTestSession desktopSession) : IDispos
         }, TestContextToken);
     }
 
+    [Fact]
+    public async Task InventoryModeDisablesDeepAnalysisAndDisplaysFileProgress()
+    {
+        await desktopSession.Session.Dispatch(async () =>
+        {
+            BlueprintExportRequest? observed = null;
+            var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var finish = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var window = CreateWindow(async (request, progress, _) =>
+            {
+                observed = request;
+                progress.Report(new BlueprintExportProgress("正在分析檔案（250/1,000）", 250, 1000));
+                entered.SetResult();
+                await finish.Task;
+                var result = Result(Path.Combine(_temporaryDirectory, "result"));
+                return result with { Document = result.Document with { AnalysisMode = "inventory" }, Skeletons = [] };
+            });
+            try
+            {
+                Input(window).Text = Path.Combine(Path.GetPathRoot(_temporaryDirectory)!, "ExampleProjects", "LargeSystem", "Large.slnx");
+                Output(window).Text = Path.Combine(Path.GetPathRoot(_temporaryDirectory)!, "ExampleResults", "LargeSystem");
+                Control<CheckBox>(window, "InventoryCheckBox").IsChecked = true;
+                Control<CheckBox>(window, "SourceModeCheckBox").IsChecked = true;
+                Assert.False(Control<CheckBox>(window, "CSharpCheckBox").IsEnabled);
+                Assert.False(Control<CheckBox>(window, "NativeCheckBox").IsEnabled);
+                Capture(window, "inventory-ready");
+                Click(window, "AnalyzeButton");
+                await entered.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                await WaitUntil(() => Control<ProgressBar>(window, "AnalysisProgressBar").Value == 25);
+                Assert.False(Control<ProgressBar>(window, "AnalysisProgressBar").IsIndeterminate);
+                Assert.True(observed!.InventoryOnly);
+                Assert.True(observed.SourceMode);
+                Assert.False(observed.EmitCSharp);
+                Assert.False(observed.EnableNativeAnalysis);
+                Assert.False(Control<CheckBox>(window, "InventoryCheckBox").IsEnabled);
+                Capture(window, "inventory-running");
+                finish.SetResult();
+                await WaitUntil(() => Control<Button>(window, "AnalyzeButton").IsVisible);
+                Assert.Equal("—", Control<TextBlock>(window, "TypeCountText").Text);
+                Assert.Equal("—", Control<TextBlock>(window, "MethodCountText").Text);
+                return true;
+            }
+            finally { finish.TrySetResult(); window.Close(); }
+        }, TestContextToken);
+    }
+
     private MainWindow CreateWindow(
         Func<BlueprintExportRequest, IProgress<BlueprintExportProgress>, CancellationToken, Task<BlueprintExportResult>>? run = null)
     {

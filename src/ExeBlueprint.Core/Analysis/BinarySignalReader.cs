@@ -68,14 +68,14 @@ internal sealed class BinarySignalReader
     {
         const int chunkSize = 1024 * 1024;
         var overlapSize = DotNetBundleMarker.Length + sizeof(long) - 1;
-        var buffer = new byte[chunkSize + overlapSize];
+        var buffer = new byte[(int)Math.Min(stream.Length, chunkSize) + overlapSize];
         var carry = 0;
         long consumed = 0;
 
         while (true)
         {
             var read = await stream.ReadAsync(
-                buffer.AsMemory(carry, chunkSize),
+                buffer.AsMemory(carry, Math.Min(chunkSize, buffer.Length - carry)),
                 cancellationToken).ConfigureAwait(false);
             if (read == 0)
             {
