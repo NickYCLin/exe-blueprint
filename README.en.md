@@ -37,7 +37,7 @@ The tool runs on **Windows, macOS and Linux**, with a **desktop app and CLI**. I
 
 | Stage | What it includes |
 | --- | --- |
-| **Input** | An EXE/DLL file, folder, ZIP or Electron ASAR archive |
+| **Input** | An EXE/DLL file, folder, ZIP, Electron ASAR archive, solution or MSBuild project descriptor |
 | **Analysis** | File hashes, PE structure, technology detection, dependencies, .NET metadata/IL and embedded resources; optional Ghidra analysis |
 | **Read the results** | `REPORT.md`: a Traditional Chinese summary for human review |
 | **Process the data** | `blueprint.json`: structured results for programs or AI tools |
@@ -56,6 +56,7 @@ exe-blueprint-output/<input-name>-<timestamp>/
 | Area | Available now | Scope and limits |
 | --- | --- | --- |
 | File and package inventory | PE, SHA-256, imports, assembly references, ZIP/ASAR expansion | Archive size and depth are bounded; outer installer extraction is still planned |
+| Large-system overview | Inventory mode, solution/project/component references and file progress | Source support reads declared project structure; it does not evaluate MSBuild or perform source semantic analysis |
 | Technology detection | Common .NET, VB6, Delphi, Go, Rust, Python, E-language, Qt and Electron fingerprints | Results include evidence and confidence; detection does not imply source-code recovery |
 | .NET structure | Types, fields, properties, events, methods, IL and call graphs | Unsupported or incomplete data is marked |
 | Resources and configuration | `.resources`, PNG/GIF header dimensions, WPF BAML structure, embedded JSON/XML configuration structure | Configuration summaries omit values; image pixels are not validated; BAML summaries are not full UI reconstruction |
@@ -118,7 +119,9 @@ If Ghidra is missing, other analysis continues and the native result records why
 
 **To understand this product**, read [docs/product.json](docs/product.json): it lists positioning, inputs, outputs, feature status, limitations and source references. This product profile is separate from an analysis result's `blueprint.json`.
 
-**To read an analysis result**, start with `schemaVersion`, `summary` and `warnings`, then inspect the relevant `files`, `dependencies`, `technologies` and `archives`. The current `main` output schema is `0.19`.
+For large source folders, use `--source --inventory`; for compiled application folders, use `--inventory`. The overview keeps project and assembly references while skipping IL, embedded resource contents and Ghidra. See [large-project analysis](docs/large-project-analysis.md) for scope and reproducible scale checks.
+
+**To read an analysis result**, start with `schemaVersion`, `analysisMode`, `summary` and `warnings`, then inspect `projectGraph`, `files`, `dependencies`, `technologies` and `archives`. The current `main` output schema is `0.20`.
 
 - Read technology detections together with their `evidence` and `confidence`.
 - Truncation flags, `complete=false` and error fields indicate missing information. Missing data is not evidence of absence; see the [architecture](docs/architecture.md) for field definitions.

@@ -10,7 +10,7 @@
   "license": "MIT",
   "descriptionScope": {
     "sourceBranch": "main",
-    "analysisOutputSchemaVersion": "0.19",
+    "analysisOutputSchemaVersion": "0.20",
     "releasePolicy": "Capabilities describe the current main source, not every downloadable release. Consult the selected release notes.",
     "releaseUrl": "https://github.com/NickYCLin/exe-blueprint/releases",
     "maintenance": "Update this profile with README.md, README.en.md and the source contracts when capabilities change.",
@@ -41,7 +41,9 @@
     "file",
     "directory",
     "zip",
-    "electron-asar"
+    "electron-asar",
+    "solution-or-msbuild-project-descriptor",
+    "source-directory"
   ],
   "execution": {
     "runsInputApplication": false,
@@ -186,6 +188,13 @@
       ]
     },
     {
+      "id": "large-project-inventory",
+      "status": "partial",
+      "summary": "Inventory mode for large source and compiled folders, with solution/project/assembly nodes, declared references and file progress.",
+      "limitation": "Reads bounded SLN, SLNX and MSBuild project declarations without evaluating imports, conditions or central package versions. No source semantic analysis or automatic source-to-binary identity mapping. Inventory mode skips IL, resource contents, Ghidra and skeleton generation.",
+      "sourcePaths": ["src/ExeBlueprint.Core/Analysis/ProjectGraphAnalyzer.cs", "src/ExeBlueprint.Core/Models/ProjectGraph.cs", "scripts/Test-LargeProjectAnalysis.ps1"]
+    },
+    {
       "id": "windows-installer",
       "status": "available",
       "summary": "Per-user Windows x64 installer with Traditional Chinese and English, Start Menu integration and uninstall; available starting with v0.3.0.",
@@ -206,10 +215,12 @@
   "resultReading": {
     "firstFields": [
       "schemaVersion",
+      "analysisMode",
       "summary",
       "warnings"
     ],
     "detailFields": [
+      "projectGraph",
       "files",
       "dependencies",
       "technologies",
@@ -234,6 +245,7 @@
     "capabilities": "docs/capabilities.md",
     "architecture": "docs/architecture.md",
     "nativeAcceptance": "docs/native-acceptance.md",
+    "largeProjectAnalysis": "docs/large-project-analysis.md",
     "contributing": "CONTRIBUTING.md",
     "releasing": "docs/releasing.md"
   }

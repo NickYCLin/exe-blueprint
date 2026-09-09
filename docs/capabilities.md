@@ -44,7 +44,9 @@
 
 ## 報告內容
 
-`blueprint.json` 目前使用 schema `0.19`，是後續專案重建和轉語言要共用的資料格式，內容包含：
+`blueprint.json` 目前使用 schema `0.20`，是後續專案重建和轉語言要共用的資料格式，內容包含：
+
+- 大型系統結構盤點：`analysisMode`、方案／子專案／組件 `projectGraph` 與參照狀態；可從 `.sln`／`.slnx`／MSBuild 專案描述檔或原始碼目錄進入，範圍見[大型專案分析](large-project-analysis.md)。
 
 - 輸入套件摘要
 - 每個檔案的格式、雜湊與來源資訊（provenance；直接輸入、資料夾、ZIP 或 ASAR，以及直接容器、項目和深度）

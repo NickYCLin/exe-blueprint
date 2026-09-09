@@ -9,6 +9,10 @@ namespace ExeBlueprint.Input;
 internal sealed class InputWorkspace : IAsyncDisposable
 {
     private const int MaximumLogicalPathCharacters = 32_768;
+    private static readonly HashSet<string> SourceExcludedDirectories = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".git", ".svn", ".hg", ".vs", ".idea", "bin", "obj", "node_modules", ".venv", "venv", "artifacts", "exe-blueprint-output"
+    };
     private readonly string? _temporaryDirectory;
 
     private InputWorkspace(
@@ -55,6 +59,11 @@ internal sealed class InputWorkspace : IAsyncDisposable
         cancellationToken.ThrowIfCancellationRequested();
 
         var fullPath = Path.GetFullPath(inputPath);
+        var sourceEntry = File.Exists(fullPath) && ProjectGraphAnalyzer.IsSourceEntry(fullPath);
+        if (sourceEntry)
+        {
+            options = options with { SourceMode = true };
+        }
         var warnings = new WarningCollector();
         var states = new List<WorkspaceFileState>();
         string? temporaryDirectory = null;
@@ -63,11 +72,16 @@ internal sealed class InputWorkspace : IAsyncDisposable
 
         try
         {
-            if (Directory.Exists(fullPath))
+            if (Directory.Exists(fullPath) || sourceEntry)
             {
-                states.AddRange(EnumerateDirectoryFiles(fullPath, options, warnings, cancellationToken));
-                kind = "directory";
-                name = new DirectoryInfo(fullPath).Name;
+                var rootPath = sourceEntry ? Path.GetDirectoryName(fullPath)! : fullPath;
+                states.AddRange(EnumerateDirectoryFiles(rootPath, options, warnings, cancellationToken));
+                kind = options.SourceMode ? "source-directory" : "directory";
+                name = sourceEntry ? Path.GetFileName(fullPath) : new DirectoryInfo(fullPath).Name;
+                if (sourceEntry)
+                {
+                    warnings.Add("已掃描所選方案／專案所在的資料夾；根目錄以外的參照只列出，不會追讀。");
+                }
             }
             else
             {
@@ -208,18 +222,7 @@ internal sealed class InputWorkspace : IAsyncDisposable
         {
             cancellationToken.ThrowIfCancellationRequested();
             var current = pending.Pop();
-            FileSystemInfo[] entries;
-            try
-            {
-                entries = new DirectoryInfo(current).GetFileSystemInfos();
-            }
-            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
-            {
-                warnings.Add($"無法讀取目錄：{GetDirectoryRelativePath(rootPath, current)}（{exception.Message}）");
-                continue;
-            }
-
-            foreach (var entry in entries.OrderBy(item => item.Name, StringComparer.OrdinalIgnoreCase))
+            foreach (var entry in EnumerateEntries(current))
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 visitedNodes++;
@@ -251,6 +254,13 @@ internal sealed class InputWorkspace : IAsyncDisposable
 
                 if (entry is DirectoryInfo directory)
                 {
+                    if ((options.SourceMode && SourceExcludedDirectories.Contains(directory.Name)) ||
+                        string.Equals(directory.FullName, options.ExcludedOutputDirectory,
+                            OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
+                    {
+                        warnings.Add($"略過目錄：{observedLogicalPath}（原始碼相依套件、建置資料或本次輸出目錄）");
+                        continue;
+                    }
                     pending.Push(directory.FullName);
                     continue;
                 }
@@ -274,6 +284,36 @@ internal sealed class InputWorkspace : IAsyncDisposable
         }
 
         return files;
+
+        IEnumerable<FileSystemInfo> EnumerateEntries(string directory)
+        {
+            IEnumerator<FileSystemInfo>? enumerator = null;
+            try { enumerator = new DirectoryInfo(directory).EnumerateFileSystemInfos().GetEnumerator(); }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                warnings.Add($"無法讀取目錄：{GetDirectoryRelativePath(rootPath, directory)}（{exception.Message}）");
+            }
+            if (enumerator is null) yield break;
+            using (enumerator)
+            {
+                while (true)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    FileSystemInfo entry;
+                    try
+                    {
+                        if (!enumerator.MoveNext()) break;
+                        entry = enumerator.Current;
+                    }
+                    catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+                    {
+                        warnings.Add($"無法讀取目錄：{GetDirectoryRelativePath(rootPath, directory)}（{exception.Message}）");
+                        break;
+                    }
+                    yield return entry;
+                }
+            }
+        }
     }
 
     private static async Task<IReadOnlyList<WorkspaceFileState>> ExtractZipSafelyAsync(

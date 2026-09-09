@@ -2,7 +2,7 @@
 
 **先看懂程式，再決定怎麼接手。**
 
-ExeBlueprint 把 Windows EXE、DLL 與應用程式套件整理成程式藍圖：有哪些檔案、用了什麼技術、依賴哪些組件，以及能讀出多少程式結構。
+ExeBlueprint 把 Windows EXE、DLL、應用程式套件與 .NET 原始碼專案結構整理成程式藍圖：有哪些專案與檔案、用了什麼技術、依賴哪些組件，以及能讀出多少程式結構。
 分析結果同時提供可直接閱讀的 Markdown 報告，以及供腳本或 AI 處理的 JSON。
 
 [下載桌面版](https://github.com/NickYCLin/exe-blueprint/releases/latest) · [開始使用](#開始使用) · [功能詳解](docs/capabilities.md) · [給 AI 的產品資料](docs/product.json) · [English](README.en.md)
@@ -37,7 +37,7 @@ ExeBlueprint 把 Windows EXE、DLL 與應用程式套件整理成程式藍圖：
 
 | 階段 | 內容 |
 | --- | --- |
-| **輸入** | 單一 EXE／DLL、資料夾、ZIP、Electron ASAR |
+| **輸入** | 單一 EXE／DLL、資料夾、ZIP、Electron ASAR，以及 .sln／.slnx／MSBuild 專案描述檔 |
 | **分析** | 檔案雜湊、PE 結構、技術辨識、相依關係、.NET metadata／IL 與內嵌資源；可選配 Ghidra 原生分析 |
 | **閱讀結果** | `REPORT.md`：繁體中文摘要，方便先看重點 |
 | **處理資料** | `blueprint.json`：結構化結果，方便程式或 AI 讀取 |
@@ -56,6 +56,7 @@ exe-blueprint-output/<輸入名稱>-<時間>/
 | 項目 | 已有能力 | 使用時要知道 |
 | --- | --- | --- |
 | 檔案與套件盤點 | PE、SHA-256、imports、assembly references、ZIP／ASAR 展開 | 封存有大小與深度上限；尚未解開各類外層安裝器 |
+| 大型系統總覽 | 結構盤點、方案／子專案／組件與參照、逐檔進度 | 原始碼目前解析描述檔宣告，未做 MSBuild 求值或原始碼語意分析 |
 | 技術辨識 | 辨識 .NET、VB6、Delphi、Go、Rust、Python、易語言、Qt、Electron 等常見特徵 | 結果附依據與可信度，辨識到語言不等於能還原該語言原始碼 |
 | .NET 結構分析 | 型別、欄位、屬性、事件、方法、IL、呼叫圖 | 遇到不支援或不完整的資料會保留註記 |
 | 資源與設定 | `.resources`、PNG／GIF 檔頭尺寸、WPF BAML 結構、內嵌 JSON／XML 設定結構 | 設定摘要省略值；圖片只讀檔頭，BAML 結構摘要不等於完整還原 UI |
@@ -114,11 +115,15 @@ dotnet run --project ./src/ExeBlueprint.Cli -- analyze ./Native.exe --native --g
 
 找不到 Ghidra 時，其他分析仍會繼續，原生分析會附上略過原因。匯出腳本使用 Jython；Ghidra 12.1.3 需先安裝隨附的 Jython 擴充，步驟與實測範圍見[原生分析驗收](docs/native-acceptance.md)。輸出目錄已有報告時預設不覆寫；需要覆寫時加上 `--force`。完整參數可用 `dotnet run --project ./src/ExeBlueprint.Cli -- --help` 查看。
 
+### 大型系統先盤點
+
+原始碼資料夾可加上 `--source --inventory`，編譯後的整包系統可用 `--inventory` 保留組件盤點、略過 IL 與資源內容。也能直接選擇 `.sln`／`.slnx` 或專案描述檔，先看子專案與相依關係，再深入分析選定的 EXE／DLL。桌面版提供相同選項，範圍與規模驗收方式見[大型專案分析](docs/large-project-analysis.md)。
+
 ## 給 AI 或自動化工具
 
 **了解這個產品**：讀取 [docs/product.json](docs/product.json)，其中列出定位、輸入、輸出、功能狀態、限制及原始碼依據。這是產品說明資料，與實際分析產生的 `blueprint.json` 分開。
 
-**閱讀一次分析結果**：先看 `schemaVersion`、`summary` 與 `warnings`，再依需求讀取 `files`、`dependencies`、`technologies` 和 `archives`。目前 `main` 輸出的 schema 是 `0.19`。
+**閱讀一次分析結果**：先看 `schemaVersion`、`analysisMode`、`summary` 與 `warnings`，再依需求讀取 `projectGraph`、`files`、`dependencies`、`technologies` 和 `archives`。目前 `main` 輸出的 schema 是 `0.20`。
 
 - 技術判斷要連同 `evidence` 與 `confidence` 閱讀。
 - `truncated`、`complete=false` 或錯誤欄位代表資料有缺口，不能把缺少的資料解讀成「不存在」。各層欄位定義見[架構說明](docs/architecture.md)。

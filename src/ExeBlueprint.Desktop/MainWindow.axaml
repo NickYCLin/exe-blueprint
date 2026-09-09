@@ -89,12 +89,12 @@
             <StackPanel Spacing="14">
               <StackPanel Spacing="4">
                 <TextBlock Classes="step" Text="步驟 1" />
-                <TextBlock Classes="sectionTitle" Text="選擇要分析的程式" />
+                <TextBlock Classes="sectionTitle" Text="選擇專案或程式" />
               </StackPanel>
               <Border x:Name="InputDropZone" Background="#F3F6FF" BorderBrush="#B9C8EF" BorderThickness="1" CornerRadius="9" Padding="18,16">
                 <StackPanel Spacing="12">
                   <TextBlock x:Name="InputDropTitleText" Text="把檔案或資料夾拖到這裡" FontWeight="SemiBold" Foreground="#334155" TextWrapping="Wrap" />
-                  <TextBlock Classes="hint" Text="支援 EXE、DLL、ZIP、ASAR 或整個程式資料夾" />
+                  <TextBlock Classes="hint" Text="支援方案、專案、EXE、DLL、ZIP、ASAR 或資料夾" />
                   <WrapPanel>
                     <Button x:Name="ChooseFileButton" Content="選擇檔案" Click="OnChooseFile" Margin="0,0,8,0" />
                     <Button x:Name="ChooseFolderButton" Content="選擇資料夾" Click="OnChooseFolder" />
@@ -127,6 +127,9 @@
                 </Grid>
               </StackPanel>
               <StackPanel Spacing="2">
+                <CheckBox x:Name="InventoryCheckBox" Content="先盤點大型系統的專案與組件" IsCheckedChanged="OnAnalysisModeChanged" />
+                <TextBlock Classes="hint" Text="盤點會略過方法與資源內容，不產生骨架；可先看總覽，再深入分析個別組件。" />
+                <CheckBox x:Name="SourceModeCheckBox" Content="原始碼資料夾（略過 bin、obj 與已安裝套件）" />
                 <CheckBox x:Name="ReportCheckBox" IsChecked="True" Content="閱讀報告（繁體中文）" />
                 <CheckBox x:Name="CSharpCheckBox" IsChecked="True" Content="C# 重建專案與程式骨架" />
                 <TextBlock Classes="hint" Text="另會保留 blueprint.json，方便交給其他工具接續處理。" />
@@ -172,9 +175,9 @@
               <Border x:Name="EmptyResultHint" Background="#F5F7FB" CornerRadius="8" Padding="16">
                 <StackPanel Spacing="10">
                   <TextBlock Text="你會得到什麼？" FontWeight="SemiBold" />
-                  <TextBlock Classes="hint" Text="程式使用的技術與相依套件" />
-                  <TextBlock Classes="hint" Text="型別、方法與可讀取的資源" />
-                  <TextBlock Classes="hint" Text="可接續重建的程式骨架" />
+                  <TextBlock Classes="hint" Text="專案、組件與相依套件總覽" />
+                  <TextBlock Classes="hint" Text="深入分析時另讀取型別、方法與資源" />
+                  <TextBlock Classes="hint" Text="原始碼目前解析專案宣告與參照" />
                 </StackPanel>
               </Border>
               <Grid x:Name="ResultStats" IsVisible="False" ColumnDefinitions="*,*" RowDefinitions="Auto,Auto" ColumnSpacing="8" RowSpacing="8">

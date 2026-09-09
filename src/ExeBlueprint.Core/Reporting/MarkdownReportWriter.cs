@@ -29,6 +29,8 @@ public static class MarkdownReportWriter
         builder.AppendLine($"- 檔案數：{document.Input.FileCount:N0}");
         builder.AppendLine($"- 總大小：{FormatBytes(document.Input.TotalBytes)}");
         builder.AppendLine($"- 產生時間：{document.GeneratedAtUtc:yyyy-MM-dd HH:mm:ss} UTC");
+        if (document.AnalysisMode == "inventory")
+            builder.AppendLine("- 分析模式：結構盤點。未深入讀取型別、方法或內嵌資源；這些計數為 0 不代表程式沒有內容。");
         builder.AppendLine();
 
         builder.AppendLine("## 摘要");
@@ -48,6 +50,7 @@ public static class MarkdownReportWriter
         builder.AppendLine($"| 方法（.NET） | {document.Summary.MethodCount} |");
         builder.AppendLine();
 
+        AppendProjectGraph(builder, document.ProjectGraph);
         builder.AppendLine("## 辨識結果");
         builder.AppendLine();
         if (document.Technologies.Count == 0)
@@ -76,10 +79,11 @@ public static class MarkdownReportWriter
         {
             builder.AppendLine("| 檔案 | 格式 | 架構 | 子系統 | 簽章資料 |");
             builder.AppendLine("| --- | --- | --- | --- | --- |");
-            foreach (var file in entryPoints)
+            foreach (var file in entryPoints.Take(200))
             {
                 builder.AppendLine($"| `{EscapeInline(file.RelativePath)}` | {EscapeCell(file.Format)} | {EscapeCell(file.Architecture ?? "-")} | {EscapeCell(file.Subsystem ?? "-")} | {(file.HasAuthenticodeSignature ? "有" : "無")} |");
             }
+            if (entryPoints.Length > 200) builder.AppendLine("（入口僅列前 200 筆，完整資料請看 blueprint.json。）");
         }
 
         AppendCodeStructure(builder, document);
@@ -91,11 +95,13 @@ public static class MarkdownReportWriter
         builder.AppendLine();
         builder.AppendLine("| 路徑 | 來源 | 類型 | 大小 | SHA-256 |");
         builder.AppendLine("| --- | --- | --- | ---: | --- |");
-        foreach (var file in document.Files)
+        foreach (var file in document.Files.Take(500))
         {
             var shortHash = string.IsNullOrWhiteSpace(file.Sha256) ? "-" : file.Sha256[..Math.Min(12, file.Sha256.Length)];
             builder.AppendLine($"| `{EscapeInline(file.RelativePath)}` | {EscapeCell(FormatOrigin(file.Origin))} | {EscapeCell(file.Format)} | {FormatBytes(file.Size)} | `{shortHash}` |");
         }
+        if (document.Files.Count > 500)
+            builder.AppendLine($"（檔案清單僅列前 500 筆，共 {document.Files.Count:N0} 筆；完整資料請看 blueprint.json。）");
 
         builder.AppendLine();
         builder.AppendLine("## 套件內相依關係");
@@ -109,10 +115,11 @@ public static class MarkdownReportWriter
         {
             builder.AppendLine("| 來源 | 關係 | 目標 |");
             builder.AppendLine("| --- | --- | --- |");
-            foreach (var edge in internalDependencies)
+            foreach (var edge in internalDependencies.Take(1000))
             {
                 builder.AppendLine($"| `{EscapeInline(edge.Source)}` | {edge.Kind} | `{EscapeInline(edge.Target)}` |");
             }
+            if (internalDependencies.Length > 1000) builder.AppendLine("（相依關係僅列前 1,000 筆，完整資料請看 blueprint.json。）");
         }
 
         if (document.Warnings.Count > 0)
@@ -120,10 +127,11 @@ public static class MarkdownReportWriter
             builder.AppendLine();
             builder.AppendLine("## 警告");
             builder.AppendLine();
-            foreach (var warning in document.Warnings)
+            foreach (var warning in document.Warnings.Take(500))
             {
                 builder.AppendLine($"- {EscapeMarkdownText(warning)}");
             }
+            if (document.Warnings.Count > 500) builder.AppendLine("（警告僅列前 500 筆，完整資料請看 blueprint.json。）");
         }
 
         builder.AppendLine();
@@ -131,6 +139,41 @@ public static class MarkdownReportWriter
         builder.AppendLine();
         builder.AppendLine("這份報告來自靜態分析，沒有執行輸入程式。語言與框架辨識是依據檔案結構、相依套件和特徵資料推斷，不等同原始碼證明。加殼、混淆、動態載入或自訂封裝都可能讓結果不完整。");
         return builder.ToString();
+    }
+
+    private static void AppendProjectGraph(StringBuilder builder, ProjectGraph graph)
+    {
+        if (graph.Components.Count == 0) return;
+        builder.AppendLine("## 專案與組件總覽");
+        builder.AppendLine();
+        builder.AppendLine($"共 {graph.Components.Count:N0} 個方案、專案或組件，{graph.References.Count:N0} 筆參照。");
+        builder.AppendLine("原始碼專案僅讀取描述檔內明確宣告，不執行 MSBuild、還原套件或解析原始碼方法體。未展開 SDK／Import、Directory.Build.props、中央套件版本與條件；組件相依依 metadata 與套件內位置判斷，不代表執行期載入結果。");
+        if (graph.Truncated) builder.AppendLine("專案圖已達安全上限；JSON 內的 projectGraph.truncated=true，缺少項目不代表不存在。");
+        builder.AppendLine();
+        builder.AppendLine("| 路徑 | 類別 | 框架宣告 | 輸出類型宣告 | 注意事項 |");
+        builder.AppendLine("| --- | --- | --- | --- | --- |");
+        foreach (var component in graph.Components.Take(200))
+            builder.AppendLine($"| `{EscapeInline(component.Id)}` | {EscapeCell(component.Kind)} | {EscapeCell(component.Framework ?? "未指定／未求值")} | {EscapeCell(component.OutputType ?? "未指定／未求值")} | {EscapeCell(string.Join("；", component.Notes))} |");
+        if (graph.Components.Count > 200) builder.AppendLine("（總覽僅列前 200 個項目，完整資料請看 blueprint.json。）");
+        builder.AppendLine();
+        builder.AppendLine("| 來源 | 關係 | 目標 | 宣告版本 | 狀態 |");
+        builder.AppendLine("| --- | --- | --- | --- | --- |");
+        foreach (var reference in graph.References.Take(500))
+        {
+            var status = reference.Status switch
+            {
+                "resolved" => "已連結輸入內項目",
+                "missing" => "輸入內未找到",
+                "ambiguous" => "有多個候選項目",
+                "conditional" => "有條件，未求值",
+                "unevaluated" => "未求值／超出範圍",
+                "external" => "外部相依",
+                _ => reference.Status
+            };
+            builder.AppendLine($"| `{EscapeInline(reference.Source)}` | {EscapeCell(reference.Kind)} | `{EscapeInline(reference.Target)}` | {EscapeCell(reference.Version ?? "—")} | {status} |");
+        }
+        if (graph.References.Count > 500) builder.AppendLine("（專案參照僅列前 500 筆，完整資料請看 blueprint.json。）");
+        builder.AppendLine();
     }
 
     private const int MaxTypesPerFile = 20;

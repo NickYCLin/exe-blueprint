@@ -2,7 +2,11 @@ namespace ExeBlueprint.Models;
 
 public sealed record BlueprintDocument
 {
-    public string SchemaVersion { get; init; } = "0.19";
+    public string SchemaVersion { get; init; } = "0.20";
+
+    public string AnalysisMode { get; init; } = "full";
+
+    public ProjectGraph ProjectGraph { get; init; } = new();
 
     public DateTimeOffset GeneratedAtUtc { get; init; } = DateTimeOffset.UtcNow;
 

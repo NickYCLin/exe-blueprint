@@ -85,11 +85,12 @@ public sealed partial class MainWindow : Window
         {
             var files = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
             {
-                Title = "選擇要分析的程式、壓縮檔或 ASAR",
+                Title = "選擇要分析的程式、專案或壓縮檔",
                 AllowMultiple = false,
                 FileTypeFilter =
                 [
-                    new FilePickerFileType("程式、壓縮檔與 ASAR") { Patterns = ["*.exe", "*.dll", "*.zip", "*.asar"] },
+                    new FilePickerFileType("程式、專案與壓縮檔") { Patterns = ["*.exe", "*.dll", "*.zip", "*.asar", "*.sln", "*.slnx", "*.csproj", "*.vbproj", "*.fsproj", "*.vcxproj"] },
+                    new FilePickerFileType("方案與專案") { Patterns = ["*.sln", "*.slnx", "*.csproj", "*.vbproj", "*.fsproj", "*.vcxproj"] },
                     new FilePickerFileType("所有檔案") { Patterns = ["*"] }
                 ]
             });
@@ -301,6 +302,9 @@ public sealed partial class MainWindow : Window
             if (ReferenceEquals(_analysisCancellation, cancellation) && !cancellation.IsCancellationRequested)
             {
                 StatusDetailText.Text = value.Message;
+                AnalysisProgressBar.IsIndeterminate = value.TotalFiles is not > 0;
+                if (value.TotalFiles is > 0)
+                    AnalysisProgressBar.Value = 100.0 * value.CompletedFiles.GetValueOrDefault() / value.TotalFiles.Value;
             }
         });
 
@@ -313,11 +317,13 @@ public sealed partial class MainWindow : Window
                 OutputDirectory = NormalizePathInput(OutputPathBox.Text),
                 Overwrite = OverwriteCheckBox.IsChecked == true,
                 JsonOnly = ReportCheckBox.IsChecked != true,
-                EmitCSharp = CSharpCheckBox.IsChecked == true,
-                EmitCpp = CppCheckBox.IsChecked == true,
-                EmitRust = RustCheckBox.IsChecked == true,
-                EmitGo = GoCheckBox.IsChecked == true,
-                EnableNativeAnalysis = NativeCheckBox.IsChecked == true,
+                InventoryOnly = InventoryCheckBox.IsChecked == true,
+                SourceMode = SourceModeCheckBox.IsChecked == true,
+                EmitCSharp = InventoryCheckBox.IsChecked != true && CSharpCheckBox.IsChecked == true,
+                EmitCpp = InventoryCheckBox.IsChecked != true && CppCheckBox.IsChecked == true,
+                EmitRust = InventoryCheckBox.IsChecked != true && RustCheckBox.IsChecked == true,
+                EmitGo = InventoryCheckBox.IsChecked != true && GoCheckBox.IsChecked == true,
+                EnableNativeAnalysis = InventoryCheckBox.IsChecked != true && NativeCheckBox.IsChecked == true,
                 GhidraInstallDir = NormalizePathInput(GhidraPathBox.Text)
             };
             var result = await Task.Run(
@@ -490,12 +496,14 @@ public sealed partial class MainWindow : Window
         ChooseOutputButton.IsEnabled = !busy;
         ChooseGhidraButton.IsEnabled = !busy;
         ReportCheckBox.IsEnabled = !busy;
-        CSharpCheckBox.IsEnabled = !busy;
-        CppCheckBox.IsEnabled = !busy;
-        RustCheckBox.IsEnabled = !busy;
-        GoCheckBox.IsEnabled = !busy;
+        InventoryCheckBox.IsEnabled = !busy;
+        SourceModeCheckBox.IsEnabled = !busy;
+        CSharpCheckBox.IsEnabled = !busy && InventoryCheckBox.IsChecked != true;
+        CppCheckBox.IsEnabled = CSharpCheckBox.IsEnabled;
+        RustCheckBox.IsEnabled = CSharpCheckBox.IsEnabled;
+        GoCheckBox.IsEnabled = CSharpCheckBox.IsEnabled;
         OverwriteCheckBox.IsEnabled = !busy;
-        NativeCheckBox.IsEnabled = !busy;
+        NativeCheckBox.IsEnabled = CSharpCheckBox.IsEnabled;
         AnalyzeButton.IsEnabled = !busy && NormalizePathInput(InputPathBox.Text) is not null;
         AnalyzeButton.IsVisible = !busy;
         OpenOutputButton.IsVisible = !busy && _lastOutputDirectory is not null;
@@ -504,6 +512,12 @@ public sealed partial class MainWindow : Window
         CancelButton.IsVisible = busy;
         CancelButton.IsEnabled = busy;
         AnalysisProgressBar.IsVisible = busy;
+        AnalysisProgressBar.IsIndeterminate = true;
+    }
+
+    private void OnAnalysisModeChanged(object? sender, RoutedEventArgs e)
+    {
+        if (CSharpCheckBox is not null) SetBusy(_analysisCancellation is not null);
     }
 
     private void ShowError(string message)
@@ -537,11 +551,15 @@ public sealed partial class MainWindow : Window
                 : _lastReportPath is null ? "可開啟資料夾查看完整結果。" : "可閱讀報告，或開啟資料夾查看完整結果。",
             warning: hasWarnings, success: !hasWarnings);
         FileCountText.Text = document.Input.FileCount.ToString("N0");
-        TypeCountText.Text = document.Summary.TypeCount.ToString("N0");
-        MethodCountText.Text = document.Summary.MethodCount.ToString("N0");
+        var structureOnly = document.AnalysisMode == "inventory" ||
+            document.Input.Kind == "source-directory" && document.Files.All(file => file.Code is null);
+        TypeCountText.Text = structureOnly ? "—" : document.Summary.TypeCount.ToString("N0");
+        MethodCountText.Text = structureOnly ? "—" : document.Summary.MethodCount.ToString("N0");
         WarningCountText.Text = document.Warnings.Count.ToString("N0");
         ResultStats.IsVisible = true;
-        SummaryText.Text = result.Skeletons.Count > 0
+        SummaryText.Text = document.ProjectGraph.Components.Count > 0
+            ? $"共 {document.ProjectGraph.Components.Count:N0} 個專案／組件、{document.ProjectGraph.References.Count:N0} 筆參照，請閱讀報告查看總覽。"
+            : result.Skeletons.Count > 0
             ? $"已產生 {string.Join("、", result.Skeletons.Select(item => item.Language))} 程式骨架。"
             : "這次未產生程式骨架，可先查看分析資料。";
         SummaryText.IsVisible = true;

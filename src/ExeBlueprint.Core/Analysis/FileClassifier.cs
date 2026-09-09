@@ -60,6 +60,16 @@ internal static class FileClassifier
             return ("configuration", extension.TrimStart('.').ToUpperInvariant() + " configuration");
         }
 
+        if (ProjectGraphAnalyzer.IsSourceEntry(path))
+        {
+            return ("project", extension.TrimStart('.').ToUpperInvariant() + " project");
+        }
+
+        if (extension.ToLowerInvariant() is ".cs" or ".vb" or ".fs" or ".c" or ".cpp" or ".h" or ".hpp" or ".rs" or ".go" or ".java")
+        {
+            return ("source-code", extension.TrimStart('.').ToUpperInvariant() + " source");
+        }
+
         if (ResourceExtensions.Contains(extension))
         {
             return ("resource", extension.TrimStart('.').ToUpperInvariant() + " resource");
