@@ -8,6 +8,9 @@
 # 多專案原始碼目錄：略過 bin、obj、版本控制與已安裝套件
 dotnet run --project ./src/ExeBlueprint.Cli -- analyze D:/code/MySystem --source --inventory -o ./artifacts/source-overview
 
+# 另外用 Roslyn 建立 C# 宣告與跨專案呼叫索引；--source-code 會自動啟用 --source
+dotnet run --project ./src/ExeBlueprint.Cli -- analyze D:/code/MySystem/MySystem.slnx --inventory --source-code -o ./artifacts/source-code-overview
+
 # 也可選擇 .sln、.slnx、.csproj、.vbproj、.fsproj 或 .vcxproj
 dotnet run --project ./src/ExeBlueprint.Cli -- analyze D:/code/MySystem/MySystem.slnx --inventory -o ./artifacts/solution-overview
 
@@ -18,7 +21,7 @@ dotnet run --project ./src/ExeBlueprint.Cli -- analyze D:/deploy/MySystem --inve
 dotnet run --project ./src/ExeBlueprint.Cli -- analyze D:/deploy/MySystem/App.dll --emit-csharp -o ./artifacts/app-detail
 ```
 
-桌面版可勾選「先盤點大型系統的專案與組件」；輸入原始碼資料夾時另勾選「原始碼資料夾」。選擇方案／專案描述檔會自動以原始碼模式掃描其所在資料夾，包括該資料夾內的其他專案，不會追讀根目錄之外的參照。
+桌面版可勾選「先盤點大型系統的專案與組件」；需要 C# 宣告與呼叫時另勾選「建立 C# 宣告與跨專案呼叫索引」。選擇方案／專案描述檔會自動以原始碼模式掃描其所在資料夾，包括該資料夾內的其他專案，不會追讀根目錄之外的參照。
 
 ![桌面版的大型專案盤點選項](images/large-project-inventory.png)
 
@@ -36,7 +39,7 @@ dotnet run --project ./src/ExeBlueprint.Cli -- analyze D:/deploy/MySystem/App.dl
 
 ## 如何判斷參照
 
-schema `0.21` 的 `projectGraph.components` 保存節點，`references` 保存帶有來源與類型的參照；中央套件版本另以 `versionSource` 指出來源 props 檔：
+schema `0.22` 的 `projectGraph.components` 保存節點，`references` 保存帶有來源與類型的參照；中央套件版本另以 `versionSource` 指出來源 props 檔：
 
 | status | 意義 |
 | --- | --- |
@@ -47,7 +50,17 @@ schema `0.21` 的 `projectGraph.components` 保存節點，`references` 保存�
 | `unevaluated` | 有變數、萬用字元、中央版本、根目錄外路徑等未求值資訊 |
 | `external` | 套件或組件相依不在輸入內；不代表已安裝或已還原 |
 
-解析不執行 MSBuild、`Target`、NuGet restore 或輸入程式，不載入外部 XML entity。`Directory.Build.props` 與 `Directory.Packages.props` 只會在目前工作區內向上尋找最近一份，採用無條件、無變數、無萬用字元的純文字宣告；專案本身的宣告優先。SDK、自訂 `Import`、`Choose`、條件、運算式與 props 的遞迴匯入仍不展開。也尚未對原始碼進行 Roslyn 語意分析、跨專案方法呼叫解析或精確比對建置產物。這一階段提供大型系統的結構入口，不能當成完整語意還原。
+解析不執行 MSBuild、`Target`、NuGet restore 或輸入程式，不載入外部 XML entity。`Directory.Build.props` 與 `Directory.Packages.props` 只會在目前工作區內向上尋找最近一份，採用無條件、無變數、無萬用字元的純文字宣告；專案本身的宣告優先。SDK、自訂 `Import`、`Choose`、條件、運算式與 props 的遞迴匯入仍不展開，也尚未精確比對原始碼與建置產物。
+
+## C# 宣告與呼叫索引
+
+`--source-code` 是選配的 Roslyn 分析，可和 `--inventory` 一起使用；啟用時也會自動使用原始碼目錄模式。它目前只處理能靜態確認來源歸屬的 SDK-style `.csproj`：預設 Compile 項目歸給最近一層專案目錄，並套用無條件、純文字的 `Compile Include`／`Remove`。同目錄多專案、自訂 `Import`、`Choose`、`Target`、條件式 Compile、Exclude、變數或萬用字元會把該專案標成不完整，不會猜測實際建置輸入。
+
+`sourceCode.declarations` 保存型別與方法的專案、檔案、行號及 Roslyn 符號 ID；`sourceCode.calls` 保存 invocation、物件建立與 constructor initializer，狀態分成 `resolved-source`、`external`、`ambiguous`、`unresolved`。跨專案只沿 `projectGraph` 中已解析的 `ProjectReference` 建立 compilation reference。分析器不讀取工作區外的 NuGet cache、不執行 restore，外部套件型別可能因此無法解析；framework 符號則使用執行分析器的 .NET shared framework，不保證與目標 TFM 完全一致。每個專案的 `complete`、`errorCount`、`errorCodes` 和 `notes` 用來判斷結果可信範圍。
+
+若專案或最近一層 `Directory.Build.props` 的 Compile 規則無法靜態確認，或工作區內存在會套用到專案的 `Directory.Build.targets`，該專案會標成不完整並略過語意索引，不會猜測實際參與建置的來源檔。遇到 `#if` 等條件式編譯指示也會標成不完整，因為目前不求值 `DefineConstants`，索引只反映預設符號分支。非基礎 `Microsoft.NET.Sdk` 的 SDK 特有來源、`Using` 項目、Analyzer 與 source generator 也不會執行，結果會保留相應註記。
+
+語意索引最多處理 256 個 C# 專案、10,000 個來源檔、合計 32 MiB 來源檔、2,000,000 個語法節點／token、100,000 筆宣告、100,000 筆呼叫與 32 Mi 個符號字元；單一專案檔與來源檔各以 1 MiB 為上限。達限時會設定 `sourceCode.truncated=true`。
 
 ## 上限與驗收範圍
 

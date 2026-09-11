@@ -6,6 +6,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="5.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
     <EmbeddedResource Include="../../scripts/ghidra/ExportFunctions.py"
                       Link="Analysis/Ghidra/ExportFunctions.py"
                       LogicalName="ExeBlueprint.Analysis.ExportFunctions.py" />

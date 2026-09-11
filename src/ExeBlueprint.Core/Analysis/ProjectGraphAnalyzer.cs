@@ -136,7 +136,11 @@ internal static class ProjectGraphAnalyzer
                         {
                             Framework = ReadFirstProperty(["TargetFramework", "TargetFrameworks", "TargetFrameworkVersion"], buildProps),
                             OutputType = ReadFirstProperty(["OutputType"], buildProps),
-                            AssemblyName = ReadFirstProperty(["AssemblyName"], buildProps)
+                            AssemblyName = ReadFirstProperty(["AssemblyName"], buildProps),
+                            ImplicitUsings = ReadFirstProperty(["ImplicitUsings"], buildProps),
+                            AllowUnsafeBlocks = ReadFirstProperty(["AllowUnsafeBlocks"], buildProps),
+                            EnableDefaultItems = ReadFirstProperty(["EnableDefaultItems"], buildProps),
+                            EnableDefaultCompileItems = ReadFirstProperty(["EnableDefaultCompileItems"], buildProps)
                         };
                         if (elements.Any(element => element.Name.LocalName is "Import" or "ImportGroup" or "Choose"))
                             notes.Add("專案包含 Import 或 Choose；未執行條件或自訂匯入求值。");
@@ -454,7 +458,7 @@ internal static class ProjectGraphAnalyzer
                 notes.Add($"{file.LogicalPath} 包含 Import 或 Choose；未展開其自訂匯入與條件。");
 
             var propertyNames = new HashSet<string>(
-                ["TargetFramework", "TargetFrameworks", "TargetFrameworkVersion", "OutputType", "AssemblyName", "ManagePackageVersionsCentrally"],
+                ["TargetFramework", "TargetFrameworks", "TargetFrameworkVersion", "OutputType", "AssemblyName", "ImplicitUsings", "AllowUnsafeBlocks", "EnableDefaultItems", "EnableDefaultCompileItems", "ManagePackageVersionsCentrally"],
                 StringComparer.Ordinal);
             var properties = new Dictionary<string, DeclaredValue>(StringComparer.Ordinal);
             foreach (var name in propertyNames)

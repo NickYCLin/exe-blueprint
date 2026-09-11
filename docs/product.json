@@ -10,7 +10,7 @@
   "license": "MIT",
   "descriptionScope": {
     "sourceBranch": "main",
-    "analysisOutputSchemaVersion": "0.21",
+    "analysisOutputSchemaVersion": "0.22",
     "releasePolicy": "Capabilities describe the current main source, not every downloadable release. Consult the selected release notes.",
     "releaseUrl": "https://github.com/NickYCLin/exe-blueprint/releases",
     "maintenance": "Update this profile with README.md, README.en.md and the source contracts when capabilities change.",
@@ -191,8 +191,15 @@
       "id": "large-project-inventory",
       "status": "partial",
       "summary": "Inventory mode for large source and compiled folders, with solution/project/assembly nodes, declared references and file progress.",
-      "limitation": "Reads bounded SLN, SLNX and MSBuild declarations, including literal unconditional values from the nearest in-workspace Directory.Build.props and Directory.Packages.props. SDK/custom imports, conditions and expressions are not evaluated. No source semantic analysis or automatic source-to-binary identity mapping. Inventory mode skips IL, resource contents, Ghidra and skeleton generation.",
+      "limitation": "Reads bounded SLN, SLNX and MSBuild declarations, including literal unconditional values from the nearest in-workspace Directory.Build.props and Directory.Packages.props. SDK/custom imports, conditions and expressions are not evaluated. No automatic source-to-binary identity mapping. Inventory mode skips IL, resource contents, Ghidra and skeleton generation.",
       "sourcePaths": ["src/ExeBlueprint.Core/Analysis/ProjectGraphAnalyzer.cs", "src/ExeBlueprint.Core/Models/ProjectGraph.cs", "scripts/Test-LargeProjectAnalysis.ps1"]
+    },
+    {
+      "id": "csharp-source-semantics",
+      "status": "partial",
+      "summary": "Optional bounded Roslyn index of C# type/method declarations and resolvable calls across project references.",
+      "limitation": "Only SDK-style projects with statically unambiguous Compile items are analyzed. NuGet packages are not restored or read outside the workspace; SDK-specific generated sources, analyzers and source generators are not executed; host shared-framework references may differ from the target TFM. Custom imports, conditional items, cycles, diagnostics and all limits remain explicit.",
+      "sourcePaths": ["src/ExeBlueprint.Core/Analysis/SourceSemanticAnalyzer.cs", "src/ExeBlueprint.Core/Models/SourceCodeAnalysis.cs"]
     },
     {
       "id": "windows-installer",
@@ -221,6 +228,7 @@
     ],
     "detailFields": [
       "projectGraph",
+      "sourceCode",
       "files",
       "dependencies",
       "technologies",

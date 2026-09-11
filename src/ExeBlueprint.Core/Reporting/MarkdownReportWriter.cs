@@ -30,7 +30,9 @@ public static class MarkdownReportWriter
         builder.AppendLine($"- 總大小：{FormatBytes(document.Input.TotalBytes)}");
         builder.AppendLine($"- 產生時間：{document.GeneratedAtUtc:yyyy-MM-dd HH:mm:ss} UTC");
         if (document.AnalysisMode == "inventory")
-            builder.AppendLine("- 分析模式：結構盤點。未深入讀取型別、方法或內嵌資源；這些計數為 0 不代表程式沒有內容。");
+            builder.AppendLine(document.SourceCode is null
+                ? "- 分析模式：結構盤點。未深入讀取型別、方法或內嵌資源；這些計數為 0 不代表程式沒有內容。"
+                : "- 分析模式：結構盤點加 C# 語意索引。編譯後組件仍未深入讀取 IL 或內嵌資源；.NET 型別／方法摘要的 0 不代表程式沒有內容。");
         builder.AppendLine();
 
         builder.AppendLine("## 摘要");
@@ -51,6 +53,7 @@ public static class MarkdownReportWriter
         builder.AppendLine();
 
         AppendProjectGraph(builder, document.ProjectGraph);
+        AppendSourceCode(builder, document.SourceCode);
         builder.AppendLine("## 辨識結果");
         builder.AppendLine();
         if (document.Technologies.Count == 0)
@@ -147,7 +150,7 @@ public static class MarkdownReportWriter
         builder.AppendLine("## 專案與組件總覽");
         builder.AppendLine();
         builder.AppendLine($"共 {graph.Components.Count:N0} 個方案、專案或組件，{graph.References.Count:N0} 筆參照。");
-        builder.AppendLine("原始碼專案只讀取工作區內的靜態宣告，不執行 MSBuild、還原套件或解析原始碼方法體。可套用最近一層無條件的 Directory.Build.props 與中央套件版本；SDK、自訂 Import、條件和運算式仍不求值。組件相依依 metadata 與套件內位置判斷，不代表執行期載入結果。");
+        builder.AppendLine("原始碼專案只讀取工作區內的靜態宣告，不執行 MSBuild 或還原套件。啟用 C# 語意索引時會解析可確認來源歸屬的 SDK-style 專案，但自訂 Import、Target、條件和運算式仍不求值。組件相依依 metadata 與套件內位置判斷，不代表執行期載入結果。");
         if (graph.Truncated) builder.AppendLine("專案圖已達安全上限；JSON 內的 projectGraph.truncated=true，缺少項目不代表不存在。");
         builder.AppendLine();
         builder.AppendLine("| 路徑 | 類別 | 框架宣告 | 輸出類型宣告 | 注意事項 |");
@@ -175,6 +178,59 @@ public static class MarkdownReportWriter
             builder.AppendLine($"| `{EscapeInline(reference.Source)}` | {EscapeCell(reference.Kind)} | `{EscapeInline(reference.Target)}` | {EscapeCell(version)} | {status} |");
         }
         if (graph.References.Count > 500) builder.AppendLine("（專案參照僅列前 500 筆，完整資料請看 blueprint.json。）");
+        builder.AppendLine();
+    }
+
+    private static void AppendSourceCode(StringBuilder builder, SourceCodeAnalysis? source)
+    {
+        if (source is null) return;
+        builder.AppendLine("## C# 原始碼語意索引");
+        builder.AppendLine();
+        builder.AppendLine($"使用 Roslyn 靜態整理 {source.Projects.Count:N0} 個專案、{source.Declarations.Count:N0} 筆型別／方法宣告與 {source.Calls.Count:N0} 筆呼叫。沒有執行 MSBuild、還原 NuGet 套件或執行輸入程式；framework 參考來自分析器執行環境，請先查看專案的完整狀態與錯誤數。");
+        if (source.Truncated)
+            builder.AppendLine("C# 語意索引已達安全上限；JSON 內的 sourceCode.truncated=true，缺少宣告或呼叫不代表不存在。");
+        builder.AppendLine();
+        builder.AppendLine("| 專案 | 來源檔 | 宣告 | 呼叫 | 編譯錯誤 | 狀態／注意事項 |");
+        builder.AppendLine("| --- | ---: | ---: | ---: | ---: | --- |");
+        foreach (var project in source.Projects.Take(200))
+        {
+            var state = project.Complete ? "完整" : "不完整";
+            var detail = string.Join("；", new[] { state }.Concat(project.Notes)
+                .Concat(project.ErrorCodes.Count == 0 ? [] : [$"錯誤代碼：{string.Join("、", project.ErrorCodes)}"]));
+            builder.AppendLine($"| `{EscapeInline(project.Project)}` | {project.FileCount:N0} | {project.DeclarationCount:N0} | {project.CallCount:N0} | {project.ErrorCount:N0} | {EscapeCell(detail)} |");
+        }
+        if (source.Projects.Count > 200)
+            builder.AppendLine("（專案狀態僅列前 200 筆，完整資料請看 blueprint.json。）");
+
+        builder.AppendLine();
+        builder.AppendLine("### 型別與方法宣告");
+        builder.AppendLine();
+        builder.AppendLine("| 專案 | 位置 | 類別 | 宣告 |");
+        builder.AppendLine("| --- | --- | --- | --- |");
+        foreach (var declaration in source.Declarations.Take(200))
+            builder.AppendLine($"| `{EscapeInline(declaration.Project)}` | `{EscapeInline(declaration.File)}:{declaration.Line}` | {EscapeCell(declaration.Kind)} | `{EscapeInline(declaration.Name)}` |");
+        if (source.Declarations.Count > 200)
+            builder.AppendLine("（宣告僅列前 200 筆，完整資料請看 blueprint.json。）");
+
+        builder.AppendLine();
+        builder.AppendLine("### 方法呼叫");
+        builder.AppendLine();
+        builder.AppendLine("| 位置 | 呼叫端 | 目標 | 狀態 |");
+        builder.AppendLine("| --- | --- | --- | --- |");
+        foreach (var call in source.Calls.Take(500))
+        {
+            var status = call.Status switch
+            {
+                "resolved-source" => call.TargetProject is null ? "已解析來源符號" : $"已解析至 {call.TargetProject}",
+                "external" => "外部／framework 符號",
+                "ambiguous" => "有多個候選",
+                "unresolved" => "無法解析",
+                _ => call.Status
+            };
+            builder.AppendLine($"| `{EscapeInline(call.File)}:{call.Line}` | `{EscapeInline(call.Caller)}` | `{EscapeInline(call.Target)}` | {EscapeCell(status)} |");
+        }
+        if (source.Calls.Count > 500)
+            builder.AppendLine("（呼叫僅列前 500 筆，完整資料請看 blueprint.json。）");
         builder.AppendLine();
     }
 

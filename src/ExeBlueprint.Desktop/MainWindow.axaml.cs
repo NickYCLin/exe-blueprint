@@ -318,7 +318,8 @@ public sealed partial class MainWindow : Window
                 Overwrite = OverwriteCheckBox.IsChecked == true,
                 JsonOnly = ReportCheckBox.IsChecked != true,
                 InventoryOnly = InventoryCheckBox.IsChecked == true,
-                SourceMode = SourceModeCheckBox.IsChecked == true,
+                SourceMode = SourceModeCheckBox.IsChecked == true || SourceAnalysisCheckBox.IsChecked == true,
+                EnableSourceAnalysis = SourceAnalysisCheckBox.IsChecked == true,
                 EmitCSharp = InventoryCheckBox.IsChecked != true && CSharpCheckBox.IsChecked == true,
                 EmitCpp = InventoryCheckBox.IsChecked != true && CppCheckBox.IsChecked == true,
                 EmitRust = InventoryCheckBox.IsChecked != true && RustCheckBox.IsChecked == true,
@@ -498,6 +499,7 @@ public sealed partial class MainWindow : Window
         ReportCheckBox.IsEnabled = !busy;
         InventoryCheckBox.IsEnabled = !busy;
         SourceModeCheckBox.IsEnabled = !busy;
+        SourceAnalysisCheckBox.IsEnabled = !busy;
         CSharpCheckBox.IsEnabled = !busy && InventoryCheckBox.IsChecked != true;
         CppCheckBox.IsEnabled = CSharpCheckBox.IsEnabled;
         RustCheckBox.IsEnabled = CSharpCheckBox.IsEnabled;

@@ -447,7 +447,7 @@ public sealed class MainWindowTests(DesktopTestSession desktopSession) : IDispos
                 Input(window).Text = Path.Combine(Path.GetPathRoot(_temporaryDirectory)!, "ExampleProjects", "LargeSystem", "Large.slnx");
                 Output(window).Text = Path.Combine(Path.GetPathRoot(_temporaryDirectory)!, "ExampleResults", "LargeSystem");
                 Control<CheckBox>(window, "InventoryCheckBox").IsChecked = true;
-                Control<CheckBox>(window, "SourceModeCheckBox").IsChecked = true;
+                Control<CheckBox>(window, "SourceAnalysisCheckBox").IsChecked = true;
                 Assert.False(Control<CheckBox>(window, "CSharpCheckBox").IsEnabled);
                 Assert.False(Control<CheckBox>(window, "NativeCheckBox").IsEnabled);
                 Capture(window, "inventory-ready");
@@ -457,6 +457,7 @@ public sealed class MainWindowTests(DesktopTestSession desktopSession) : IDispos
                 Assert.False(Control<ProgressBar>(window, "AnalysisProgressBar").IsIndeterminate);
                 Assert.True(observed!.InventoryOnly);
                 Assert.True(observed.SourceMode);
+                Assert.True(observed.EnableSourceAnalysis);
                 Assert.False(observed.EmitCSharp);
                 Assert.False(observed.EnableNativeAnalysis);
                 Assert.False(Control<CheckBox>(window, "InventoryCheckBox").IsEnabled);

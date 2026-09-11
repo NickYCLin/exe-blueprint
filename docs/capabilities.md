@@ -11,6 +11,7 @@
 - 桌面版依選來源、設定結果、分析與查看結果分成三步；進度與結果固定顯示，支援拖放、最近來源、取消、直接查看注意事項與開啟報告。詳細操作見[桌面版說明](desktop-guide.md)。
 
 - 分析單一檔案、完整資料夾、ZIP 或 Electron ASAR；資料夾與 ZIP 內的 ASAR、以及有上限的巢狀 ASAR 也會展開；若直接輸入 .NET apphost，偵測到同名 DLL 與 `.runtimeconfig.json` 時會一併分析該受管 DLL
+- 選配用 Roslyn 對 SDK-style C# 專案建立型別／方法宣告與呼叫索引；能沿已解析的 `ProjectReference` 連結跨專案來源符號，並分開標示 framework、歧義與未解析目標
 - 計算每個檔案的 SHA-256
 - 讀取 PE 架構、子系統、section 與簽章資料
 - 分辨 .NET assembly 與原生 PE
@@ -44,9 +45,10 @@
 
 ## 報告內容
 
-`blueprint.json` 目前使用 schema `0.21`，是後續專案重建和轉語言要共用的資料格式，內容包含：
+`blueprint.json` 目前使用 schema `0.22`，是後續專案重建和轉語言要共用的資料格式，內容包含：
 
 - 大型系統結構盤點：`analysisMode`、方案／子專案／組件 `projectGraph` 與參照狀態；可從 `.sln`／`.slnx`／MSBuild 專案描述檔或原始碼目錄進入，範圍見[大型專案分析](large-project-analysis.md)。
+- 選配的 `sourceCode`：C# 專案完整狀態與錯誤代碼摘要、型別／方法宣告，以及帶有來源／目標專案和解析狀態的方法呼叫
 
 - 輸入套件摘要
 - 每個檔案的格式、雜湊與來源資訊（provenance；直接輸入、資料夾、ZIP 或 ASAR，以及直接容器、項目和深度）

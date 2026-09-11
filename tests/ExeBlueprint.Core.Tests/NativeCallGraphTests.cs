@@ -314,7 +314,7 @@ public sealed class NativeCallGraphTests
         var output = Path.Combine(temp.Path, "blueprint.json");
         await BlueprintJsonWriter.WriteAsync(document, output);
         using var json = JsonDocument.Parse(await File.ReadAllTextAsync(output));
-        Assert.Equal("0.21", json.RootElement.GetProperty("schemaVersion").GetString());
+        Assert.Equal("0.22", json.RootElement.GetProperty("schemaVersion").GetString());
         var graph = json.RootElement.GetProperty("files")[0].GetProperty("nativeCode").GetProperty("callGraph");
         Assert.Equal(102, graph.GetProperty("calls").GetArrayLength());
         Assert.False(graph.GetProperty("tailCallsAnalyzed").GetBoolean());

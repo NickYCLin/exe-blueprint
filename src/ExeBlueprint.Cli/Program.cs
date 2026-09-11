@@ -39,6 +39,7 @@ static async Task<int> RunAsync(string[] args, CancellationToken cancellationTok
             JsonOnly = parsed.JsonOnly,
             InventoryOnly = parsed.InventoryOnly,
             SourceMode = parsed.SourceMode,
+            EnableSourceAnalysis = parsed.SourceAnalysis,
             EmitCSharp = parsed.EmitCSharp,
             EmitCpp = parsed.EmitCpp,
             EmitRust = parsed.EmitRust,
@@ -62,7 +63,11 @@ static async Task<int> RunAsync(string[] args, CancellationToken cancellationTok
         Console.WriteLine($"程式庫：{document.Summary.LibraryCount:N0}");
         Console.WriteLine($"型別／方法：{document.Summary.TypeCount:N0}／{document.Summary.MethodCount:N0}");
         Console.WriteLine($"專案／組件：{document.ProjectGraph.Components.Count:N0}；參照：{document.ProjectGraph.References.Count:N0}");
-        if (parsed.InventoryOnly) Console.WriteLine("本次為結構盤點，未深入分析型別、方法或內嵌資源。");
+        if (document.SourceCode is not null)
+            Console.WriteLine($"C# 語意索引：{document.SourceCode.Declarations.Count:N0} 筆宣告；{document.SourceCode.Calls.Count:N0} 筆呼叫");
+        if (parsed.InventoryOnly) Console.WriteLine(parsed.SourceAnalysis
+            ? "本次為結構盤點加 C# 語意索引；未深入分析編譯後組件的 IL 或內嵌資源。"
+            : "本次為結構盤點，未深入分析型別、方法或內嵌資源。");
         Console.WriteLine($"辨識結果：{FormatTechnologies(document.Technologies.Select(item => item.Name))}");
         if (document.Warnings.Count > 0)
         {
@@ -97,6 +102,7 @@ static ParsedArguments ParseArguments(string[] args)
     var jsonOnly = false;
     var inventoryOnly = false;
     var sourceMode = false;
+    var sourceAnalysis = false;
     var emitCSharp = false;
     var emitCpp = false;
     var emitRust = false;
@@ -142,6 +148,10 @@ static ParsedArguments ParseArguments(string[] args)
             case "--source":
                 sourceMode = true;
                 break;
+            case "--source-code":
+                sourceAnalysis = true;
+                sourceMode = true;
+                break;
             case "--emit-csharp":
                 emitCSharp = true;
                 break;
@@ -161,7 +171,8 @@ static ParsedArguments ParseArguments(string[] args)
 
     if (inventoryOnly && (emitCSharp || emitCpp || emitRust || emitGo || native))
         throw new ArgumentException("--inventory 只盤點結構，不能同時產生骨架或啟用 Ghidra；請另做深入分析。");
-    return new ParsedArguments(inputPath, outputDirectory, force, jsonOnly, emitCSharp, emitCpp, emitRust, emitGo, native, ghidraDir, inventoryOnly, sourceMode);
+    return new ParsedArguments(inputPath, outputDirectory, force, jsonOnly, emitCSharp, emitCpp, emitRust, emitGo, native,
+        ghidraDir, inventoryOnly, sourceMode, sourceAnalysis);
 }
 
 static string FormatTechnologies(IEnumerable<string> technologies)
@@ -187,6 +198,7 @@ static void PrintHelp()
     Console.WriteLine("  --inventory          大型系統先盤點結構，略過 IL、資源內容與 Ghidra");
     Console.WriteLine("  --source             原始碼資料夾略過 bin、obj、版本控制與已安裝套件");
     Console.WriteLine("                       也可直接選擇 .sln、.slnx 或 .csproj 等專案描述檔");
+    Console.WriteLine("  --source-code        另外用 Roslyn 建立 C# 宣告與跨專案呼叫索引（較耗記憶體）");
     Console.WriteLine("  --emit-csharp        另外產生 .NET 型別的 C# 骨架（含還原的方法體）");
     Console.WriteLine("  --emit-cpp           另外產生 C++ 型別骨架");
     Console.WriteLine("  --emit-rust          另外產生 Rust 型別骨架");
@@ -212,7 +224,8 @@ internal sealed record ParsedArguments(
     bool Native,
     string? GhidraDir,
     bool InventoryOnly,
-    bool SourceMode);
+    bool SourceMode,
+    bool SourceAnalysis);
 
 internal sealed class ConsoleAnalysisProgress : IProgress<BlueprintExportProgress>
 {

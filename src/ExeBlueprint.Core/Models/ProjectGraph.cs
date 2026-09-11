@@ -16,6 +16,10 @@ public sealed record ProjectComponent
     public string? Framework { get; init; }
     public string? OutputType { get; init; }
     public string? AssemblyName { get; init; }
+    public string? ImplicitUsings { get; init; }
+    public string? AllowUnsafeBlocks { get; init; }
+    public string? EnableDefaultItems { get; init; }
+    public string? EnableDefaultCompileItems { get; init; }
     public IReadOnlyList<string> Notes { get; init; } = [];
 }
 

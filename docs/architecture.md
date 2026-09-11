@@ -31,13 +31,16 @@ Blueprint 中介資料
 
 ## Blueprint 資料
 
-目前 schema 版本是 `0.21`，主要欄位包括：
+目前 schema 版本是 `0.22`，主要欄位包括：
 
 `analysisMode` 區分 `full` 與 `inventory`；後者略過 IL、內嵌資源及 Ghidra，型別／方法計數不可解讀成實際為零。`projectGraph` 保存方案、MSBuild 專案宣告與 PE 組件節點，以及帶有 `resolved`／`missing`／`ambiguous`／`conditional`／`unevaluated`／`external` 狀態的參照。來源專案會在工作區邊界內尋找最近一層 `Directory.Build.props` 與 `Directory.Packages.props`，只採用無條件的純文字宣告；中央套件版本的來源保存在 `versionSource`。其餘內容不經 MSBuild 求值，也不按名稱自動連成建置產物。節點 `notes` 保存個別解析缺口，總量限制由 `projectGraph.truncated` 表示，規則見[大型專案分析](large-project-analysis.md)。
+
+`sourceCode` 只在要求 C# 語意索引時出現。分析器用 Roslyn 解析可確認來源歸屬的 SDK-style 專案，將型別／方法宣告與 invocation、物件建立及 constructor initializer 的符號結果保存成 bounded flat list；來源符號以專案路徑與 documentation ID 組成穩定識別。`resolved-source` 可連到目前專案或已解析 `ProjectReference` 的目標專案，`external` 只表示能從分析器主機的 .NET shared framework 綁定，`ambiguous`／`unresolved` 不會猜測。專案使用實際 `AssemblyName` 與 `OutputType`，也會套用已靜態確認的 implicit usings 與 unsafe 設定；名稱重複、循環相依、編譯診斷與未支援建置邏輯會寫入 `sourceCode.projects[].notes`／`errorCodes`。
 
 - `input`：輸入類型、檔案數與總大小
 - `summary`：PE、assembly、型別、方法、資源和相依關係數量
 - `files`：每個檔案的格式、雜湊、來源資訊（provenance）和分析資料，受管組件另含 `code`
+- `sourceCode`：選配的 C# 專案狀態、型別／方法宣告與語意呼叫索引；未要求時為 `null`
 - `files[].origin`：`direct`、`directory`、`zip` 或 `asar` 來源；需要時保存直接容器、容器內項目與展開深度，讓 staging 實體路徑不會外洩或取代邏輯路徑
 - `files[].nativeCode.callGraph`：原生 CALL 與直接 tail call 紀錄，保留來源函式、呼叫位置、目標位址、直接／間接類型、`isTailCall` 及截斷狀態；未解析 CALL 目標為 `null`，`tailCallsAnalyzed=false` 表示舊版後端未分析 tail call
 - `files[].code`：.NET 型別、同一 artifact 內可精確連結巢狀 owner 的 TypeDef token、ref-like 關係、泛型名稱、owner domain 與可獨立證明 primary constraint 的 additive 明細、欄位、含 index parameters 的屬性、事件、方法簽章、dispatch 與已還原 body 的 `requiresUnsafeContext` 旗標、入口點、方法層級呼叫圖、manifest 資源（含預序列化自訂資源的 `serialization` 摘要及 JSON／XML 設定的 `configuration` 結構）與各方法反組譯出的 IL

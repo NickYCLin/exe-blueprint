@@ -13,6 +13,8 @@ public sealed class BlueprintAnalyzer
         IProgress<AnalysisProgress>? progress = null)
     {
         options ??= new AnalysisOptions();
+        if (options.EnableSourceAnalysis && !options.SourceMode)
+            options = options with { SourceMode = true };
         ValidateOptions(options);
 
         await using var workspace = await InputWorkspace.OpenAsync(
@@ -76,12 +78,26 @@ public sealed class BlueprintAnalyzer
         var notedProjects = projectGraph.Components.Count(component => component.Notes.Count > 0);
         if (notedProjects > 0) warnings.Add($"有 {notedProjects:N0} 個專案描述檔含未求值或未完整解析項目，請查看專案總覽的注意事項。");
         if (projectGraph.Truncated) warnings.Add("專案圖已達安全上限，請查看 projectGraph.truncated；目前結果不是完整專案圖。");
+        SourceCodeAnalysis? sourceCode = null;
+        if (options.EnableSourceAnalysis)
+        {
+            progress?.Report(new AnalysisProgress(artifacts.Count, workspace.Files.Count, null, "source"));
+            sourceCode = await SourceSemanticAnalyzer.AnalyzeAsync(workspace.Files, projectGraph, cancellationToken)
+                .ConfigureAwait(false);
+            warnings.AddRange(sourceCode.Warnings);
+            var incompleteProjects = sourceCode.Projects.Count(project => !project.Complete);
+            if (incompleteProjects > 0)
+                warnings.Add($"有 {incompleteProjects:N0} 個 C# 專案的語意索引不完整，請查看 sourceCode.projects[].notes。");
+            if (sourceCode.Truncated)
+                warnings.Add("C# 語意索引已達安全上限，請查看 sourceCode.truncated；缺少宣告或呼叫不代表不存在。");
+        }
         var summary = CreateSummary(artifacts, dependencies);
 
         return new BlueprintDocument
         {
             AnalysisMode = options.InventoryOnly ? "inventory" : "full",
             ProjectGraph = projectGraph,
+            SourceCode = sourceCode,
             Input = new InputDescriptor
             {
                 Name = workspace.Name,

@@ -8,6 +8,9 @@ public sealed record AnalysisOptions
     // 原始碼目錄略過版本控制、建置輸出及已安裝的相依套件。
     public bool SourceMode { get; init; }
 
+    // 使用 Roslyn 建立 C# 宣告與呼叫索引；不執行 MSBuild 或還原套件。
+    public bool EnableSourceAnalysis { get; init; }
+
     internal string? ExcludedOutputDirectory { get; init; }
 
     public int MaxFiles { get; init; } = 25_000;

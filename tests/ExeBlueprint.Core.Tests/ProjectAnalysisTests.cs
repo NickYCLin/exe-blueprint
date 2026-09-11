@@ -77,7 +77,7 @@ public sealed class ProjectAnalysisTests : IDisposable
     public async Task SharedBuildPropertiesAndCentralPackageVersionsAreResolvedFromNearestWorkspaceFiles()
     {
         Write("Directory.Build.props", """
-            <Project><PropertyGroup><TargetFramework>net10.0</TargetFramework><OutputType>Library</OutputType></PropertyGroup></Project>
+            <Project><PropertyGroup><TargetFramework>net10.0</TargetFramework><OutputType>Library</OutputType><ImplicitUsings>enable</ImplicitUsings><AllowUnsafeBlocks>true</AllowUnsafeBlocks></PropertyGroup></Project>
             """);
         Write("Directory.Packages.props", """
             <Project><PropertyGroup><ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally></PropertyGroup>
@@ -108,6 +108,8 @@ public sealed class ProjectAnalysisTests : IDisposable
         var app = Assert.Single(result.ProjectGraph.Components, component => component.Id == "src/App/App.csproj");
         Assert.Equal("net10.0", app.Framework);
         Assert.Equal("Library", app.OutputType);
+        Assert.Equal("enable", app.ImplicitUsings);
+        Assert.Equal("true", app.AllowUnsafeBlocks);
         Assert.Contains(app.Notes, note => note.Contains("Directory.Build.props", StringComparison.Ordinal));
         var worker = Assert.Single(result.ProjectGraph.Components, component => component.Id == "src/Nested/Worker/Worker.csproj");
         Assert.Equal("net9.0", worker.Framework);
@@ -155,6 +157,221 @@ public sealed class ProjectAnalysisTests : IDisposable
         Assert.Null(package.Version);
         Assert.DoesNotContain("must not be read", JsonSerializer.Serialize(result));
         Assert.DoesNotContain("99.0", JsonSerializer.Serialize(result));
+    }
+
+    [Fact]
+    public async Task SourceAnalysisResolvesCallsAcrossProjectReferences()
+    {
+        var solution = Write("Semantic.slnx", """
+            <Solution><Project Path="Core/Core.csproj" /><Project Path="App/App.csproj" /></Solution>
+            """);
+        Write("Core/Core.csproj", """
+            <Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>
+            """);
+        Write("Core/Helper.cs", """
+            namespace Demo;
+            public static class Helper { public static int Twice(int value) => value * 2; }
+            """);
+        Write("App/App.csproj", """
+            <Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup>
+            <ItemGroup><ProjectReference Include="../Core/Core.csproj" /></ItemGroup></Project>
+            """);
+        Write("App/Runner.cs", """
+            namespace Demo;
+            public sealed class Runner { public int Run() { System.Console.WriteLine("running"); return Helper.Twice(21); } }
+            """);
+
+        var result = await new BlueprintAnalyzer().AnalyzeAsync(solution, new AnalysisOptions
+        {
+            InventoryOnly = true,
+            EnableSourceAnalysis = true
+        });
+
+        var source = Assert.IsType<SourceCodeAnalysis>(result.SourceCode);
+        Assert.False(source.Truncated);
+        Assert.Equal(2, source.Projects.Count);
+        Assert.All(source.Projects, project => Assert.True(project.Complete, string.Join("；", project.Notes)));
+        Assert.Contains(source.Declarations, declaration => declaration.Project == "Core/Core.csproj" &&
+            declaration.Kind == "method" && declaration.Name.Contains("Helper.Twice", StringComparison.Ordinal));
+        Assert.Contains(source.Declarations, declaration => declaration.Project == "App/App.csproj" &&
+            declaration.Kind == "method" && declaration.Name.Contains("Runner.Run", StringComparison.Ordinal));
+        var call = Assert.Single(source.Calls, call => call.SourceProject == "App/App.csproj" &&
+            call.TargetProject == "Core/Core.csproj");
+        Assert.Equal("resolved-source", call.Status);
+        Assert.Contains("Helper.Twice", call.Target, StringComparison.Ordinal);
+        Assert.Contains(source.Calls, call => call.SourceProject == "App/App.csproj" &&
+            call.Status == "external" && call.Target.Contains("System.Console.WriteLine", StringComparison.Ordinal));
+        Assert.Contains("C# 原始碼語意索引", MarkdownReportWriter.Build(result), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task SourceAnalysisHonorsLiteralCompileIncludeAndRemove()
+    {
+        Write("Shared.cs", "public sealed class SharedType { }");
+        Write("App/App.csproj", """
+            <Project Sdk="Microsoft.NET.Sdk"><ItemGroup>
+            <Compile Include="../Shared.cs" /><Compile Remove="Skip.cs" />
+            </ItemGroup></Project>
+            """);
+        Write("App/Local.cs", "public sealed class LocalType { }");
+        Write("App/Skip.cs", "public sealed class SkippedType { }");
+
+        var result = await new BlueprintAnalyzer().AnalyzeAsync(_root, new AnalysisOptions
+        {
+            InventoryOnly = true,
+            EnableSourceAnalysis = true
+        });
+
+        var source = Assert.IsType<SourceCodeAnalysis>(result.SourceCode);
+        Assert.Equal("source-directory", result.Input.Kind);
+        var project = Assert.Single(source.Projects);
+        Assert.True(project.Complete, string.Join("；", project.Notes));
+        Assert.Equal(2, project.FileCount);
+        Assert.Contains(source.Declarations, declaration => declaration.Name.Contains("SharedType", StringComparison.Ordinal));
+        Assert.Contains(source.Declarations, declaration => declaration.Name.Contains("LocalType", StringComparison.Ordinal));
+        Assert.DoesNotContain(source.Declarations, declaration => declaration.Name.Contains("SkippedType", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task SourceAnalysisHonorsInheritedDefaultCompileItemSetting()
+    {
+        Write("Directory.Build.props", """
+            <Project><PropertyGroup><EnableDefaultCompileItems>false</EnableDefaultCompileItems></PropertyGroup></Project>
+            """);
+        Write("App/App.csproj", """
+            <Project Sdk="Microsoft.NET.Sdk"><ItemGroup><Compile Include="Included.cs" /></ItemGroup></Project>
+            """);
+        Write("App/Included.cs", "public sealed class IncludedType { }");
+        Write("App/Ignored.cs", "public sealed class IgnoredType { }");
+
+        var result = await new BlueprintAnalyzer().AnalyzeAsync(_root, new AnalysisOptions
+        {
+            InventoryOnly = true,
+            SourceMode = true,
+            EnableSourceAnalysis = true
+        });
+
+        var source = Assert.IsType<SourceCodeAnalysis>(result.SourceCode);
+        var project = Assert.Single(source.Projects);
+        Assert.True(project.Complete, string.Join("；", project.Notes));
+        Assert.Equal(1, project.FileCount);
+        Assert.Contains(source.Declarations, declaration => declaration.Name.Contains("IncludedType", StringComparison.Ordinal));
+        Assert.DoesNotContain(source.Declarations, declaration => declaration.Name.Contains("IgnoredType", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task SourceAnalysisDoesNotKeepPartialIncludesFromUnsupportedProject()
+    {
+        Write("App/App.csproj", """
+            <Project Sdk="Microsoft.NET.Sdk"><ItemGroup>
+            <Compile Include="Included.cs" />
+            <Compile Include="Conditional.cs" Condition="'$(IncludeConditional)' == 'true'" />
+            </ItemGroup></Project>
+            """);
+        Write("App/Included.cs", "public sealed class IncludedType { }");
+        Write("App/Conditional.cs", "public sealed class ConditionalType { }");
+
+        var result = await new BlueprintAnalyzer().AnalyzeAsync(_root, new AnalysisOptions
+        {
+            InventoryOnly = true,
+            EnableSourceAnalysis = true
+        });
+
+        var source = Assert.IsType<SourceCodeAnalysis>(result.SourceCode);
+        var project = Assert.Single(source.Projects);
+        Assert.False(project.Complete);
+        Assert.Equal(0, project.FileCount);
+        Assert.Empty(source.Declarations);
+        Assert.Empty(source.Calls);
+    }
+
+    [Fact]
+    public async Task SourceAnalysisMarksConditionalCompilationIncomplete()
+    {
+        Write("App/App.csproj", "<Project Sdk='Microsoft.NET.Sdk'/>");
+        Write("App/Feature.cs", """
+            public static class Feature
+            {
+            #if FEATURE_ENABLED
+                public static void Run() { }
+            #endif
+            }
+            """);
+
+        var result = await new BlueprintAnalyzer().AnalyzeAsync(_root, new AnalysisOptions
+        {
+            InventoryOnly = true,
+            EnableSourceAnalysis = true
+        });
+
+        var project = Assert.Single(Assert.IsType<SourceCodeAnalysis>(result.SourceCode).Projects);
+        Assert.False(project.Complete);
+        Assert.Contains(project.Notes, note => note.Contains("DefineConstants", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task SourceAnalysisMarksCircularProjectReferencesIncomplete()
+    {
+        Write("A/A.csproj", """
+            <Project Sdk="Microsoft.NET.Sdk"><ItemGroup><ProjectReference Include="../B/B.csproj" /></ItemGroup></Project>
+            """);
+        Write("A/A.cs", "namespace Demo; public sealed class A { }");
+        Write("B/B.csproj", """
+            <Project Sdk="Microsoft.NET.Sdk"><ItemGroup><ProjectReference Include="../A/A.csproj" /></ItemGroup></Project>
+            """);
+        Write("B/B.cs", "namespace Demo; public sealed class B { }");
+
+        var result = await new BlueprintAnalyzer().AnalyzeAsync(_root, new AnalysisOptions
+        {
+            InventoryOnly = true,
+            SourceMode = true,
+            EnableSourceAnalysis = true
+        });
+
+        var source = Assert.IsType<SourceCodeAnalysis>(result.SourceCode);
+        Assert.Equal(2, source.Projects.Count);
+        Assert.All(source.Projects, project =>
+        {
+            Assert.False(project.Complete);
+            Assert.Contains(project.Notes, note => note.Contains("循環", StringComparison.Ordinal));
+        });
+    }
+
+    [Fact]
+    public async Task SourceAnalysisSkipsProjectsWithCustomBuildLogicInsteadOfGuessingCompileItems()
+    {
+        Write("Directory.Build.targets", "<Project><ItemGroup><Compile Include='Generated.cs'/></ItemGroup></Project>");
+        Write("App/App.csproj", """
+            <Project Sdk="Microsoft.NET.Sdk"><Import Project="../Directory.Build.targets" /></Project>
+            """);
+        Write("App/Program.cs", "public static class Program { public static void Main() { } }");
+
+        var result = await new BlueprintAnalyzer().AnalyzeAsync(_root, new AnalysisOptions
+        {
+            InventoryOnly = true,
+            SourceMode = true,
+            EnableSourceAnalysis = true
+        });
+
+        var source = Assert.IsType<SourceCodeAnalysis>(result.SourceCode);
+        var project = Assert.Single(source.Projects);
+        Assert.False(project.Complete);
+        Assert.Equal(0, project.FileCount);
+        Assert.Empty(source.Declarations);
+        Assert.Empty(source.Calls);
+        Assert.Contains(project.Notes, note => note.Contains("建置邏輯", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task SourceAnalysisCanRemainDisabled()
+    {
+        var project = Write("App.csproj", "<Project Sdk='Microsoft.NET.Sdk'/>");
+        Write("Program.cs", "public static class Program { public static void Main() { } }");
+
+        var result = await new BlueprintAnalyzer().AnalyzeAsync(project,
+            new AnalysisOptions { InventoryOnly = true });
+
+        Assert.Null(result.SourceCode);
     }
 
     [Fact]

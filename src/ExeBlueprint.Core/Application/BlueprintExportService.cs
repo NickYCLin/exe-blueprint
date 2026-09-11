@@ -21,6 +21,8 @@ public sealed record BlueprintExportRequest
 
     public bool SourceMode { get; init; }
 
+    public bool EnableSourceAnalysis { get; init; }
+
     public bool EmitCSharp { get; init; }
 
     public bool EmitCpp { get; init; }
@@ -79,15 +81,19 @@ public sealed class BlueprintExportService
         {
             InventoryOnly = request.InventoryOnly,
             SourceMode = request.SourceMode,
+            EnableSourceAnalysis = request.EnableSourceAnalysis,
             ExcludedOutputDirectory = outputDirectory,
             EnableNativeAnalysis = request.EnableNativeAnalysis,
             GhidraInstallDir = NullIfWhiteSpace(request.GhidraInstallDir)
         };
-        var fileProgress = new InlineProgress<AnalysisProgress>(value => progress?.Report(value.Stage == "projects"
-            ? new BlueprintExportProgress("正在整理專案與組件相依關係…")
-            : new BlueprintExportProgress(
+        var fileProgress = new InlineProgress<AnalysisProgress>(value => progress?.Report(value.Stage switch
+        {
+            "projects" => new BlueprintExportProgress("正在整理專案與組件相依關係…"),
+            "source" => new BlueprintExportProgress("正在建立 C# 宣告與跨專案呼叫索引…"),
+            _ => new BlueprintExportProgress(
                 $"正在分析檔案（{value.CompletedFiles:N0}/{value.TotalFiles:N0}）：{value.CurrentFile ?? "準備開始"}",
-                value.CompletedFiles, value.TotalFiles)));
+                value.CompletedFiles, value.TotalFiles)
+        }));
         var document = await analyzer.AnalyzeAsync(inputPath, analysisOptions, cancellationToken, fileProgress)
             .ConfigureAwait(false);
 

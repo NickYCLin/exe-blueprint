@@ -130,6 +130,7 @@
                 <CheckBox x:Name="InventoryCheckBox" Content="先盤點大型系統的專案與組件" IsCheckedChanged="OnAnalysisModeChanged" />
                 <TextBlock Classes="hint" Text="盤點會略過方法與資源內容，不產生骨架；可先看總覽，再深入分析個別組件。" />
                 <CheckBox x:Name="SourceModeCheckBox" Content="原始碼資料夾（略過 bin、obj 與已安裝套件）" />
+                <CheckBox x:Name="SourceAnalysisCheckBox" Content="建立 C# 宣告與跨專案呼叫索引（較耗記憶體）" />
                 <CheckBox x:Name="ReportCheckBox" IsChecked="True" Content="閱讀報告（繁體中文）" />
                 <CheckBox x:Name="CSharpCheckBox" IsChecked="True" Content="C# 重建專案與程式骨架" />
                 <TextBlock Classes="hint" Text="另會保留 blueprint.json，方便交給其他工具接續處理。" />

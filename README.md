@@ -56,7 +56,7 @@ exe-blueprint-output/<輸入名稱>-<時間>/
 | 項目 | 已有能力 | 使用時要知道 |
 | --- | --- | --- |
 | 檔案與套件盤點 | PE、SHA-256、imports、assembly references、ZIP／ASAR 展開 | 封存有大小與深度上限；尚未解開各類外層安裝器 |
-| 大型系統總覽 | 結構盤點、方案／子專案／組件與參照、逐檔進度 | 原始碼目前解析描述檔宣告，未做 MSBuild 求值或原始碼語意分析 |
+| 大型系統總覽 | 結構盤點、方案／子專案／組件與參照、逐檔進度；選配 C# 宣告與跨專案呼叫索引 | 不執行 MSBuild 或還原套件；C# 語意索引目前限可確定來源歸屬的 SDK-style 專案 |
 | 技術辨識 | 辨識 .NET、VB6、Delphi、Go、Rust、Python、易語言、Qt、Electron 等常見特徵 | 結果附依據與可信度，辨識到語言不等於能還原該語言原始碼 |
 | .NET 結構分析 | 型別、欄位、屬性、事件、方法、IL、呼叫圖 | 遇到不支援或不完整的資料會保留註記 |
 | 資源與設定 | `.resources`、PNG／GIF 檔頭尺寸、WPF BAML 結構、內嵌 JSON／XML 設定結構 | 設定摘要省略值；圖片只讀檔頭，BAML 結構摘要不等於完整還原 UI |
@@ -117,13 +117,13 @@ dotnet run --project ./src/ExeBlueprint.Cli -- analyze ./Native.exe --native --g
 
 ### 大型系統先盤點
 
-原始碼資料夾可加上 `--source --inventory`，編譯後的整包系統可用 `--inventory` 保留組件盤點、略過 IL 與資源內容。也能直接選擇 `.sln`／`.slnx` 或專案描述檔，先看子專案與相依關係，再深入分析選定的 EXE／DLL。桌面版提供相同選項，範圍與規模驗收方式見[大型專案分析](docs/large-project-analysis.md)。
+原始碼資料夾可加上 `--source --inventory`；需要型別、方法宣告與可解析的跨專案呼叫時，再加 `--source-code`。編譯後的整包系統可用 `--inventory` 保留組件盤點、略過 IL 與資源內容。也能直接選擇 `.sln`／`.slnx` 或專案描述檔，先看子專案與相依關係，再深入分析選定的 EXE／DLL。桌面版提供相同選項，範圍與規模驗收方式見[大型專案分析](docs/large-project-analysis.md)。
 
 ## 給 AI 或自動化工具
 
 **了解這個產品**：讀取 [docs/product.json](docs/product.json)，其中列出定位、輸入、輸出、功能狀態、限制及原始碼依據。這是產品說明資料，與實際分析產生的 `blueprint.json` 分開。
 
-**閱讀一次分析結果**：先看 `schemaVersion`、`analysisMode`、`summary` 與 `warnings`，再依需求讀取 `projectGraph`、`files`、`dependencies`、`technologies` 和 `archives`。目前 `main` 輸出的 schema 是 `0.21`。
+**閱讀一次分析結果**：先看 `schemaVersion`、`analysisMode`、`summary` 與 `warnings`，再依需求讀取 `projectGraph`、`sourceCode`、`files`、`dependencies`、`technologies` 和 `archives`。目前 `main` 輸出的 schema 是 `0.22`。
 
 - 技術判斷要連同 `evidence` 與 `confidence` 閱讀。
 - `truncated`、`complete=false` 或錯誤欄位代表資料有缺口，不能把缺少的資料解讀成「不存在」。各層欄位定義見[架構說明](docs/architecture.md)。
