@@ -31,9 +31,9 @@ Blueprint 中介資料
 
 ## Blueprint 資料
 
-目前 schema 版本是 `0.20`，主要欄位包括：
+目前 schema 版本是 `0.21`，主要欄位包括：
 
-`analysisMode` 區分 `full` 與 `inventory`；後者略過 IL、內嵌資源及 Ghidra，型別／方法計數不可解讀成實際為零。`projectGraph` 保存方案、MSBuild 專案宣告與 PE 組件節點，以及帶有 `resolved`／`missing`／`ambiguous`／`conditional`／`unevaluated`／`external` 狀態的參照。來源專案的宣告不經 MSBuild 求值，也不按名稱自動連成建置產物。節點 `notes` 保存個別解析缺口，總量限制由 `projectGraph.truncated` 表示，規則見[大型專案分析](large-project-analysis.md)。
+`analysisMode` 區分 `full` 與 `inventory`；後者略過 IL、內嵌資源及 Ghidra，型別／方法計數不可解讀成實際為零。`projectGraph` 保存方案、MSBuild 專案宣告與 PE 組件節點，以及帶有 `resolved`／`missing`／`ambiguous`／`conditional`／`unevaluated`／`external` 狀態的參照。來源專案會在工作區邊界內尋找最近一層 `Directory.Build.props` 與 `Directory.Packages.props`，只採用無條件的純文字宣告；中央套件版本的來源保存在 `versionSource`。其餘內容不經 MSBuild 求值，也不按名稱自動連成建置產物。節點 `notes` 保存個別解析缺口，總量限制由 `projectGraph.truncated` 表示，規則見[大型專案分析](large-project-analysis.md)。
 
 - `input`：輸入類型、檔案數與總大小
 - `summary`：PE、assembly、型別、方法、資源和相依關係數量

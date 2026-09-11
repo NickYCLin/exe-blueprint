@@ -26,8 +26,8 @@ dotnet run --project ./src/ExeBlueprint.Cli -- analyze D:/deploy/MySystem/App.dl
 
 ## 會得到什麼
 
-- 方案與子專案清單、檔內直接宣告的目標框架、輸出類型及 assembly 名稱。
-- 方案包含的專案、`ProjectReference` 及 `PackageReference` 宣告。
+- 方案與子專案清單，以及專案或最近一層 `Directory.Build.props` 宣告的目標框架、輸出類型及 assembly 名稱。
+- 方案包含的專案、`ProjectReference` 及 `PackageReference` 宣告；若能證明中央套件管理已啟用，會從最近一層 `Directory.Packages.props` 補上無條件的純文字版本與來源。
 - 編譯後的 managed assembly／native binary 節點，以及原有組件與 PE import 相依關係。
 - 掃描完成後的檔案總數、分析中的已完成檔數與目前檔案；掃描與分析均可取消。
 - 摘要報告與完整 JSON；報告會限制顯示筆數，避免數千檔案淹沒總覽。
@@ -36,7 +36,7 @@ dotnet run --project ./src/ExeBlueprint.Cli -- analyze D:/deploy/MySystem/App.dl
 
 ## 如何判斷參照
 
-schema `0.20` 的 `projectGraph.components` 保存節點，`references` 保存帶有來源與類型的參照：
+schema `0.21` 的 `projectGraph.components` 保存節點，`references` 保存帶有來源與類型的參照；中央套件版本另以 `versionSource` 指出來源 props 檔：
 
 | status | 意義 |
 | --- | --- |
@@ -47,7 +47,7 @@ schema `0.20` 的 `projectGraph.components` 保存節點，`references` 保存�
 | `unevaluated` | 有變數、萬用字元、中央版本、根目錄外路徑等未求值資訊 |
 | `external` | 套件或組件相依不在輸入內；不代表已安裝或已還原 |
 
-解析不執行 MSBuild、`Target`、NuGet restore 或輸入程式，不載入外部 XML entity。SDK／Import、Directory.Build.props、Directory.Packages.props 及條件仍未展開；也尚未對原始碼進行 Roslyn 語意分析、跨專案方法呼叫解析或精確比對建置產物。這一階段提供大型系統的結構入口，不能當成完整語意還原。
+解析不執行 MSBuild、`Target`、NuGet restore 或輸入程式，不載入外部 XML entity。`Directory.Build.props` 與 `Directory.Packages.props` 只會在目前工作區內向上尋找最近一份，採用無條件、無變數、無萬用字元的純文字宣告；專案本身的宣告優先。SDK、自訂 `Import`、`Choose`、條件、運算式與 props 的遞迴匯入仍不展開。也尚未對原始碼進行 Roslyn 語意分析、跨專案方法呼叫解析或精確比對建置產物。這一階段提供大型系統的結構入口，不能當成完整語意還原。
 
 ## 上限與驗收範圍
 

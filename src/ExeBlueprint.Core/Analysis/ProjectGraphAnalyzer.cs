@@ -15,6 +15,8 @@ internal static class ProjectGraphAnalyzer
     private const int MaxSourceComponents = 4096;
     private const int MaxReferences = 100_000;
     private const int MaxReferenceCharacters = 8 * 1024 * 1024;
+    private const string DirectoryBuildProps = "Directory.Build.props";
+    private const string DirectoryPackagesProps = "Directory.Packages.props";
     private static readonly HashSet<string> ProjectExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
         ".csproj", ".vbproj", ".fsproj", ".vcxproj"
@@ -39,6 +41,9 @@ internal static class ProjectGraphAnalyzer
         var components = new List<ProjectComponent>();
         var references = new List<ProjectReference>();
         var artifactLookup = artifacts.ToDictionary(file => file.Id, StringComparer.Ordinal);
+        var workspacePaths = files.GroupBy(file => Normalize(file.LogicalPath), StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.ToArray(), StringComparer.Ordinal);
+        var sharedManifestCache = new Dictionary<string, SharedDeclarations>(StringComparer.Ordinal);
         var projectFiles = files.Where(file => IsSourceEntry(file.LogicalPath) &&
             (!artifactLookup.TryGetValue(file.LogicalPath, out var artifact) || !artifact.IsPortableExecutable)).ToArray();
         var truncated = projectFiles.Length > MaxSourceComponents;
@@ -123,14 +128,31 @@ internal static class ProjectGraphAnalyzer
 
                     if (component.Kind == "source-project")
                     {
+                        var buildProps = await ReadNearestSharedDeclarationsAsync(file, DirectoryBuildProps).ConfigureAwait(false);
+                        var packageProps = await ReadNearestSharedDeclarationsAsync(file, DirectoryPackagesProps).ConfigureAwait(false);
+                        AppendSharedNotes(buildProps);
+                        AppendSharedNotes(packageProps);
                         component = component with
                         {
-                            Framework = ReadProperty("TargetFramework") ?? ReadProperty("TargetFrameworks") ?? ReadProperty("TargetFrameworkVersion"),
-                            OutputType = ReadProperty("OutputType"),
-                            AssemblyName = ReadProperty("AssemblyName")
+                            Framework = ReadFirstProperty(["TargetFramework", "TargetFrameworks", "TargetFrameworkVersion"], buildProps),
+                            OutputType = ReadFirstProperty(["OutputType"], buildProps),
+                            AssemblyName = ReadFirstProperty(["AssemblyName"], buildProps)
                         };
                         if (elements.Any(element => element.Name.LocalName is "Import" or "ImportGroup" or "Choose"))
-                            notes.Add("包含 Import 或 Choose；僅列出檔內宣告，未執行條件或匯入求值。");
+                            notes.Add("專案包含 Import 或 Choose；未執行條件或自訂匯入求值。");
+
+                        var centralManagement = ReadCentralManagement(packageProps, buildProps);
+                        foreach (var element in elements)
+                        {
+                            cancellationToken.ThrowIfCancellationRequested();
+                            if (element.Name.Namespace != xml.Root.Name.Namespace ||
+                                element.Parent?.Name.LocalName != "ItemGroup" ||
+                                element.Parent.Name.Namespace != xml.Root.Name.Namespace ||
+                                element.Name.LocalName != "PackageReference" || element.Attribute("Include") is null)
+                                continue;
+
+                            AddPackageReference(element, centralManagement, packageProps);
+                        }
                     }
 
                     foreach (var element in elements)
@@ -143,43 +165,122 @@ internal static class ProjectGraphAnalyzer
                             element.Parent?.Name.LocalName is "Solution" or "Folder")
                             AddPathReference((string?)element.Attribute("Path") ?? "", "solution-project", conditional);
                         else if (component.Kind == "source-project" && element.Parent?.Name.LocalName == "ItemGroup" &&
+                                 element.Parent.Name.Namespace == xml.Root.Name.Namespace &&
                                  element.Name.LocalName == "ProjectReference" && element.Attribute("Include") is not null)
                             AddPathReference((string)element.Attribute("Include")!, "project-reference", conditional);
-                        else if (component.Kind == "source-project" && element.Parent?.Name.LocalName == "ItemGroup" &&
-                                 element.Name.LocalName == "PackageReference" && element.Attribute("Include") is not null)
-                        {
-                            var include = (string?)element.Attribute("Include");
-                            var versionElement = element.Elements().FirstOrDefault(child => child.Name.LocalName == "Version");
-                            var version = (string?)element.Attribute("Version") ?? versionElement?.Value;
-                            var literalName = IsLiteral(include);
-                            AddReference(new ProjectReference
-                            {
-                                Source = file.LogicalPath,
-                                Target = literalName ? include! : "（套件名稱需求值）",
-                                Kind = "package-reference",
-                                Status = conditional || versionElement?.Attribute("Condition") is not null ? "conditional" :
-                                    !literalName || !IsLiteral(version) ? "unevaluated" : "external",
-                                Version = IsLiteral(version) ? version : null
-                            });
-                        }
+                        // PackageReference 已在上方連同中央版本一起處理。
                     }
 
-                    string? ReadProperty(string name)
+                    string? ReadFirstProperty(IReadOnlyList<string> names, SharedDeclarations? inherited)
                     {
-                        var declarations = xml.Root.Elements().Where(group => group.Name.LocalName == "PropertyGroup")
-                            .SelectMany(group => group.Elements()).Where(element => element.Name.LocalName == name &&
-                                element.Name.Namespace == xml.Root.Name.Namespace).ToArray();
-                        if (declarations.Length == 0) return null;
-                        if (declarations.Length != 1 || declarations[0].HasElements ||
-                            declarations[0].AncestorsAndSelf().Any(element => element.Attribute("Condition") is not null) ||
-                            !(name == "TargetFrameworks"
-                                ? declarations[0].Value.Length <= MaxValueCharacters && declarations[0].Value.Split(';').All(value => IsLiteral(value.Trim()))
-                                : IsLiteral(declarations[0].Value.Trim())))
+                        foreach (var name in names)
                         {
-                            notes.Add($"{name} 含有條件、重複宣告或運算式，未求值。");
+                            var declarations = xml.Root.Elements().Where(group => group.Name.LocalName == "PropertyGroup" &&
+                                    group.Name.Namespace == xml.Root.Name.Namespace)
+                                .SelectMany(group => group.Elements()).Where(element => element.Name.LocalName == name &&
+                                    element.Name.Namespace == xml.Root.Name.Namespace).ToArray();
+                            if (declarations.Length == 0) continue;
+                            var value = ReadDeclaredValue(name, declarations);
+                            if (value.Status != "literal")
+                                notes.Add($"{name} 含有條件、重複宣告或運算式，未求值。");
+                            return value.Value;
+                        }
+
+                        if (inherited is null) return null;
+                        foreach (var name in names)
+                        {
+                            if (!inherited.Properties.TryGetValue(name, out var value)) continue;
+                            if (value.Status == "literal")
+                            {
+                                notes.Add($"{name} 取自 {inherited.Source}。");
+                                return value.Value;
+                            }
+                            notes.Add($"{inherited.Source} 的 {name} 含有條件、重複宣告或運算式，未求值。");
                             return null;
                         }
-                        return declarations[0].Value.Trim();
+                        return null;
+                    }
+
+                    string ReadCentralManagement(SharedDeclarations? packageProps, SharedDeclarations? buildProps)
+                    {
+                        var direct = xml.Root.Elements().Where(group => group.Name.LocalName == "PropertyGroup" &&
+                                group.Name.Namespace == xml.Root.Name.Namespace)
+                            .SelectMany(group => group.Elements()).Where(element =>
+                                element.Name.Namespace == xml.Root.Name.Namespace &&
+                                element.Name.LocalName == "ManagePackageVersionsCentrally").ToArray();
+                        if (direct.Length > 0)
+                        {
+                            var value = ReadDeclaredValue("ManagePackageVersionsCentrally", direct);
+                            if (value.Status != "literal" || !bool.TryParse(value.Value, out var enabled))
+                            {
+                                notes.Add("ManagePackageVersionsCentrally 含有條件、重複宣告或運算式，未求值。");
+                                return "unevaluated";
+                            }
+                            return enabled ? "enabled" : "disabled";
+                        }
+
+                        foreach (var declarations in new[] { packageProps, buildProps })
+                        {
+                            if (declarations is null ||
+                                !declarations.Properties.TryGetValue("ManagePackageVersionsCentrally", out var value)) continue;
+                            if (value.Status != "literal" ||
+                                !bool.TryParse(value.Value, out var enabled)) return "unevaluated";
+                            return enabled ? "enabled" : "disabled";
+                        }
+                        return "disabled";
+                    }
+
+                    void AddPackageReference(XElement element, string centralManagement, SharedDeclarations? packageProps)
+                    {
+                        var include = (string?)element.Attribute("Include");
+                        var conditional = element.AncestorsAndSelf().Any(parent => parent.Attribute("Condition") is not null ||
+                            parent.Name.LocalName is "Choose" or "When" or "Otherwise" or "Target");
+                        var versionElements = element.Elements().Where(child => child.Name.Namespace == xml.Root.Name.Namespace &&
+                            child.Name.LocalName is "Version" or "VersionOverride").ToArray();
+                        var versionAttributes = new[]
+                        {
+                            (string?)element.Attribute("VersionOverride"),
+                            (string?)element.Attribute("Version")
+                        }.Where(value => value is not null).ToArray();
+                        var directVersions = versionAttributes.Concat(versionElements.Select(child => child.Value)).ToArray();
+                        var literalName = IsLiteral(include);
+                        var status = conditional || versionElements.Any(child => child.Attribute("Condition") is not null)
+                            ? "conditional" : !literalName ? "unevaluated" : "external";
+                        string? version = null;
+                        string? versionSource = null;
+
+                        if (status == "external" && directVersions.Length > 0)
+                        {
+                            if (directVersions.Length == 1 && IsLiteral(directVersions[0])) version = directVersions[0]!.Trim();
+                            else status = "unevaluated";
+                        }
+                        else if (status == "external")
+                        {
+                            if (centralManagement == "unevaluated") status = "unevaluated";
+                            else if (centralManagement == "enabled" && packageProps is not null)
+                            {
+                                var candidates = packageProps.PackageVersions
+                                    .Where(candidate => candidate.Name?.Equals(include, StringComparison.OrdinalIgnoreCase) == true).ToArray();
+                                if (candidates.Length == 1 && candidates[0].Status == "literal")
+                                {
+                                    version = candidates[0].Version;
+                                    versionSource = packageProps.Source;
+                                }
+                                else if (candidates.Any(candidate => candidate.Status == "conditional")) status = "conditional";
+                                else status = "unevaluated";
+                            }
+                            else status = "unevaluated";
+                        }
+
+                        AddReference(new ProjectReference
+                        {
+                            Source = file.LogicalPath,
+                            Target = literalName ? include! : "（套件名稱需求值）",
+                            Kind = "package-reference",
+                            Status = status,
+                            Version = version,
+                            VersionSource = versionSource
+                        });
                     }
                 }
             }
@@ -206,6 +307,23 @@ internal static class ProjectGraphAnalyzer
                 }
                 if (conditional) status = "conditional";
                 AddReference(new ProjectReference { Source = file.LogicalPath, Target = target, Kind = kind, Status = status });
+            }
+
+            async Task<SharedDeclarations?> ReadNearestSharedDeclarationsAsync(WorkspaceFile project, string fileName)
+            {
+                var shared = FindNearestSharedFile(project, fileName, workspacePaths);
+                if (shared is null) return null;
+                if (sharedManifestCache.TryGetValue(shared.LogicalPath, out var cached)) return cached;
+                artifactLookup.TryGetValue(shared.LogicalPath, out var artifact);
+                var declarations = await ReadSharedDeclarationsAsync(shared, artifact, cancellationToken).ConfigureAwait(false);
+                sharedManifestCache.Add(shared.LogicalPath, declarations);
+                return declarations;
+            }
+
+            void AppendSharedNotes(SharedDeclarations? declarations)
+            {
+                if (declarations is null) return;
+                foreach (var note in declarations.Notes) notes.Add(note);
             }
         }
 
@@ -250,7 +368,8 @@ internal static class ProjectGraphAnalyzer
 
         void AddReference(ProjectReference reference)
         {
-            var characters = reference.Source.Length + reference.Target.Length + (reference.Version?.Length ?? 0);
+            var characters = reference.Source.Length + reference.Target.Length + (reference.Version?.Length ?? 0) +
+                (reference.VersionSource?.Length ?? 0);
             if (references.Count >= MaxReferences || characters > MaxReferenceCharacters - referenceCharacters)
             {
                 truncated = true;
@@ -264,6 +383,118 @@ internal static class ProjectGraphAnalyzer
     private static bool IsLiteral(string? value) => !string.IsNullOrWhiteSpace(value) && value.Length <= MaxValueCharacters &&
         value.IndexOfAny(['$', '@', '%', '*', '?', ';', '\0', '\r', '\n']) < 0;
 
+    private static DeclaredValue ReadDeclaredValue(string name, IReadOnlyList<XElement> declarations)
+    {
+        if (declarations.Count != 1 || declarations[0].HasElements)
+            return new DeclaredValue(null, "unevaluated");
+        if (declarations[0].AncestorsAndSelf().Any(element => element.Attribute("Condition") is not null ||
+            element.Name.LocalName is "Choose" or "When" or "Otherwise" or "Target"))
+            return new DeclaredValue(null, "conditional");
+        var text = declarations[0].Value.Trim();
+        var literal = name == "TargetFrameworks"
+            ? text.Length <= MaxValueCharacters && text.Split(';').All(value => IsLiteral(value.Trim()))
+            : IsLiteral(text);
+        return literal ? new DeclaredValue(text, "literal") : new DeclaredValue(null, "unevaluated");
+    }
+
+    private static WorkspaceFile? FindNearestSharedFile(
+        WorkspaceFile project,
+        string fileName,
+        IReadOnlyDictionary<string, WorkspaceFile[]> workspacePaths)
+    {
+        var normalized = Normalize(project.LogicalPath);
+        var minimumDepth = GetMinimumDepth(project);
+        var slash = normalized.LastIndexOf('/');
+        var segments = slash < 0 ? new List<string>() : normalized[..slash].Split('/').ToList();
+        while (segments.Count >= minimumDepth)
+        {
+            var candidate = segments.Count == 0 ? fileName : string.Join('/', segments) + "/" + fileName;
+            if (workspacePaths.TryGetValue(candidate, out var matches) && matches.Length == 1) return matches[0];
+            if (segments.Count == minimumDepth) break;
+            segments.RemoveAt(segments.Count - 1);
+        }
+        return null;
+    }
+
+    private static async Task<SharedDeclarations> ReadSharedDeclarationsAsync(
+        WorkspaceFile file,
+        FileArtifact? artifact,
+        CancellationToken cancellationToken)
+    {
+        var notes = new List<string>();
+        if (artifact?.AnalysisError is not null)
+            return new SharedDeclarations(file.LogicalPath, new Dictionary<string, DeclaredValue>(), [],
+                [$"未讀取 {file.LogicalPath}：{artifact.AnalysisError}"]);
+        if (file.Size > MaxManifestBytes)
+            return new SharedDeclarations(file.LogicalPath, new Dictionary<string, DeclaredValue>(), [],
+                [$"{file.LogicalPath} 超過 1 MiB，未讀取共用宣告。"]);
+
+        try
+        {
+            await using var stream = new FileStream(file.PhysicalPath, FileMode.Open, FileAccess.Read,
+                FileShare.Read, 4096, useAsync: true);
+            if (stream.Length > MaxManifestBytes)
+                throw new InvalidDataException($"{file.LogicalPath} 超過 1 MiB，未讀取共用宣告。");
+            using var reader = XmlReader.Create(stream, new XmlReaderSettings
+            {
+                Async = true,
+                DtdProcessing = DtdProcessing.Prohibit,
+                XmlResolver = null,
+                MaxCharactersInDocument = MaxManifestBytes,
+                IgnoreComments = true
+            });
+            var xml = await XDocument.LoadAsync(reader, LoadOptions.None, cancellationToken).ConfigureAwait(false);
+            if (xml.Root?.Name.LocalName != "Project" ||
+                xml.Root.Name.NamespaceName is not ("" or "http://schemas.microsoft.com/developer/msbuild/2003"))
+                throw new InvalidDataException($"{file.LogicalPath} 不是支援的 MSBuild props 檔。");
+            var elements = xml.Root.Descendants().Take(MaxManifestItems + 1).ToArray();
+            if (elements.Length > MaxManifestItems || elements.Any(element => element.Ancestors().Take(65).Count() > 64))
+                throw new InvalidDataException($"{file.LogicalPath} 超過節點或巢狀深度限制，未讀取共用宣告。");
+            if (elements.Any(element => element.Name.LocalName is "Import" or "ImportGroup" or "Choose"))
+                notes.Add($"{file.LogicalPath} 包含 Import 或 Choose；未展開其自訂匯入與條件。");
+
+            var propertyNames = new HashSet<string>(
+                ["TargetFramework", "TargetFrameworks", "TargetFrameworkVersion", "OutputType", "AssemblyName", "ManagePackageVersionsCentrally"],
+                StringComparer.Ordinal);
+            var properties = new Dictionary<string, DeclaredValue>(StringComparer.Ordinal);
+            foreach (var name in propertyNames)
+            {
+                var declarations = xml.Root.Elements().Where(group => group.Name.LocalName == "PropertyGroup" &&
+                        group.Name.Namespace == xml.Root.Name.Namespace)
+                    .SelectMany(group => group.Elements()).Where(element => element.Name.Namespace == xml.Root.Name.Namespace &&
+                        element.Name.LocalName == name).ToArray();
+                if (declarations.Length > 0) properties[name] = ReadDeclaredValue(name, declarations);
+            }
+
+            var packageVersions = new List<CentralPackageVersion>();
+            foreach (var element in elements.Where(element => element.Name.Namespace == xml.Root.Name.Namespace &&
+                         element.Parent?.Name.LocalName == "ItemGroup" &&
+                         element.Parent.Name.Namespace == xml.Root.Name.Namespace && element.Name.LocalName == "PackageVersion"))
+            {
+                var name = (string?)element.Attribute("Include") ?? (string?)element.Attribute("Update");
+                var versionElement = element.Elements().Where(child => child.Name.Namespace == xml.Root.Name.Namespace &&
+                    child.Name.LocalName == "Version").ToArray();
+                var versionAttribute = (string?)element.Attribute("Version");
+                var versions = (versionAttribute is null ? Array.Empty<string>() : [versionAttribute])
+                    .Concat(versionElement.Select(child => child.Value)).ToArray();
+                var conditional = element.AncestorsAndSelf().Any(parent => parent.Attribute("Condition") is not null ||
+                    parent.Name.LocalName is "Choose" or "When" or "Otherwise" or "Target") ||
+                    versionElement.Any(child => child.Attribute("Condition") is not null);
+                var status = conditional ? "conditional" : IsLiteral(name) && versions.Length == 1 && IsLiteral(versions[0])
+                    ? "literal" : "unevaluated";
+                packageVersions.Add(new CentralPackageVersion(IsLiteral(name) ? name!.Trim() : null,
+                    status == "literal" ? versions[0].Trim() : null, status));
+            }
+            return new SharedDeclarations(file.LogicalPath, properties, packageVersions, notes);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or XmlException or InvalidDataException)
+        {
+            var message = exception is XmlException
+                ? $"{file.LogicalPath} XML 無效或包含禁止的 DTD，未讀取共用宣告。" : exception.Message;
+            return new SharedDeclarations(file.LogicalPath, new Dictionary<string, DeclaredValue>(), [], [message]);
+        }
+    }
+
     private static string Normalize(string path) => path.Replace('\\', '/');
 
     private static string? ResolveLogicalPath(WorkspaceFile source, string path)
@@ -272,8 +503,7 @@ internal static class ProjectGraphAnalyzer
         path = Normalize(path);
         if (path.StartsWith('/') || path.Contains(':')) return null;
         var normalizedSource = Normalize(source.LogicalPath);
-        var minimumDepth = source.Origin.Kind == "asar" && source.Origin.Container is not null
-            ? Normalize(source.Origin.Container).Split('/').Length : 0;
+        var minimumDepth = GetMinimumDepth(source);
         var slash = normalizedSource.LastIndexOf('/');
         var segments = slash < 0 ? [] : normalizedSource[..slash].Split('/').ToList();
         foreach (var segment in path.Split('/'))
@@ -288,4 +518,18 @@ internal static class ProjectGraphAnalyzer
         }
         return string.Join('/', segments);
     }
+
+    private static int GetMinimumDepth(WorkspaceFile source) =>
+        source.Origin.Kind == "asar" && source.Origin.Container is not null
+            ? Normalize(source.Origin.Container).Split('/').Length : 0;
+
+    private sealed record DeclaredValue(string? Value, string Status);
+
+    private sealed record CentralPackageVersion(string? Name, string? Version, string Status);
+
+    private sealed record SharedDeclarations(
+        string Source,
+        IReadOnlyDictionary<string, DeclaredValue> Properties,
+        IReadOnlyList<CentralPackageVersion> PackageVersions,
+        IReadOnlyList<string> Notes);
 }

@@ -74,6 +74,90 @@ public sealed class ProjectAnalysisTests : IDisposable
     }
 
     [Fact]
+    public async Task SharedBuildPropertiesAndCentralPackageVersionsAreResolvedFromNearestWorkspaceFiles()
+    {
+        Write("Directory.Build.props", """
+            <Project><PropertyGroup><TargetFramework>net10.0</TargetFramework><OutputType>Library</OutputType></PropertyGroup></Project>
+            """);
+        Write("Directory.Packages.props", """
+            <Project><PropertyGroup><ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally></PropertyGroup>
+            <ItemGroup><PackageVersion Include="Central.Package" Version="4.2.0" />
+            <PackageVersion Include="Conditional.Package" Version="1.0" Condition="'$(UsePreview)' == 'true'" />
+            <PackageVersion Include="Expression.Package" Version="$(SharedVersion)" /></ItemGroup></Project>
+            """);
+        Write("src/App/App.csproj", """
+            <Project Sdk="Microsoft.NET.Sdk"><ItemGroup>
+            <PackageReference Include="Central.Package" />
+            <PackageReference Include="Conditional.Package" />
+            <PackageReference Include="Expression.Package" />
+            <PackageReference Include="Override.Package" VersionOverride="9.1.0" />
+            </ItemGroup></Project>
+            """);
+        Write("src/Nested/Directory.Build.props", """
+            <Project><PropertyGroup><TargetFramework>net9.0</TargetFramework></PropertyGroup></Project>
+            """);
+        Write("src/Nested/Worker/Worker.csproj", "<Project />");
+        Write("src/OptOut/OptOut.csproj", """
+            <Project><PropertyGroup><ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally></PropertyGroup>
+            <ItemGroup><PackageReference Include="Central.Package" /></ItemGroup></Project>
+            """);
+
+        var result = await new BlueprintAnalyzer().AnalyzeAsync(_root,
+            new AnalysisOptions { InventoryOnly = true, SourceMode = true });
+
+        var app = Assert.Single(result.ProjectGraph.Components, component => component.Id == "src/App/App.csproj");
+        Assert.Equal("net10.0", app.Framework);
+        Assert.Equal("Library", app.OutputType);
+        Assert.Contains(app.Notes, note => note.Contains("Directory.Build.props", StringComparison.Ordinal));
+        var worker = Assert.Single(result.ProjectGraph.Components, component => component.Id == "src/Nested/Worker/Worker.csproj");
+        Assert.Equal("net9.0", worker.Framework);
+        var central = Assert.Single(result.ProjectGraph.References,
+            reference => reference.Source == "src/App/App.csproj" && reference.Target == "Central.Package");
+        Assert.Equal("external", central.Status);
+        Assert.Equal("4.2.0", central.Version);
+        Assert.Equal("Directory.Packages.props", central.VersionSource);
+        Assert.Equal("conditional", Assert.Single(result.ProjectGraph.References,
+            reference => reference.Target == "Conditional.Package").Status);
+        Assert.Equal("unevaluated", Assert.Single(result.ProjectGraph.References,
+            reference => reference.Target == "Expression.Package").Status);
+        var overridden = Assert.Single(result.ProjectGraph.References, reference => reference.Target == "Override.Package");
+        Assert.Equal("9.1.0", overridden.Version);
+        Assert.Null(overridden.VersionSource);
+        var optedOut = Assert.Single(result.ProjectGraph.References,
+            reference => reference.Source == "src/OptOut/OptOut.csproj" && reference.Target == "Central.Package");
+        Assert.Equal("unevaluated", optedOut.Status);
+        Assert.Null(optedOut.Version);
+        var report = MarkdownReportWriter.Build(result);
+        Assert.Contains("4.2.0（Directory.Packages.props）", report, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task InvalidSharedPropsDoNotReadEntitiesOrFallBackToOutsideWorkspace()
+    {
+        Write("input/Directory.Build.props", """
+            <!DOCTYPE Project [<!ENTITY secret SYSTEM '../secret.txt'>]><Project><PropertyGroup><TargetFramework>&secret;</TargetFramework></PropertyGroup></Project>
+            """);
+        Write("input/App/App.csproj", "<Project><ItemGroup><PackageReference Include='No.Version'/></ItemGroup></Project>");
+        Write("Directory.Packages.props", """
+            <Project><PropertyGroup><ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally></PropertyGroup>
+            <ItemGroup><PackageVersion Include="No.Version" Version="99.0" /></ItemGroup></Project>
+            """);
+        Write("secret.txt", "must not be read");
+
+        var result = await new BlueprintAnalyzer().AnalyzeAsync(Path.Combine(_root, "input"),
+            new AnalysisOptions { InventoryOnly = true, SourceMode = true });
+
+        var project = Assert.Single(result.ProjectGraph.Components);
+        Assert.Null(project.Framework);
+        Assert.Contains(project.Notes, note => note.Contains("禁止的 DTD", StringComparison.Ordinal));
+        var package = Assert.Single(result.ProjectGraph.References);
+        Assert.Equal("unevaluated", package.Status);
+        Assert.Null(package.Version);
+        Assert.DoesNotContain("must not be read", JsonSerializer.Serialize(result));
+        Assert.DoesNotContain("99.0", JsonSerializer.Serialize(result));
+    }
+
+    [Fact]
     public async Task DtdTraversalAndPropertyExpressionsDoNotCreateResolvedReferences()
     {
         Write("input/App.csproj", """
@@ -221,13 +305,18 @@ public sealed class ProjectAnalysisTests : IDisposable
     {
         Write("invalid.sln", "not a solution");
         Write("App.csproj", """
-            <Project><ItemDefinitionGroup><PackageReference><Version>1.0</Version></PackageReference></ItemDefinitionGroup>
+            <Project xmlns:x='urn:not-msbuild'><ItemDefinitionGroup><PackageReference><Version>1.0</Version></PackageReference></ItemDefinitionGroup>
             <ItemGroup><PackageReference Update='Central' Version='1.0'/></ItemGroup>
-            <Something><ProjectReference Include='fake.csproj'/></Something></Project>
+            <Something><ProjectReference Include='fake.csproj'/></Something>
+            <x:PropertyGroup><TargetFramework>net99.0</TargetFramework></x:PropertyGroup>
+            <x:ItemGroup><ProjectReference Include='also-fake.csproj'/></x:ItemGroup></Project>
             """);
         var result = await new BlueprintAnalyzer().AnalyzeAsync(_root, new AnalysisOptions { InventoryOnly = true });
         Assert.Empty(result.ProjectGraph.References);
-        Assert.NotEmpty(Assert.Single(result.ProjectGraph.Components, component => component.Kind == "solution").Notes);
+        Assert.Null(Assert.Single(result.ProjectGraph.Components,
+            component => component.Id == "App.csproj").Framework);
+        Assert.NotEmpty(Assert.Single(result.ProjectGraph.Components,
+            component => component.Kind == "solution").Notes);
     }
 
     [Fact]

@@ -123,7 +123,7 @@ dotnet run --project ./src/ExeBlueprint.Cli -- analyze ./Native.exe --native --g
 
 **了解這個產品**：讀取 [docs/product.json](docs/product.json)，其中列出定位、輸入、輸出、功能狀態、限制及原始碼依據。這是產品說明資料，與實際分析產生的 `blueprint.json` 分開。
 
-**閱讀一次分析結果**：先看 `schemaVersion`、`analysisMode`、`summary` 與 `warnings`，再依需求讀取 `projectGraph`、`files`、`dependencies`、`technologies` 和 `archives`。目前 `main` 輸出的 schema 是 `0.20`。
+**閱讀一次分析結果**：先看 `schemaVersion`、`analysisMode`、`summary` 與 `warnings`，再依需求讀取 `projectGraph`、`files`、`dependencies`、`technologies` 和 `archives`。目前 `main` 輸出的 schema 是 `0.21`。
 
 - 技術判斷要連同 `evidence` 與 `confidence` 閱讀。
 - `truncated`、`complete=false` 或錯誤欄位代表資料有缺口，不能把缺少的資料解讀成「不存在」。各層欄位定義見[架構說明](docs/architecture.md)。

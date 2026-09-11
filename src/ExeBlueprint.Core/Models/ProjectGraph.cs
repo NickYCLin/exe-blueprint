@@ -27,4 +27,5 @@ public sealed record ProjectReference
     // resolved、missing、ambiguous、conditional、unevaluated、external。
     public required string Status { get; init; }
     public string? Version { get; init; }
+    public string? VersionSource { get; init; }
 }

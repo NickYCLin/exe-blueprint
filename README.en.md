@@ -121,7 +121,7 @@ If Ghidra is missing, other analysis continues and the native result records why
 
 For large source folders, use `--source --inventory`; for compiled application folders, use `--inventory`. The overview keeps project and assembly references while skipping IL, embedded resource contents and Ghidra. See [large-project analysis](docs/large-project-analysis.md) for scope and reproducible scale checks.
 
-**To read an analysis result**, start with `schemaVersion`, `analysisMode`, `summary` and `warnings`, then inspect `projectGraph`, `files`, `dependencies`, `technologies` and `archives`. The current `main` output schema is `0.20`.
+**To read an analysis result**, start with `schemaVersion`, `analysisMode`, `summary` and `warnings`, then inspect `projectGraph`, `files`, `dependencies`, `technologies` and `archives`. The current `main` output schema is `0.21`.
 
 - Read technology detections together with their `evidence` and `confidence`.
 - Truncation flags, `complete=false` and error fields indicate missing information. Missing data is not evidence of absence; see the [architecture](docs/architecture.md) for field definitions.

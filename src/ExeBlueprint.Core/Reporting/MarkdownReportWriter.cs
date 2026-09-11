@@ -147,7 +147,7 @@ public static class MarkdownReportWriter
         builder.AppendLine("## 專案與組件總覽");
         builder.AppendLine();
         builder.AppendLine($"共 {graph.Components.Count:N0} 個方案、專案或組件，{graph.References.Count:N0} 筆參照。");
-        builder.AppendLine("原始碼專案僅讀取描述檔內明確宣告，不執行 MSBuild、還原套件或解析原始碼方法體。未展開 SDK／Import、Directory.Build.props、中央套件版本與條件；組件相依依 metadata 與套件內位置判斷，不代表執行期載入結果。");
+        builder.AppendLine("原始碼專案只讀取工作區內的靜態宣告，不執行 MSBuild、還原套件或解析原始碼方法體。可套用最近一層無條件的 Directory.Build.props 與中央套件版本；SDK、自訂 Import、條件和運算式仍不求值。組件相依依 metadata 與套件內位置判斷，不代表執行期載入結果。");
         if (graph.Truncated) builder.AppendLine("專案圖已達安全上限；JSON 內的 projectGraph.truncated=true，缺少項目不代表不存在。");
         builder.AppendLine();
         builder.AppendLine("| 路徑 | 類別 | 框架宣告 | 輸出類型宣告 | 注意事項 |");
@@ -170,7 +170,9 @@ public static class MarkdownReportWriter
                 "external" => "外部相依",
                 _ => reference.Status
             };
-            builder.AppendLine($"| `{EscapeInline(reference.Source)}` | {EscapeCell(reference.Kind)} | `{EscapeInline(reference.Target)}` | {EscapeCell(reference.Version ?? "—")} | {status} |");
+            var version = reference.Version is null ? "—" : reference.VersionSource is null
+                ? reference.Version : $"{reference.Version}（{reference.VersionSource}）";
+            builder.AppendLine($"| `{EscapeInline(reference.Source)}` | {EscapeCell(reference.Kind)} | `{EscapeInline(reference.Target)}` | {EscapeCell(version)} | {status} |");
         }
         if (graph.References.Count > 500) builder.AppendLine("（專案參照僅列前 500 筆，完整資料請看 blueprint.json。）");
         builder.AppendLine();

@@ -2,7 +2,7 @@ namespace ExeBlueprint.Models;
 
 public sealed record BlueprintDocument
 {
-    public string SchemaVersion { get; init; } = "0.20";
+    public string SchemaVersion { get; init; } = "0.21";
 
     public string AnalysisMode { get; init; } = "full";
 

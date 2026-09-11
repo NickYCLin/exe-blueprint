@@ -10,7 +10,7 @@
   "license": "MIT",
   "descriptionScope": {
     "sourceBranch": "main",
-    "analysisOutputSchemaVersion": "0.20",
+    "analysisOutputSchemaVersion": "0.21",
     "releasePolicy": "Capabilities describe the current main source, not every downloadable release. Consult the selected release notes.",
     "releaseUrl": "https://github.com/NickYCLin/exe-blueprint/releases",
     "maintenance": "Update this profile with README.md, README.en.md and the source contracts when capabilities change.",
@@ -191,7 +191,7 @@
       "id": "large-project-inventory",
       "status": "partial",
       "summary": "Inventory mode for large source and compiled folders, with solution/project/assembly nodes, declared references and file progress.",
-      "limitation": "Reads bounded SLN, SLNX and MSBuild project declarations without evaluating imports, conditions or central package versions. No source semantic analysis or automatic source-to-binary identity mapping. Inventory mode skips IL, resource contents, Ghidra and skeleton generation.",
+      "limitation": "Reads bounded SLN, SLNX and MSBuild declarations, including literal unconditional values from the nearest in-workspace Directory.Build.props and Directory.Packages.props. SDK/custom imports, conditions and expressions are not evaluated. No source semantic analysis or automatic source-to-binary identity mapping. Inventory mode skips IL, resource contents, Ghidra and skeleton generation.",
       "sourcePaths": ["src/ExeBlueprint.Core/Analysis/ProjectGraphAnalyzer.cs", "src/ExeBlueprint.Core/Models/ProjectGraph.cs", "scripts/Test-LargeProjectAnalysis.ps1"]
     },
     {
