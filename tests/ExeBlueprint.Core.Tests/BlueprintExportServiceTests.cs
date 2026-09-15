@@ -20,7 +20,7 @@ public sealed class BlueprintExportServiceTests
     }
 
     [Fact]
-    public async Task RunWritesJsonReportAndRequestedSkeleton()
+    public async Task RunWritesJsonReportAndAllRequestedSkeletons()
     {
         await using var temp = new TemporaryDirectory();
         var outputDirectory = Path.Combine(temp.Path, "result");
@@ -32,17 +32,26 @@ public sealed class BlueprintExportServiceTests
             {
                 InputPath = typeof(BlueprintExportService).Assembly.Location,
                 OutputDirectory = outputDirectory,
-                EmitCSharp = true
+                EmitCSharp = true,
+                EmitCpp = true,
+                EmitRust = true,
+                EmitGo = true
             },
             new InlineProgress(value => progress.Add(value.Message)));
 
         Assert.Equal(Path.GetFullPath(outputDirectory), result.OutputDirectory);
         Assert.True(File.Exists(Path.Combine(outputDirectory, "blueprint.json")));
         Assert.True(File.Exists(Path.Combine(outputDirectory, "REPORT.md")));
-        var skeleton = Assert.Single(result.Skeletons);
-        Assert.Equal("C#", skeleton.Language);
-        Assert.True(skeleton.FileCount > 0);
-        Assert.Contains(progress, message => message.Contains("C#", StringComparison.Ordinal));
+        Assert.Equal(4, result.Skeletons.Count);
+        Assert.Equal(
+            ["C#", "C++", "Rust", "Go"],
+            result.Skeletons.Select(skeleton => skeleton.Language));
+        Assert.All(result.Skeletons, skeleton =>
+        {
+            Assert.True(skeleton.FileCount > 0);
+            Assert.True(Directory.Exists(skeleton.Directory));
+            Assert.Contains(progress, message => message.Contains(skeleton.Language, StringComparison.Ordinal));
+        });
         Assert.Equal("分析完成。", progress[^1]);
     }
 
