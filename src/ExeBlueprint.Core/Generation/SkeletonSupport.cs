@@ -60,6 +60,40 @@ internal static class SkeletonSupport
         return new string(characters.ToArray());
     }
 
+    private static readonly HashSet<string> ReservedFileStems = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "CON", "PRN", "AUX", "NUL", "CLOCK$"
+    };
+
+    // 產生保證能落地的檔名主幹（單一路徑片段，不含副檔名）：非英數與底線一律換底線，空字串用
+    // fallback，撞到 Windows 保留裝置名就前綴底線。組件名可能取自不受信任的輸入 EXE，若直接當檔名，
+    // 像 CON、COM1 這類名稱會被 GeneratedProjectWriter 的路徑檢查擋下而讓整包匯出失敗。
+    public static string SanitizeFileStem(string value, string fallback) =>
+        EnsureWritableSegment(Sanitize(value), fallback);
+
+    // 把已成形的路徑片段（可能含點，例如命名空間或帶點的組件名）整理成 writer 接受的樣子：去掉結尾
+    // 的點與空白；空、`.`、`..` 改用 fallback；片段開頭的裝置名前綴底線。不更動片段內部的點，保留
+    // 「My.Namespace.cs」這種可讀檔名。
+    public static string EnsureWritableSegment(string segment, string fallback)
+    {
+        var trimmed = segment.TrimEnd('.', ' ');
+        if (trimmed.Length == 0 || trimmed is "." or "..")
+        {
+            return fallback;
+        }
+
+        var dot = trimmed.IndexOf('.', StringComparison.Ordinal);
+        var stem = dot < 0 ? trimmed : trimmed[..dot];
+        return IsReservedFileStem(stem) ? $"_{trimmed}" : trimmed;
+    }
+
+    private static bool IsReservedFileStem(string stem) =>
+        ReservedFileStems.Contains(stem) ||
+        stem.Length == 4 &&
+        stem[3] is >= '1' and <= '9' &&
+        (stem.StartsWith("COM", StringComparison.OrdinalIgnoreCase) ||
+         stem.StartsWith("LPT", StringComparison.OrdinalIgnoreCase));
+
     public static IReadOnlyList<MethodModel> EmittableMethods(TypeModel type) =>
         type.Methods
             .Where(method => !method.IsConstructor

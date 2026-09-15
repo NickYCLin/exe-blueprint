@@ -16,7 +16,7 @@ public static class CppSkeletonGenerator
         {
             files.Add(new GeneratedFile
             {
-                RelativePath = $"{SkeletonSupport.Sanitize(assemblyName)}.hpp",
+                RelativePath = $"{SkeletonSupport.SanitizeFileStem(assemblyName, "Reconstructed")}.hpp",
                 Content = BuildFile(types)
             });
         }

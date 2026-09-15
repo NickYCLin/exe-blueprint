@@ -84,12 +84,13 @@ public static class CSharpSkeletonGenerator
 
             foreach (var namespaceGroup in topLevelTypes.GroupBy(type => type.Namespace).OrderBy(group => group.Key, StringComparer.Ordinal))
             {
-                var fileName = string.IsNullOrEmpty(namespaceGroup.Key) ? "_GlobalNamespace" : namespaceGroup.Key;
+                var namespaceName = namespaceGroup.Key ?? string.Empty;
+                var fileName = SkeletonSupport.EnsureWritableSegment(namespaceName, "_GlobalNamespace");
                 files.Add(new GeneratedFile
                 {
                     RelativePath = $"{projectDirectory}/{fileName}.cs",
                     Content = BuildNamespaceFile(
-                        namespaceGroup.Key,
+                        namespaceName,
                         namespaceGroup,
                         nestedTypeIndex,
                         refLikeTypes)
@@ -2187,11 +2188,9 @@ public static class CSharpSkeletonGenerator
         foreach (var artifact in assemblies)
         {
             var assemblyName = AssemblyName(artifact);
-            var baseDirectory = Sanitize(assemblyName);
-            if (string.IsNullOrWhiteSpace(baseDirectory))
-            {
-                baseDirectory = "ReconstructedProject";
-            }
+            var baseDirectory = SkeletonSupport.EnsureWritableSegment(
+                Sanitize(assemblyName),
+                "ReconstructedProject");
 
             var projectDirectory = baseDirectory;
             var suffix = 2;

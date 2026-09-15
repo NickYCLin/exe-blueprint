@@ -16,7 +16,7 @@ public static class GoSkeletonGenerator
         {
             files.Add(new GeneratedFile
             {
-                RelativePath = $"{SkeletonSupport.Sanitize(assemblyName)}.go",
+                RelativePath = $"{SkeletonSupport.SanitizeFileStem(assemblyName, "Reconstructed")}.go",
                 Content = BuildFile(types)
             });
         }

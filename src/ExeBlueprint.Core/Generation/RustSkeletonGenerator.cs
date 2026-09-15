@@ -17,7 +17,7 @@ public static class RustSkeletonGenerator
         {
             files.Add(new GeneratedFile
             {
-                RelativePath = $"{SkeletonSupport.Sanitize(assemblyName)}.rs",
+                RelativePath = $"{SkeletonSupport.SanitizeFileStem(assemblyName, "Reconstructed")}.rs",
                 Content = BuildFile(types)
             });
         }
