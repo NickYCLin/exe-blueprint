@@ -53,6 +53,14 @@ internal static class PeAnalyzer
             return null;
         }
 
+        // PEReader 只接受長度不超過 int.MaxValue 的串流，否則丟 ArgumentException；那個型別不在
+        // FileAnalyzer 的捕捉範圍內，會讓整個分析中止。這裡改以 BadImageFormatException 回報，
+        // 讓這個檔案被記成略過並附上原因，其他檔案照常分析。
+        if (stream.Length > int.MaxValue)
+        {
+            throw new BadImageFormatException("PE 檔案超過 2 GiB，超出 PE 讀取器支援範圍。");
+        }
+
         stream.Position = 0;
         using var peReader = new PEReader(stream, PEStreamOptions.LeaveOpen);
         var headers = peReader.PEHeaders;
