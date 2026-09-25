@@ -31,6 +31,20 @@ public sealed class EmbeddedJsonConfigurationReaderTests
         Assert.NotNull(oversized.Error);
     }
 
+    // JsonDocument.Parse 不驗證名稱中的代理字元跳脫與原始 UTF-8，讀取 property.Name 時才會失敗。
+    // 這種輸入必須回報 invalid，而不是讓例外逃出、讓整個組件的分析結果被丟掉。
+    [Fact]
+    public void ReportsInvalidForUnreadablePropertyNamesInsteadOfThrowing()
+    {
+        var loneSurrogate = EmbeddedJsonConfigurationReader.Read("""{"\uD800":0}"""u8.ToArray());
+        Assert.Equal("invalid", loneSurrogate.Status);
+        Assert.NotNull(loneSurrogate.Error);
+
+        var invalidUtf8 = EmbeddedJsonConfigurationReader.Read([0x7B, 0x22, 0xFF, 0x22, 0x3A, 0x30, 0x7D]);
+        Assert.Equal("invalid", invalidUtf8.Status);
+        Assert.NotNull(invalidUtf8.Error);
+    }
+
     [Fact]
     public void StopsWhenPropertyBudgetIsReached()
     {

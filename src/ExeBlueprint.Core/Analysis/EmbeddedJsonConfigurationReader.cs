@@ -48,6 +48,13 @@ internal static class EmbeddedJsonConfigurationReader
         {
             return Invalid("JSON 設定檔格式無效、UTF-8 不正確或巢狀過深。");
         }
+        catch (InvalidOperationException)
+        {
+            // JsonDocument.Parse 不驗證屬性名稱裡的原始 UTF-8 與代理字元跳脫（例如 "\uD800"），要到讀取
+            // property.Name 時才由 JsonElement 丟 InvalidOperationException。若讓它逃出，上層會把整個
+            // 組件的 CodeModel 丟掉且不留警告；這裡應與其他格式錯誤一樣回報 invalid。
+            return Invalid("JSON 設定檔的屬性名稱含無效的 UTF-8 或 UTF-16 字串。");
+        }
     }
 
     public static ManagedResourceConfigurationModel Unavailable(string error) =>
