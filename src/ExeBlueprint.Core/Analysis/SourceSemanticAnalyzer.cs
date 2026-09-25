@@ -70,9 +70,29 @@ internal static class SourceSemanticAnalyzer
             {
                 sameName[index].CompilationName = sameName.Length == 1
                     ? sameName[index].AssemblyName
-                    : $"ExeBlueprint.Source.{plans.IndexOf(sameName[index]):D4}";
+                    : $"{InternalAssemblyNamePrefix}{plans.IndexOf(sameName[index]):D4}";
                 if (sameName.Length > 1)
                     sameName[index].MarkIncomplete($"AssemblyName 與其他專案重複（{sameName[index].AssemblyName}），語意分析改用內部代號。");
+            }
+        }
+
+        // 代號來自索引或路徑雜湊，理論上仍可能與其他代號撞名；最後再保證 compilation 名稱唯一，
+        // 讓之後以名稱為鍵的對照表絕不會因重複鍵而丟例外。
+        var usedCompilationNames = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var plan in plans)
+        {
+            var baseName = plan.CompilationName!;
+            var candidate = baseName;
+            var suffix = 2;
+            while (!usedCompilationNames.Add(candidate))
+            {
+                candidate = $"{baseName}.{suffix++}";
+            }
+
+            if (candidate != baseName)
+            {
+                plan.CompilationName = candidate;
+                plan.MarkIncomplete($"compilation 名稱與其他專案重複（{baseName}），改用 {candidate}。");
             }
         }
 
@@ -197,8 +217,10 @@ internal static class SourceSemanticAnalyzer
         foreach (var plan in plans)
             BuildCompilation(plan, byId, buildStates, frameworkReferences, cancellationToken);
 
+        // 名稱已在前面保證唯一，這裡仍先 GroupBy 再建表：對照表絕不能因重複鍵讓整個分析中止。
         var assemblyProjects = plans.Where(plan => plan.Compilation is not null)
-            .ToDictionary(plan => plan.Compilation!.AssemblyName!, plan => plan.Project, StringComparer.Ordinal);
+            .GroupBy(plan => plan.Compilation!.AssemblyName!, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.First().Project, StringComparer.Ordinal);
         var declarations = new List<SourceDeclaration>();
         var calls = new List<SourceCall>();
         var summaries = new List<SourceProjectSummary>();
@@ -356,9 +378,12 @@ internal static class SourceSemanticAnalyzer
         CancellationToken cancellationToken)
     {
         var assemblyName = component?.AssemblyName ?? component?.Name ?? Path.GetFileNameWithoutExtension(file.LogicalPath);
-        var replacedAssemblyName = !IsSafeAssemblyName(assemblyName);
+        // ExeBlueprint.Source.* 是內部代號的保留字首；若專案自己就叫這個名字，會和重名／不安全名稱改用的
+        // 代號撞在一起，建立 AssemblyName 對照表時就會因重複鍵而中止整個分析，因此一併改用代號。
+        var replacedAssemblyName = !IsSafeAssemblyName(assemblyName) ||
+                                   assemblyName.StartsWith(InternalAssemblyNamePrefix, StringComparison.OrdinalIgnoreCase);
         if (replacedAssemblyName)
-            assemblyName = $"ExeBlueprint.Source.{Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(file.LogicalPath)))[..12]}";
+            assemblyName = $"{InternalAssemblyNamePrefix}{Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(file.LogicalPath)))[..12]}";
         var plan = new ProjectPlan(file.LogicalPath, GetDirectory(file.LogicalPath), assemblyName);
         if (replacedAssemblyName) plan.MarkIncomplete("AssemblyName 無法安全用於 Roslyn compilation，已改用內部代號。");
         var validImplicitUsings = ApplyImplicitUsingsSetting(component?.ImplicitUsings, out var implicitUsings);
@@ -805,6 +830,9 @@ internal static class SourceSemanticAnalyzer
 
     private static bool IsLiteral(string? value) => !string.IsNullOrWhiteSpace(value) && value.Length <= 2048 &&
         value.IndexOfAny(['$', '@', '%', '*', '?', ';', '\0', '\r', '\n']) < 0;
+
+    // 重名或不安全的 AssemblyName 改用的內部代號字首；真實專案若取這個字首也一律改用代號，避免撞名。
+    private const string InternalAssemblyNamePrefix = "ExeBlueprint.Source.";
 
     private static bool IsSafeAssemblyName(string value) => value.Length is > 0 and <= 256 &&
         value.All(character => char.IsLetterOrDigit(character) || character is '.' or '_' or '-');

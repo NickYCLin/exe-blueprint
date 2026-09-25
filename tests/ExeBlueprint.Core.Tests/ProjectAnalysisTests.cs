@@ -12,6 +12,26 @@ public sealed class ProjectAnalysisTests : IDisposable
 {
     private readonly string _root = Path.Combine(Path.GetTempPath(), "ExeBlueprint-project-tests", Guid.NewGuid().ToString("N"));
 
+    // ExeBlueprint.Source.* 是內部代號字首。名稱不安全的專案會改用 ExeBlueprint.Source.<路徑雜湊>，
+    // 若另一個專案剛好取這個名字，先前建立 AssemblyName 對照表時會因重複鍵擲例外而中止整個分析。
+    [Fact]
+    public async Task ReservedInternalAssemblyNameDoesNotAbortSourceAnalysis()
+    {
+        const string project = "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>";
+        Write("x/Un Safe.csproj", project);
+        Write("x/Program.cs", "class A { }");
+        var hash = Convert.ToHexString(
+            System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes("x/Un Safe.csproj")))[..12];
+        Write($"y/ExeBlueprint.Source.{hash}.csproj", project);
+        Write("y/Program.cs", "class B { }");
+
+        var result = await new BlueprintAnalyzer().AnalyzeAsync(_root,
+            new AnalysisOptions { InventoryOnly = true, SourceMode = true, EnableSourceAnalysis = true });
+
+        Assert.NotNull(result.SourceCode);
+        Assert.Equal(2, result.SourceCode!.Projects.Count);
+    }
+
     [Fact]
     public async Task SourceSolutionLinksProjectsAndKeepsConditionsUnevaluated()
     {
