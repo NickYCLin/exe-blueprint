@@ -48,7 +48,7 @@ public static class GoSkeletonGenerator
 
     private static void AppendType(StringBuilder builder, TypeModel type)
     {
-        var name = SkeletonSupport.SimpleName(type.Name);
+        var name = Identifier(SkeletonSupport.SimpleName(type.Name), "Type");
         switch (type.Kind)
         {
             case "enum":
@@ -60,7 +60,7 @@ public static class GoSkeletonGenerator
                     foreach (var member in members)
                     {
                         var value = SkeletonSupport.IntegralEnumValue(member.ConstantValue) ?? "iota";
-                        builder.AppendLine($"    {name}{SkeletonSupport.Sanitize(member.Name)} {name} = {value}");
+                        builder.AppendLine($"    {name}{SkeletonSupport.IdentifierStem(member.Name, "Member")} {name} = {value}");
                     }
 
                     builder.AppendLine(")");
@@ -72,7 +72,7 @@ public static class GoSkeletonGenerator
                 builder.AppendLine($"type {name} interface {{");
                 foreach (var method in SkeletonSupport.EmittableMethods(type))
                 {
-                    builder.AppendLine($"    {SkeletonSupport.Sanitize(method.Name)}({Parameters(method)}){ReturnSuffix(method)}");
+                    builder.AppendLine($"    {Identifier(method.Name, "Method")}({Parameters(method)}){ReturnSuffix(method)}");
                 }
 
                 builder.AppendLine("}");
@@ -82,7 +82,7 @@ public static class GoSkeletonGenerator
                 builder.AppendLine($"type {name} struct {{");
                 foreach (var (memberName, memberType) in SkeletonSupport.DataMembers(type))
                 {
-                    builder.AppendLine($"    {SkeletonSupport.Sanitize(memberName)} {LanguageTypeMap.ToGo(memberType)}");
+                    builder.AppendLine($"    {Identifier(memberName, "Field")} {LanguageTypeMap.ToGo(memberType)}");
                 }
 
                 builder.AppendLine("}");
@@ -92,11 +92,11 @@ public static class GoSkeletonGenerator
                     builder.AppendLine();
                     if (method.IsStatic)
                     {
-                        builder.AppendLine($"func {name}_{SkeletonSupport.Sanitize(method.Name)}({Parameters(method)}){ReturnSuffix(method)} {{");
+                        builder.AppendLine($"func {name}_{SkeletonSupport.IdentifierStem(method.Name, "Method")}({Parameters(method)}){ReturnSuffix(method)} {{");
                     }
                     else
                     {
-                        builder.AppendLine($"func (r *{name}) {SkeletonSupport.Sanitize(method.Name)}({Parameters(method)}){ReturnSuffix(method)} {{");
+                        builder.AppendLine($"func (r *{name}) {Identifier(method.Name, "Method")}({Parameters(method)}){ReturnSuffix(method)} {{");
                     }
 
                     builder.AppendLine("    panic(\"not implemented\")");
@@ -117,7 +117,27 @@ public static class GoSkeletonGenerator
     private static string ParameterName(string name, int index)
     {
         var sanitized = SkeletonSupport.Sanitize(name);
-        return string.IsNullOrEmpty(sanitized) || char.IsDigit(sanitized[0]) ? $"arg{index}" : sanitized;
+        if (string.IsNullOrEmpty(sanitized) || char.IsDigit(sanitized[0]))
+        {
+            return $"arg{index}";
+        }
+
+        // r 是 receiver 的名字，參數同名會是 duplicate argument；關鍵字沒有原始識別字語法，只能改名。
+        return sanitized == "r" || Keywords.Contains(sanitized) ? $"{sanitized}_" : sanitized;
+    }
+
+    private static readonly HashSet<string> Keywords = new(StringComparer.Ordinal)
+    {
+        "break", "case", "chan", "const", "continue", "default", "defer", "else", "fallthrough", "for",
+        "func", "go", "goto", "if", "import", "interface", "map", "package", "range", "return", "select",
+        "struct", "switch", "type", "var"
+    };
+
+    // Go 沒有原始識別字語法，撞到關鍵字只能加底線改名；空名稱與開頭數字由 IdentifierStem 處理。
+    private static string Identifier(string name, string fallback)
+    {
+        var stem = SkeletonSupport.IdentifierStem(name, fallback);
+        return Keywords.Contains(stem) ? $"{stem}_" : stem;
     }
 
     private static string Readme() =>

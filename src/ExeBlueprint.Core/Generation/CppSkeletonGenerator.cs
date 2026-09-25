@@ -52,7 +52,7 @@ public static class CppSkeletonGenerator
 
     private static void AppendType(StringBuilder builder, TypeModel type)
     {
-        var name = SkeletonSupport.SimpleName(type.Name);
+        var name = Identifier(SkeletonSupport.SimpleName(type.Name), "Type");
         if (type.Kind == "enum")
         {
             var underlyingType = LanguageTypeMap.ToCpp(SkeletonSupport.EnumUnderlyingType(type));
@@ -60,7 +60,7 @@ public static class CppSkeletonGenerator
             builder.AppendLine(string.Join(",\n", SkeletonSupport.EnumMembers(type).Select(member =>
             {
                 var assignment = SkeletonSupport.IntegralEnumValue(member.ConstantValue) is { } value ? $" = {value}" : "";
-                return $"    {SkeletonSupport.Sanitize(member.Name)}{assignment}";
+                return $"    {Identifier(member.Name, "Member")}{assignment}";
             })));
             builder.AppendLine("};");
             return;
@@ -76,7 +76,7 @@ public static class CppSkeletonGenerator
 
         foreach (var (memberName, memberType) in SkeletonSupport.DataMembers(type))
         {
-            builder.AppendLine($"    {LanguageTypeMap.ToCpp(memberType)} {SkeletonSupport.Sanitize(memberName)};");
+            builder.AppendLine($"    {LanguageTypeMap.ToCpp(memberType)} {Identifier(memberName, "field")};");
         }
 
         foreach (var method in SkeletonSupport.EmittableMethods(type))
@@ -93,7 +93,7 @@ public static class CppSkeletonGenerator
         var parameters = string.Join(", ", method.Parameters.Select((parameter, index) =>
             $"{LanguageTypeMap.ToCpp(parameter.Type)} {ParameterName(parameter.Name, index)}"));
         var prefix = method.IsStatic ? "static " : "";
-        var header = $"{prefix}{returns} {SkeletonSupport.Sanitize(method.Name)}({parameters})";
+        var header = $"{prefix}{returns} {Identifier(method.Name, "method")}({parameters})";
 
         // 介面的靜態成員不能是純虛擬：virtual static 不是合法 C++。靜態成員照一般方法給個實作。
         if (isInterface && !method.IsStatic)
@@ -108,7 +108,33 @@ public static class CppSkeletonGenerator
     private static string ParameterName(string name, int index)
     {
         var sanitized = SkeletonSupport.Sanitize(name);
-        return string.IsNullOrEmpty(sanitized) || char.IsDigit(sanitized[0]) ? $"arg{index}" : sanitized;
+        if (string.IsNullOrEmpty(sanitized) || char.IsDigit(sanitized[0]))
+        {
+            return $"arg{index}";
+        }
+
+        return Keywords.Contains(sanitized) ? $"{sanitized}_" : sanitized;
+    }
+
+    private static readonly HashSet<string> Keywords = new(StringComparer.Ordinal)
+    {
+        "alignas", "alignof", "and", "and_eq", "asm", "auto", "bitand", "bitor", "bool", "break", "case",
+        "catch", "char", "char8_t", "char16_t", "char32_t", "class", "compl", "concept", "const", "consteval",
+        "constexpr", "constinit", "const_cast", "continue", "co_await", "co_return", "co_yield", "decltype",
+        "default", "delete", "do", "double", "dynamic_cast", "else", "enum", "explicit", "export", "extern",
+        "false", "float", "for", "friend", "goto", "if", "inline", "int", "long", "mutable", "namespace", "new",
+        "noexcept", "not", "not_eq", "nullptr", "operator", "or", "or_eq", "private", "protected", "public",
+        "register", "reinterpret_cast", "requires", "return", "short", "signed", "sizeof", "static",
+        "static_assert", "static_cast", "struct", "switch", "template", "this", "thread_local", "throw",
+        "true", "try", "typedef", "typeid", "typename", "union", "unsigned", "using", "virtual", "void",
+        "volatile", "wchar_t", "while", "xor", "xor_eq"
+    };
+
+    // C++ 沒有原始識別字語法，撞到關鍵字只能加底線改名；空名稱與開頭數字由 IdentifierStem 處理。
+    private static string Identifier(string name, string fallback)
+    {
+        var stem = SkeletonSupport.IdentifierStem(name, fallback);
+        return Keywords.Contains(stem) ? $"{stem}_" : stem;
     }
 
     private static string Readme() =>

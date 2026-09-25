@@ -181,4 +181,18 @@ internal static class SkeletonSupport
 
         return candidate;
     }
+
+    // 把 Sanitize 後的名稱整理成各語言都能接受的識別字骨架：空字串用 fallback、開頭是數字就補底線。
+    // 名稱直接來自 metadata，混淆過的組件常有空名稱或以數字開頭的成員。各語言的關鍵字另由呼叫端
+    // 處理（Rust 可用 r#，Go 與 C++ 沒有原始識別字語法只能改名）。
+    public static string IdentifierStem(string value, string fallback)
+    {
+        var sanitized = Sanitize(value);
+        if (sanitized.Length == 0)
+        {
+            return fallback;
+        }
+
+        return char.IsDigit(sanitized[0]) ? $"_{sanitized}" : sanitized;
+    }
 }

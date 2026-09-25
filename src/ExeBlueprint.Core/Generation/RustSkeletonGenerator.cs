@@ -49,7 +49,7 @@ public static class RustSkeletonGenerator
 
     private static void AppendType(StringBuilder builder, TypeModel type)
     {
-        var name = SkeletonSupport.SimpleName(type.Name);
+        var name = Identifier(SkeletonSupport.SimpleName(type.Name), "Type");
         switch (type.Kind)
         {
             case "enum":
@@ -67,7 +67,7 @@ public static class RustSkeletonGenerator
                 var aliases = new List<(string Alias, string Target)>();
                 foreach (var member in enumMembers)
                 {
-                    var variant = SkeletonSupport.Sanitize(member.Name);
+                    var variant = Identifier(member.Name, "Member");
                     var value = SkeletonSupport.IntegralEnumValue(member.ConstantValue);
                     if (value is not null && firstVariantByValue.TryGetValue(value, out var target))
                     {
@@ -113,7 +113,7 @@ public static class RustSkeletonGenerator
                 builder.AppendLine($"pub struct {name} {{");
                 foreach (var (memberName, memberType) in SkeletonSupport.DataMembers(type))
                 {
-                    builder.AppendLine($"    pub {SkeletonSupport.Sanitize(memberName)}: {LanguageTypeMap.ToRust(memberType)},");
+                    builder.AppendLine($"    pub {Identifier(memberName, "field")}: {LanguageTypeMap.ToRust(memberType)},");
                 }
 
                 builder.AppendLine("}");
@@ -148,14 +148,47 @@ public static class RustSkeletonGenerator
             $"{ParameterName(parameter.Name)}: {LanguageTypeMap.ToRust(parameter.Type)}"));
 
         var returns = method.ReturnType == "void" ? "" : $" -> {LanguageTypeMap.ToRust(method.ReturnType)}";
-        var header = $"{visibility}fn {SkeletonSupport.Sanitize(method.Name)}({string.Join(", ", parameters)}){returns}";
+        var header = $"{visibility}fn {Identifier(method.Name, "method")}({string.Join(", ", parameters)}){returns}";
         return includeBody ? $"{header} {{ unimplemented!() }}" : header;
     }
 
     private static string ParameterName(string name)
     {
         var sanitized = SkeletonSupport.Sanitize(name);
-        return string.IsNullOrEmpty(sanitized) || char.IsDigit(sanitized[0]) ? $"arg_{sanitized}" : sanitized;
+        if (string.IsNullOrEmpty(sanitized) || char.IsDigit(sanitized[0]))
+        {
+            return $"arg_{sanitized}";
+        }
+
+        // self 會和接收者參數撞名，其他關鍵字可用 r# 原始識別字。
+        return EscapeKeyword(sanitized);
+    }
+
+    private static readonly HashSet<string> Keywords = new(StringComparer.Ordinal)
+    {
+        "as", "async", "await", "break", "const", "continue", "dyn", "else", "enum", "extern", "false", "fn",
+        "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "return",
+        "static", "struct", "trait", "true", "type", "unsafe", "use", "where", "while", "abstract", "become",
+        "box", "do", "final", "macro", "override", "priv", "try", "typeof", "unsized", "virtual", "yield", "gen"
+    };
+
+    // 這幾個不能寫成 r# 原始識別字，只能改名。
+    private static readonly HashSet<string> NonRawable = new(StringComparer.Ordinal)
+    {
+        "self", "super", "crate", "Self"
+    };
+
+    private static string EscapeKeyword(string stem) =>
+        NonRawable.Contains(stem) ? $"{stem}_"
+        : Keywords.Contains(stem) ? $"r#{stem}"
+        : stem;
+
+    // 名稱直接來自 metadata：空名稱與開頭數字由 IdentifierStem 處理，單獨一個 _ 不能當欄位名，
+    // 關鍵字用 r#，self／super／crate／Self 沒有原始識別字語法就加底線。
+    private static string Identifier(string name, string fallback)
+    {
+        var stem = SkeletonSupport.IdentifierStem(name, fallback);
+        return EscapeKeyword(stem == "_" ? fallback : stem);
     }
 
     private static string Readme() =>

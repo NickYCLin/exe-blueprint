@@ -77,6 +77,51 @@ public sealed class RustSkeletonSyntaxTests
         Assert.False(lines[empty - 1].StartsWith("#[repr(", StringComparison.Ordinal));
     }
 
+    // 關鍵字用 r# 原始識別字，self／super／crate／Self 沒有這個語法只能加底線；單獨的 _ 不能當欄位名。
+    [Fact]
+    public async Task KeywordNamesUseRawIdentifiersAndNonRawableOnesAreRenamed()
+    {
+        var document = await BuildDocument(
+            new TypeModel
+            {
+                FullName = "Tests.Probe",
+                Namespace = "Tests",
+                Name = "Probe",
+                Kind = "class",
+                Accessibility = "internal",
+                Fields =
+                [
+                    new FieldModel { Name = "type", Type = "int", Accessibility = "public" },
+                    new FieldModel { Name = "self", Type = "int", Accessibility = "public" },
+                    new FieldModel { Name = "_", Type = "int", Accessibility = "public" }
+                ],
+                Methods =
+                [
+                    Method("match") with { Parameters = [Parameter("self", "int"), Parameter("loop", "int")] }
+                ]
+            },
+            new TypeModel
+            {
+                FullName = "Tests.struct",
+                Namespace = "Tests",
+                Name = "struct",
+                Kind = "class",
+                Accessibility = "internal"
+            });
+
+        var rust = RustSkeletonGenerator.Generate(document)
+            .Single(file => file.RelativePath.EndsWith(".rs", StringComparison.Ordinal))
+            .Content;
+
+        Assert.Contains("    pub r#type: i32,", rust, StringComparison.Ordinal);
+        Assert.Contains("    pub self_: i32,", rust, StringComparison.Ordinal);
+        Assert.Contains("    pub field: i32,", rust, StringComparison.Ordinal);
+        Assert.Contains("    pub fn r#match(&self, self_: i32, r#loop: i32) { unimplemented!() }", rust, StringComparison.Ordinal);
+        Assert.Contains("pub struct r#struct {", rust, StringComparison.Ordinal);
+    }
+
+    private static ParameterModel Parameter(string name, string type) => new() { Name = name, Type = type };
+
     private static FieldModel EnumMember(string name, string value) => new()
     {
         Name = name,

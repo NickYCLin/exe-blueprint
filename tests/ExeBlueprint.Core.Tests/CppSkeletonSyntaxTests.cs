@@ -34,6 +34,35 @@ public sealed class CppSkeletonSyntaxTests
         Assert.Contains("virtual void Run() = 0;", cpp, StringComparison.Ordinal);
     }
 
+    // C++ 沒有原始識別字語法，撞到關鍵字或開頭是數字的名稱只能改名，否則整個檔案無法編譯。
+    [Fact]
+    public async Task KeywordAndDigitLeadingNamesAreRenamed()
+    {
+        var document = await BuildDocument(new TypeModel
+        {
+            FullName = "Tests.union",
+            Namespace = "Tests",
+            Name = "union",
+            Kind = "class",
+            Accessibility = "internal",
+            Fields = [new FieldModel { Name = "template", Type = "int", Accessibility = "public" }],
+            Methods =
+            [
+                Method("delete", "void") with { Parameters = [Parameter("class", "int"), Parameter("2nd", "int")] }
+            ]
+        });
+
+        var cpp = CppSkeletonGenerator.Generate(document)
+            .Single(file => file.RelativePath.EndsWith(".hpp", StringComparison.Ordinal))
+            .Content;
+
+        Assert.Contains("class union_ {", cpp, StringComparison.Ordinal);
+        Assert.Contains("    int32_t template_;", cpp, StringComparison.Ordinal);
+        Assert.Contains("void delete_(int32_t class_, int32_t arg1) { }", cpp, StringComparison.Ordinal);
+    }
+
+    private static ParameterModel Parameter(string name, string type) => new() { Name = name, Type = type };
+
     private static MethodModel Method(string name, string returnType, bool isStatic = false) => new()
     {
         Name = name,
