@@ -316,6 +316,90 @@ internal sealed class InputWorkspace : IAsyncDisposable
         }
     }
 
+    // 讀 End of Central Directory 紀錄裡宣告的項目總數。只當作開檔前的預先過濾：讀不到或格式
+    // 不符就回傳 false，交回 ZipArchive 依既有流程處理，絕不會拒絕原本能開的壓縮檔。
+    private static bool TryReadDeclaredZipEntryCount(string archivePath, out long count)
+    {
+        count = 0;
+        try
+        {
+            using var stream = new FileStream(archivePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+            const int EndRecordSize = 22;
+            const int MaxCommentLength = 0xFFFF;
+            if (stream.Length < EndRecordSize)
+            {
+                return false;
+            }
+
+            var tailLength = (int)Math.Min(stream.Length, EndRecordSize + MaxCommentLength);
+            var tail = new byte[tailLength];
+            stream.Position = stream.Length - tailLength;
+            stream.ReadExactly(tail);
+
+            // EOCD 的註解長度欄位必須剛好對到檔尾，避免把註解或資料裡的假簽章當成紀錄。
+            for (var position = tailLength - EndRecordSize; position >= 0; position--)
+            {
+                if (tail[position] != 0x50 || tail[position + 1] != 0x4B ||
+                    tail[position + 2] != 0x05 || tail[position + 3] != 0x06)
+                {
+                    continue;
+                }
+
+                var commentLength = System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(tail.AsSpan(position + 20, 2));
+                if (position + EndRecordSize + commentLength != tailLength)
+                {
+                    continue;
+                }
+
+                var total = System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(tail.AsSpan(position + 10, 2));
+                if (total != 0xFFFF)
+                {
+                    count = total;
+                    return true;
+                }
+
+                // zip64：EOCD 前面 20 個位元組是 locator，裡面放 zip64 EOCD 的位移，總數是其中的 8 位元組欄位。
+                var locatorStart = stream.Length - tailLength + position - 20;
+                if (locatorStart < 0)
+                {
+                    return false;
+                }
+
+                var locator = new byte[20];
+                stream.Position = locatorStart;
+                stream.ReadExactly(locator);
+                if (locator[0] != 0x50 || locator[1] != 0x4B || locator[2] != 0x06 || locator[3] != 0x07)
+                {
+                    return false;
+                }
+
+                var zip64Offset = System.Buffers.Binary.BinaryPrimitives.ReadInt64LittleEndian(locator.AsSpan(8, 8));
+                if (zip64Offset < 0 || zip64Offset > stream.Length - 56)
+                {
+                    return false;
+                }
+
+                var zip64Record = new byte[56];
+                stream.Position = zip64Offset;
+                stream.ReadExactly(zip64Record);
+                if (zip64Record[0] != 0x50 || zip64Record[1] != 0x4B || zip64Record[2] != 0x06 || zip64Record[3] != 0x06)
+                {
+                    return false;
+                }
+
+                var zip64Total = System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(zip64Record.AsSpan(32, 8));
+                count = zip64Total > long.MaxValue ? long.MaxValue : (long)zip64Total;
+                return true;
+            }
+
+            return false;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
     private static async Task<IReadOnlyList<WorkspaceFileState>> ExtractZipSafelyAsync(
         string archivePath,
         string temporaryDirectory,
@@ -325,6 +409,14 @@ internal sealed class InputWorkspace : IAsyncDisposable
     {
         var destinationRoot = Path.Combine(temporaryDirectory, "zip");
         CreatePrivateDirectory(destinationRoot);
+
+        // ZipArchive 要先把整個 central directory 具現化才能數 Entries；上百萬筆極小的目錄紀錄在被
+        // 拒絕之前就會耗掉大量記憶體。先自己讀 EOCD 宣告的總數，超過上限就在開檔前拒絕。
+        if (TryReadDeclaredZipEntryCount(archivePath, out var declaredEntries) && declaredEntries > options.MaxFiles)
+        {
+            throw new InvalidDataException($"壓縮檔項目數超過限制：{options.MaxFiles:N0}");
+        }
+
         using var archive = ZipFile.OpenRead(archivePath);
         if (archive.Entries.Count > options.MaxFiles)
         {
