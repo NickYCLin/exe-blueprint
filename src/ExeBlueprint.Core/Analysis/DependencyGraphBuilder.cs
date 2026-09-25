@@ -80,6 +80,17 @@ internal static class DependencyGraphBuilder
             .Where(item => item.CommonDirectoryPrefix == bestPrefix)
             .Select(item => item.Candidate)
             .ToArray();
+        if (best.Length > 1)
+        {
+            // 共同目錄前綴長度相同時，Windows 載入器與 .NET 探測都會先取與來源同一個目錄的檔案；
+            // 例如 app.exe 旁的 foo.dll 應勝過 plugins/foo.dll。同目錄候選也不唯一時才維持未解析。
+            var sourceDirectory = DirectorySegments(sourcePath);
+            best = best
+                .Where(candidate => DirectorySegments(RankingPath(candidate, compareWithinContainer))
+                    .SequenceEqual(sourceDirectory, StringComparer.OrdinalIgnoreCase))
+                .ToArray();
+        }
+
         if (best.Length != 1)
         {
             return false;

@@ -64,6 +64,40 @@ public sealed class DependencyGraphBuilderTests
         AssertResolved(dependencies, "assembly-reference", nearManaged.Id);
     }
 
+    // 共同目錄前綴相同時，應優先取與來源同一個目錄的檔案，這是載入器實際的探測順序。
+    [Fact]
+    public void PrefersCandidateInTheSourceDirectoryWhenPrefixLengthsTie()
+    {
+        var source = CreateArtifact(
+            "app.exe",
+            importedModules: ["foo.dll"],
+            managedReferences: ["Demo.Library"]);
+        var rootNative = CreateArtifact("foo.dll");
+        var pluginNative = CreateArtifact("plugins/foo.dll");
+        var rootManaged = CreateArtifact("Demo.Library.dll", assemblyName: "Demo.Library");
+        var toolsManaged = CreateArtifact("tools/Demo.Library.dll", assemblyName: "Demo.Library");
+
+        var dependencies = DependencyGraphBuilder.Build(
+            [toolsManaged, pluginNative, source, rootNative, rootManaged]);
+
+        AssertResolved(dependencies, "pe-import", rootNative.Id);
+        AssertResolved(dependencies, "assembly-reference", rootManaged.Id);
+    }
+
+    [Fact]
+    public void PrefersSameDirectoryOverDeeperSubdirectoryWithEqualPrefix()
+    {
+        var source = CreateArtifact(
+            "suite/app.exe",
+            importedModules: ["foo.dll"]);
+        var sameDirectory = CreateArtifact("suite/foo.dll");
+        var deeper = CreateArtifact("suite/x64/foo.dll");
+
+        var dependencies = DependencyGraphBuilder.Build([deeper, source, sameDirectory]);
+
+        AssertResolved(dependencies, "pe-import", sameDirectory.Id);
+    }
+
     [Fact]
     public void LeavesDependenciesUnresolvedWhenTheBestCandidatesRemainTied()
     {
