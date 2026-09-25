@@ -30,7 +30,15 @@ internal static class EmbeddedJsonConfigurationReader
 
         try
         {
-            using var document = JsonDocument.Parse(data, DocumentOptions);
+            // JsonDocument.Parse(byte[]) 不會略過 UTF-8 BOM（只有串流版本會），而 Visual Studio 存的
+            // appsettings.json 常帶 BOM；先切掉，否則合法檔案會被報成 invalid。
+            ReadOnlyMemory<byte> payload = data;
+            if (data.Length >= 3 && data[0] == 0xEF && data[1] == 0xBB && data[2] == 0xBF)
+            {
+                payload = payload[3..];
+            }
+
+            using var document = JsonDocument.Parse(payload, DocumentOptions);
             var state = new SummaryState();
             state.Visit(document.RootElement, parentPath: null, depth: 0);
             return new ManagedResourceConfigurationModel

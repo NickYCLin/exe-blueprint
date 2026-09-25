@@ -45,6 +45,18 @@ public sealed class EmbeddedJsonConfigurationReaderTests
         Assert.NotNull(invalidUtf8.Error);
     }
 
+    // JsonDocument.Parse(byte[]) 不處理 BOM，Visual Studio 存的 appsettings.json 卻常有；應視為合法。
+    [Fact]
+    public void AcceptsUtf8ByteOrderMark()
+    {
+        var summary = EmbeddedJsonConfigurationReader.Read([0xEF, 0xBB, 0xBF, 0x7B, 0x7D]);
+
+        Assert.Equal("parsed", summary.Status);
+        Assert.Equal("object", summary.RootKind);
+        Assert.Equal(0, summary.PropertyCount);
+        Assert.Null(summary.Error);
+    }
+
     [Fact]
     public void StopsWhenPropertyBudgetIsReached()
     {
