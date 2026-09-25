@@ -84,11 +84,15 @@ internal static class TechnologyDetector
             Add(detections, "tauri", "Tauri", "framework", 0.85, "同時找到 WebView2 與 Tauri 特徵");
         }
 
-        if (inspectNativeToolchainSignals && (imports.Any(name =>
-                name.StartsWith("vcl", StringComparison.OrdinalIgnoreCase) ||
-                name.StartsWith("rtl", StringComparison.OrdinalIgnoreCase) && name.EndsWith(".bpl", StringComparison.OrdinalIgnoreCase)) ||
-            signals.Contains("Embarcadero Delphi") ||
-            extension.Equals(".dfm", StringComparison.OrdinalIgnoreCase)))
+        // 原本的條件有兩個問題：|| 與 && 的優先順序讓任何以 vcl 開頭的匯入都算 Delphi，但 vcl 與 rtl
+        // 都應搭配 .bpl 執行期套件才算數；.dfm 表單檔本身不是 PE，卻被放在「必須是原生 PE」的條件裡，
+        // 永遠不會命中。
+        var importsDelphiPackage = imports.Any(name =>
+            (name.StartsWith("vcl", StringComparison.OrdinalIgnoreCase) ||
+             name.StartsWith("rtl", StringComparison.OrdinalIgnoreCase)) &&
+            name.EndsWith(".bpl", StringComparison.OrdinalIgnoreCase));
+        if ((inspectNativeToolchainSignals && (importsDelphiPackage || signals.Contains("Embarcadero Delphi"))) ||
+            extension.Equals(".dfm", StringComparison.OrdinalIgnoreCase))
         {
             Add(detections, "delphi", "Delphi／C++Builder", "toolchain", 0.86, "找到 VCL、BPL 或 Embarcadero 特徵");
         }

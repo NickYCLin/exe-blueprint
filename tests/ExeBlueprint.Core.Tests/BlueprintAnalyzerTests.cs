@@ -103,6 +103,44 @@ public sealed class BlueprintAnalyzerTests
         Assert.Equal(1, document.Summary.ConfigurationCount);
     }
 
+    // .dfm 表單檔本身不是 PE；先前的判斷把副檔名檢查放在「必須是原生 PE」的條件裡，永遠不會命中。
+    [Fact]
+    public async Task AnalyzeDirectoryDetectsDelphiFormFileWithoutNativePe()
+    {
+        await using var temp = new TemporaryDirectory();
+        await File.WriteAllTextAsync(Path.Combine(temp.Path, "MainForm.dfm"), "object MainForm: TMainForm");
+
+        var document = await new BlueprintAnalyzer().AnalyzeAsync(temp.Path);
+
+        Assert.Contains(document.Technologies, item => item.Id == "delphi");
+    }
+
+    // vcl／rtl 只有搭配 .bpl 執行期套件才算 Delphi；先前 || 與 && 的優先順序讓任何以 vcl 開頭的匯入都命中。
+    [Fact]
+    public async Task DelphiDetectionRequiresBplForVclOrRtlImports()
+    {
+        await using var temp = new TemporaryDirectory();
+        var path = Path.Combine(temp.Path, "probe.bin");
+        await File.WriteAllBytesAsync(path, new byte[4096]);
+        var signals = await BinarySignalReader.CreateAsync(path, 4096, CancellationToken.None);
+
+        var notDelphi = TechnologyDetector.DetectFile("app.exe", NativePe(["vclient.dll"]), signals);
+        Assert.DoesNotContain(notDelphi, item => item.Id == "delphi");
+
+        var delphi = TechnologyDetector.DetectFile("app.exe", NativePe(["vcl280.bpl"]), signals);
+        Assert.Contains(delphi, item => item.Id == "delphi");
+    }
+
+    private static PeAnalysis NativePe(string[] imports) => new()
+    {
+        IsExecutable = true,
+        IsLibrary = false,
+        IsManaged = false,
+        Architecture = "x86",
+        Subsystem = "gui",
+        ImportedModules = imports
+    };
+
     [Fact]
     public async Task ZipWithParentTraversalIsRejected()
     {
