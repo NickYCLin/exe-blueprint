@@ -2392,6 +2392,27 @@ public sealed class ManagedSymbolReaderTests
         Assert.Null(entry.Error);
     }
 
+    // 超過 16 KiB 的 TypeConverterString 先前被整筆判成無效；應與一般 String 一樣回報 encoded 並標記截斷。
+    [Fact]
+    public void TruncatesLongTypeConverterStringsInsteadOfRejectingThem()
+    {
+        var data = WriteResourceData(writer =>
+        {
+            writer.Write((byte)3);
+            writer.Write7BitEncodedInt(20_000);
+            writer.Write(Enumerable.Repeat((byte)'x', 20_000).ToArray());
+        });
+
+        var entry = ManagedSymbolReader.DecodePreserializedResourceEntry("Long", "System.String", data);
+
+        Assert.Equal("encoded", entry.Status);
+        Assert.True(entry.ValueTruncated);
+        Assert.Equal(4_096, entry.Value!.Length);
+        Assert.Equal("type-converter-string", entry.Serialization!.Format);
+        Assert.Equal(20_000, entry.Serialization.PayloadSize);
+        Assert.True(entry.Serialization.Complete);
+    }
+
     // 截斷不可切在 surrogate pair 中間；其他截斷點都有這個保護，資源值先前沒有。
     [Fact]
     public void TruncatesResourceValuesWithoutSplittingSurrogatePairs()

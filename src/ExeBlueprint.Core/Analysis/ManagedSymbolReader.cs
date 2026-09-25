@@ -828,7 +828,7 @@ internal static class ManagedSymbolReader
         byte[] data,
         int position)
     {
-        if (!TryReadResourceString(data, ref position, out var value)
+        if (!TryReadResourceString(data, ref position, out var value, out var payloadBytes, out var readTruncated)
             || position != data.Length)
         {
             return InvalidPreserializedResourceEntry(
@@ -839,19 +839,19 @@ internal static class ManagedSymbolReader
                 "type-converter-string");
         }
 
-        var truncated = value.Length > MaxResourceValueLength;
+        var valueTruncated = value.Length > MaxResourceValueLength;
         return new ManagedResourceEntryModel
         {
             Name = name,
             Type = type,
             Status = "encoded",
-            Value = truncated ? TruncateResourceValue(value) : value,
-            ValueTruncated = truncated,
+            Value = valueTruncated ? TruncateResourceValue(value) : value,
+            ValueTruncated = readTruncated || valueTruncated,
             DataSize = data.Length,
             Serialization = new ManagedResourceSerializationModel
             {
                 Format = "type-converter-string",
-                PayloadSize = Encoding.UTF8.GetByteCount(value),
+                PayloadSize = payloadBytes,
                 PayloadKind = "text",
                 Complete = true
             }
@@ -883,19 +883,40 @@ internal static class ManagedSymbolReader
                 }
         };
 
-    private static bool TryReadResourceString(byte[] data, ref int position, out string value)
+    // 超過 16 KiB 的字串只解碼前段並標記截斷，而不是整筆視為無效；宣告長度仍須完整落在資料內，
+    // position 也照宣告長度前進，讓呼叫端「payload 必須剛好用完」的檢查維持不變。
+    private static bool TryReadResourceString(
+        byte[] data,
+        ref int position,
+        out string value,
+        out int declaredByteLength,
+        out bool truncated)
     {
         value = string.Empty;
+        declaredByteLength = 0;
+        truncated = false;
         if (!TryRead7BitEncodedInt(data, ref position, out var byteLength)
-            || byteLength > MaxResourceValueLength * 4
             || byteLength > data.Length - position)
         {
             return false;
         }
 
+        declaredByteLength = byteLength;
+        var readLength = Math.Min(byteLength, MaxResourceValueLength * 4);
+        if (readLength < byteLength)
+        {
+            // 切點若落在多位元組 UTF-8 序列中間，往前退到序列開頭，避免把合法字串誤判成無效。
+            while (readLength > 0 && (data[position + readLength] & 0xC0) == 0x80)
+            {
+                readLength--;
+            }
+
+            truncated = true;
+        }
+
         try
         {
-            value = new UTF8Encoding(false, true).GetString(data, position, byteLength);
+            value = new UTF8Encoding(false, true).GetString(data, position, readLength);
             position += byteLength;
             return true;
         }
