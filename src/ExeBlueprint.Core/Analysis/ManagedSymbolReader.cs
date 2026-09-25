@@ -12507,7 +12507,8 @@ internal static class ManagedSymbolReader
         return name;
     }
 
-    private static string EscapeCSharpString(string value)
+    // 骨架產生器輸出常數字串時也共用這套完整跳脫，避免兩邊各自維護一份不一致的規則。
+    internal static string EscapeCSharpString(string value)
     {
         var escaped = new StringBuilder(value.Length + 2);
         escaped.Append('"');

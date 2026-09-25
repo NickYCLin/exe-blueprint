@@ -215,12 +215,13 @@ public static class CSharpSkeletonGenerator
                 }
             }
 
+            var declaredType = Humanize(field.Type, type.GenericParameters, []);
             var initializer = field.IsConstant
-                ? $" = {FormatConstant(field.ConstantValue)}"
+                ? $" = {FormatConstant(field.ConstantValue, declaredType)}"
                 : ShouldInitializeSkeletonMember(type)
                     ? " = default!"
                     : "";
-            builder.AppendLine($"{body}{string.Join(" ", modifiers)} {Humanize(field.Type, type.GenericParameters, [])} {SafeName(field.Name)}{initializer};");
+            builder.AppendLine($"{body}{string.Join(" ", modifiers)} {declaredType} {SafeName(field.Name)}{initializer};");
             wroteMember = true;
         }
 
@@ -689,36 +690,62 @@ public static class CSharpSkeletonGenerator
         }
     }
 
-    private static string FormatConstant(ConstantValueModel? constant)
+    // 常數字面全部來自不受信任的 metadata。字串沿用分析器那套完整跳脫（控制字元、代理字元、
+    // U+0085／2028／2029 與格式字元都轉成 \uXXXX），先前只處理五個字元，U+2028 會原樣寫出成
+    // CS1010、孤立代理字元會被寫檔時換成 U+FFFD 而悄悄變值；char 比照處理。float／double 的
+    // NaN 與無限大要用 float.NaN 這類常數，寫成 NaNF 無法編譯；列舉型別的 const 在 metadata 裡
+    // 存的是整數，得補上宣告型別的轉型才是合法的常數運算式。
+    private static string FormatConstant(ConstantValueModel? constant, string declaredType)
     {
         if (constant?.Value is null)
         {
             return "null";
         }
 
-        return constant.Type switch
+        var value = constant.Value;
+        var literal = constant.Type switch
         {
-            "string" => $"\"{EscapeString(constant.Value)}\"",
-            "char" => $"'{EscapeChar(constant.Value[0])}'",
-            "float" => constant.Value + "F",
-            _ => constant.Value
+            "string" => ExeBlueprint.Analysis.ManagedSymbolReader.EscapeCSharpString(value),
+            "char" => $"'{EscapeChar(value.Length > 0 ? value[0] : '\0')}'",
+            "float" => FormatFloatingPoint(value, "float", "F"),
+            "double" => FormatFloatingPoint(value, "double", string.Empty),
+            _ => value
         };
+
+        return IsIntegralConstantType(constant.Type) &&
+               !string.Equals(declaredType, constant.Type, StringComparison.Ordinal)
+            ? $"({declaredType}){literal}"
+            : literal;
     }
 
-    private static string EscapeString(string value) => value
-        .Replace("\\", "\\\\", StringComparison.Ordinal)
-        .Replace("\"", "\\\"", StringComparison.Ordinal)
-        .Replace("\r", "\\r", StringComparison.Ordinal)
-        .Replace("\n", "\\n", StringComparison.Ordinal)
-        .Replace("\t", "\\t", StringComparison.Ordinal);
+    private static bool IsIntegralConstantType(string type) =>
+        type is "sbyte" or "byte" or "short" or "ushort" or "int" or "uint" or "long" or "ulong";
+
+    private static string FormatFloatingPoint(string value, string typeName, string suffix) => value switch
+    {
+        "NaN" => $"{typeName}.NaN",
+        "Infinity" => $"{typeName}.PositiveInfinity",
+        "-Infinity" => $"{typeName}.NegativeInfinity",
+        _ => value + suffix
+    };
 
     private static string EscapeChar(char value) => value switch
     {
         '\\' => "\\\\",
         '\'' => "\\'",
-        '\r' => "\\r",
+        '\0' => "\\0",
+        '\a' => "\\a",
+        '\b' => "\\b",
+        '\f' => "\\f",
         '\n' => "\\n",
+        '\r' => "\\r",
         '\t' => "\\t",
+        '\v' => "\\v",
+        _ when char.IsControl(value) ||
+               char.IsSurrogate(value) ||
+               char.GetUnicodeCategory(value) == System.Globalization.UnicodeCategory.Format ||
+               value is (char)0x0085 or (char)0x2028 or (char)0x2029
+            => $"\\u{(int)value:X4}",
         _ => value.ToString()
     };
 
