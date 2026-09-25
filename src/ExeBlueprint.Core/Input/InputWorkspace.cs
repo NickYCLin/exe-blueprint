@@ -549,6 +549,9 @@ internal sealed class InputWorkspace : IAsyncDisposable
             budget.EnsureAdditional(additionalCount, additionalBytes, committedPathCharacters);
 
             var staged = new List<WorkspaceFileState>(packed.Count);
+            var stagedSidecars = new List<PlannedSidecarEntry>(sidecars.Count);
+            var skippedSidecarCount = 0;
+            long skippedSidecarBytes = 0;
             string? archiveStage = null;
             try
             {
@@ -580,15 +583,44 @@ internal sealed class InputWorkspace : IAsyncDisposable
                     var destinationPath = Path.Combine(
                         archiveStage!,
                         GetOpaqueFileName(entryOrdinal++, sidecar.LogicalPath));
-                    await using var input = OpenSidecarForCopy(
-                        sidecar.Source.File.PhysicalPath,
-                        sidecar.Entry.Size);
-                    await using var output = CreatePrivateOutputFile(destinationPath);
-                    await CopyExactlyAsync(
-                        input,
-                        output,
-                        sidecar.Entry.Size,
-                        cancellationToken).ConfigureAwait(false);
+                    try
+                    {
+                        await using var input = OpenSidecarForCopy(
+                            sidecar.Source.File.PhysicalPath,
+                            sidecar.Entry.Size);
+                        await using var output = CreatePrivateOutputFile(destinationPath);
+                        await CopyExactlyAsync(
+                            input,
+                            output,
+                            sidecar.Entry.Size,
+                            cancellationToken).ConfigureAwait(false);
+                    }
+                    catch (Exception exception) when (
+                        exception is IOException or UnauthorizedAccessException or InvalidDataException)
+                    {
+                        // 規劃階段只看 metadata，真正開檔才會發現沒有讀取權限、檔案已被移走或大小改變。
+                        // 與找不到 sidecar 一樣記成警告與不完整展開，不讓單一外置項目中止整個分析。
+                        try
+                        {
+                            File.Delete(destinationPath);
+                        }
+                        catch (Exception cleanup) when (cleanup is IOException or UnauthorizedAccessException)
+                        {
+                            // 暫存檔清不掉不影響結果；整個 stage 目錄之後仍會一併刪除。
+                        }
+
+                        missingSidecars++;
+                        if (!sidecar.IsExisting)
+                        {
+                            skippedSidecarCount++;
+                            skippedSidecarBytes += sidecar.Entry.Size;
+                        }
+
+                        warnings.Add($"{container.File.LogicalPath}：ASAR 外置項目 {sidecar.Entry.RelativePath} 無法讀取（{exception.GetType().Name}）");
+                        continue;
+                    }
+
+                    stagedSidecars.Add(sidecar);
                     staged.Add(new WorkspaceFileState(new WorkspaceFile(
                         destinationPath,
                         sidecar.LogicalPath,
@@ -602,7 +634,8 @@ internal sealed class InputWorkspace : IAsyncDisposable
                 throw;
             }
 
-            foreach (var sidecar in sidecars)
+            // 只隱藏真的被搬進工作區的既有 sidecar；讀不到而略過的仍以原檔身分保留在結果中。
+            foreach (var sidecar in stagedSidecars)
             {
                 if (sidecar.IsExisting)
                 {
@@ -610,7 +643,10 @@ internal sealed class InputWorkspace : IAsyncDisposable
                 }
             }
 
-            budget.Add(additionalCount, additionalBytes, committedPathCharacters);
+            budget.Add(
+                checked(additionalCount - skippedSidecarCount),
+                additionalBytes - skippedSidecarBytes,
+                committedPathCharacters);
             foreach (var child in staged
                          .OrderBy(state => state.File.LogicalPath, StringComparer.OrdinalIgnoreCase)
                          .ThenBy(state => state.File.LogicalPath, StringComparer.Ordinal))

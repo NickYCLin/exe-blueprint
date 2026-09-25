@@ -169,6 +169,44 @@ public sealed class AsarInputIntegrationTests
         AssertNoBangPaths(document);
     }
 
+    // 規劃階段只看 metadata，開檔才發現沒有讀取權限；先前這個 UnauthorizedAccessException 會從
+    // ExpandAsarAsync 逃出並中止整個分析。應與找不到 sidecar 一樣記成警告與不完整展開。
+    [Fact]
+    public async Task UnreadableSidecarBecomesWarningInsteadOfAbortingAnalysis()
+    {
+        if (OperatingSystem.IsWindows() || Environment.IsPrivilegedProcess)
+        {
+            // Windows 沒有 POSIX 權限位元；root 不受權限限制，兩者都無法製造「讀不到」的情境。
+            return;
+        }
+
+        await using var temp = new TemporaryDirectory();
+        var archivePath = Path.Combine(temp.Path, "app.asar");
+        await AsarTestArchiveBuilder.WriteAsync(archivePath, "{\"files\":{\"a.bin\":{\"size\":4,\"unpacked\":true}}}");
+        var unpackedPath = Path.Combine(temp.Path, "app.asar.unpacked", "a.bin");
+        Directory.CreateDirectory(Path.GetDirectoryName(unpackedPath)!);
+        await File.WriteAllBytesAsync(unpackedPath, [1, 2, 3, 4]);
+        File.SetUnixFileMode(unpackedPath, UnixFileMode.None);
+        try
+        {
+            var document = await AnalyzeAsync(archivePath);
+
+            AssertOrigin(AssertArtifact(document, "app.asar"), "direct", depth: 0);
+            var expansion = Assert.Single(document.Archives, item => item.ContainerPath == "app.asar");
+            Assert.False(expansion.Complete);
+            Assert.Contains("無法讀取外置項目", expansion.Error!, StringComparison.Ordinal);
+            Assert.Contains(
+                document.Warnings,
+                warning => warning.Contains("a.bin", StringComparison.Ordinal) &&
+                           warning.Contains("無法讀取", StringComparison.Ordinal));
+            Assert.DoesNotContain(document.Files, artifact => artifact.RelativePath == "app.asar/a.bin");
+        }
+        finally
+        {
+            File.SetUnixFileMode(unpackedPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        }
+    }
+
     [Fact]
     public async Task PackedDirectoryNamedLikeSidecarDoesNotProduceOrphanWarning()
     {
