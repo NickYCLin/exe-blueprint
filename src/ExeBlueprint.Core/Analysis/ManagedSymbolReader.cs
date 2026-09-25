@@ -700,7 +700,9 @@ internal static class ManagedSymbolReader
                 "Null" => CreateDecodedResourceEntry(name, type, null),
                 "String" => CreateDecodedResourceEntry(name, type, reader.ReadString()),
                 "Boolean" => CreateDecodedResourceEntry(name, type, reader.ReadBoolean() ? "true" : "false"),
-                "Char" => CreateDecodedResourceEntry(name, type, FormatResourceChar(reader.ReadChar())),
+                // ResourceWriter 以 2-byte UTF-16 code unit 寫入 Char（(ushort)value），不是 UTF-8；
+                // ReadChar 會把 '中'（2D 4E）解成 '-'，'é'（E9 00）則解成無效序列。
+                "Char" => CreateDecodedResourceEntry(name, type, FormatResourceChar((char)reader.ReadUInt16())),
                 "Byte" => CreateDecodedResourceEntry(name, type, reader.ReadByte().ToString(CultureInfo.InvariantCulture)),
                 "SByte" => CreateDecodedResourceEntry(name, type, reader.ReadSByte().ToString(CultureInfo.InvariantCulture)),
                 "Int16" => CreateDecodedResourceEntry(name, type, reader.ReadInt16().ToString(CultureInfo.InvariantCulture)),

@@ -1585,6 +1585,9 @@ public sealed class ManagedSymbolReaderTests
     {
         AssertDecodedResource("Boolean", WriteResourceData(writer => writer.Write(true)), "true");
         AssertDecodedResource("Int32", WriteResourceData(writer => writer.Write(3)), "3");
+        // Char 的線上格式是 2-byte UTF-16 code unit，與 ResourceWriter 的 Write((ushort)value) 一致。
+        AssertDecodedResource("Char", WriteResourceData(writer => writer.Write((ushort)'中')), "中");
+        AssertDecodedResource("Char", WriteResourceData(writer => writer.Write((ushort)'é')), "é");
         AssertDecodedResource("Double", WriteResourceData(writer => writer.Write(1.25)), "1.25");
         AssertDecodedResource(
             "TimeSpan",
