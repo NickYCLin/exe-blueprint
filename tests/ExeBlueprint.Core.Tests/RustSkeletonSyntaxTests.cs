@@ -30,6 +30,63 @@ public sealed class RustSkeletonSyntaxTests
         Assert.DoesNotContain("pub fn Run", rust, StringComparison.Ordinal);
     }
 
+    // 零變體的列舉不能帶 #[repr]（E0084）；.NET 常見的別名成員（A = 1, Default = 1）在 Rust 是重複
+    // 判別值（E0081），改成關聯常數。
+    [Fact]
+    public async Task EnumAliasesBecomeAssociatedConstantsAndEmptyEnumsHaveNoRepr()
+    {
+        var document = await BuildDocument(
+            new TypeModel
+            {
+                FullName = "Tests.Probe",
+                Namespace = "Tests",
+                Name = "Probe",
+                Kind = "enum",
+                Accessibility = "internal",
+                Fields =
+                [
+                    new FieldModel { Name = "value__", Type = "int", Accessibility = "public" },
+                    EnumMember("A", "1"),
+                    EnumMember("B", "2"),
+                    EnumMember("Default", "1")
+                ]
+            },
+            new TypeModel
+            {
+                FullName = "Tests.Empty",
+                Namespace = "Tests",
+                Name = "Empty",
+                Kind = "enum",
+                Accessibility = "internal",
+                Fields = [new FieldModel { Name = "value__", Type = "int", Accessibility = "public" }]
+            });
+
+        var rust = RustSkeletonGenerator.Generate(document)
+            .Single(file => file.RelativePath.EndsWith(".rs", StringComparison.Ordinal))
+            .Content;
+        var lines = rust.Split('\n').Select(line => line.TrimEnd('\r')).ToArray();
+
+        Assert.Contains("    A = 1,", lines);
+        Assert.Contains("    B = 2,", lines);
+        Assert.DoesNotContain("    Default = 1,", lines);
+        Assert.Contains("impl Probe {", lines);
+        Assert.Contains("    pub const Default: Self = Self::A;", lines);
+
+        var empty = Array.IndexOf(lines, "pub enum Empty {}");
+        Assert.True(empty > 0, "空列舉應輸出成 `pub enum Empty {}`");
+        Assert.False(lines[empty - 1].StartsWith("#[repr(", StringComparison.Ordinal));
+    }
+
+    private static FieldModel EnumMember(string name, string value) => new()
+    {
+        Name = name,
+        Type = "Tests.Probe",
+        Accessibility = "public",
+        IsStatic = true,
+        IsConstant = true,
+        ConstantValue = new ConstantValueModel { Type = "int", Value = value }
+    };
+
     private static MethodModel Method(string name, string returnType = "void") => new()
     {
         Name = name,

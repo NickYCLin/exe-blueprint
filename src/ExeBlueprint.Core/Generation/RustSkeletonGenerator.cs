@@ -53,15 +53,50 @@ public static class RustSkeletonGenerator
         switch (type.Kind)
         {
             case "enum":
+                var enumMembers = SkeletonSupport.EnumMembers(type);
+                if (enumMembers.Count == 0)
+                {
+                    // 零變體的列舉不能帶 #[repr]（E0084），只能輸出空的 enum。
+                    builder.AppendLine($"pub enum {name} {{}}");
+                    return;
+                }
+
                 builder.AppendLine($"#[repr({LanguageTypeMap.ToRust(SkeletonSupport.EnumUnderlyingType(type))})]");
                 builder.AppendLine($"pub enum {name} {{");
-                foreach (var member in SkeletonSupport.EnumMembers(type))
+                var firstVariantByValue = new Dictionary<string, string>(StringComparer.Ordinal);
+                var aliases = new List<(string Alias, string Target)>();
+                foreach (var member in enumMembers)
                 {
-                    var assignment = SkeletonSupport.IntegralEnumValue(member.ConstantValue) is { } value ? $" = {value}" : "";
-                    builder.AppendLine($"    {SkeletonSupport.Sanitize(member.Name)}{assignment},");
+                    var variant = SkeletonSupport.Sanitize(member.Name);
+                    var value = SkeletonSupport.IntegralEnumValue(member.ConstantValue);
+                    if (value is not null && firstVariantByValue.TryGetValue(value, out var target))
+                    {
+                        // Rust 不允許兩個變體有相同判別值（E0081）；.NET 常見的別名成員改成關聯常數。
+                        aliases.Add((variant, target));
+                        continue;
+                    }
+
+                    if (value is not null)
+                    {
+                        firstVariantByValue[value] = variant;
+                    }
+
+                    builder.AppendLine($"    {variant}{(value is null ? "" : $" = {value}")},");
                 }
 
                 builder.AppendLine("}");
+                if (aliases.Count > 0)
+                {
+                    builder.AppendLine();
+                    builder.AppendLine($"impl {name} {{");
+                    foreach (var (alias, target) in aliases)
+                    {
+                        builder.AppendLine($"    pub const {alias}: Self = Self::{target};");
+                    }
+
+                    builder.AppendLine("}");
+                }
+
                 return;
 
             case "interface":
