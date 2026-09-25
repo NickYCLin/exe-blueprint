@@ -49,6 +49,30 @@ public static class GeneratedProjectWriter
         }
     }
 
+    // 單一報告檔（blueprint.json、REPORT.md）也走同一條安全路徑：把路徑拆成輸出根目錄與檔名，
+    // 沿用根目錄／目標的 reparse point 檢查與 opaque 暫存檔加 move 的原子取代，讓既有的
+    // symbolic link 不會被跟隨、既有的 hardlink 也不會讓外部 inode 被截斷。
+    internal static Task WriteSingleFileAsync(
+        string outputPath,
+        string content,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(outputPath);
+        ArgumentNullException.ThrowIfNull(content);
+
+        var fullPath = Path.GetFullPath(outputPath);
+        var directory = Path.GetDirectoryName(fullPath);
+        if (string.IsNullOrEmpty(directory))
+        {
+            throw new InvalidDataException($"報告輸出路徑必須位於某個目錄之下：{outputPath}");
+        }
+
+        return WriteAsync(
+            [new GeneratedFile { RelativePath = Path.GetFileName(fullPath), Content = content }],
+            directory,
+            cancellationToken);
+    }
+
     private static IReadOnlyList<PlannedFile> PlanFiles(
         IReadOnlyList<GeneratedFile> files,
         string outputRoot)
@@ -194,7 +218,9 @@ public static class GeneratedProjectWriter
         }
     }
 
-    private static void EnsureSafeOutputRoot(string outputRoot)
+    // 匯出服務在分析前也會呼叫，讓不安全的輸出根目錄在做完整分析之前就失敗；這裡不只守骨架，
+    // 也守 blueprint.json 與 REPORT.md 所在的同一個輸出根目錄。
+    internal static void EnsureSafeOutputRoot(string outputRoot)
     {
         if (!TryGetAttributes(outputRoot, out var attributes))
         {
@@ -203,12 +229,12 @@ public static class GeneratedProjectWriter
 
         if ((attributes & FileAttributes.ReparsePoint) != 0)
         {
-            throw InvalidPath("骨架輸出根目錄不可為 symbolic link 或重新解析點。");
+            throw InvalidPath("輸出根目錄不可為 symbolic link 或重新解析點。");
         }
 
         if ((attributes & FileAttributes.Directory) == 0)
         {
-            throw InvalidPath("骨架輸出根路徑已是一般檔案。");
+            throw InvalidPath("輸出根路徑已是一般檔案。");
         }
     }
 

@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text;
+using ExeBlueprint.Generation;
 using ExeBlueprint.Models;
 
 namespace ExeBlueprint.Reporting;
@@ -14,8 +15,10 @@ public static class MarkdownReportWriter
         ArgumentNullException.ThrowIfNull(document);
         ArgumentException.ThrowIfNullOrWhiteSpace(outputPath);
 
-        var content = Build(document);
-        await File.WriteAllTextAsync(outputPath, content, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false), cancellationToken)
+        // 與骨架、blueprint.json 相同：交給 GeneratedProjectWriter 做輸出根目錄與目標的 reparse point
+        // 檢查及原子取代。先前的 File.WriteAllTextAsync 會跟隨既有的 symbolic link，也會就地截斷既有
+        // hardlink 的外部 inode。
+        await GeneratedProjectWriter.WriteSingleFileAsync(outputPath, Build(document), cancellationToken)
             .ConfigureAwait(false);
     }
 

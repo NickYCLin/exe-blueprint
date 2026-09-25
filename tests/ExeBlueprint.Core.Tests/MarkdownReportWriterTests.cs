@@ -134,9 +134,11 @@ public sealed class MarkdownReportWriterTests
         Assert.Contains("原始文字 `CornflowerBlue`", report);
         Assert.Contains("text，payload 14 B", report);
 
-        var outputPath = Path.Combine(
+        var outputDirectory = Path.Combine(
             Path.GetTempPath(),
-            $"exe-blueprint-report-{Guid.NewGuid():N}.json");
+            "exe-blueprint-tests",
+            Guid.NewGuid().ToString("N"));
+        var outputPath = Path.Combine(outputDirectory, "blueprint.json");
         try
         {
             await BlueprintJsonWriter.WriteAsync(document, outputPath);
@@ -153,7 +155,10 @@ public sealed class MarkdownReportWriterTests
         }
         finally
         {
-            File.Delete(outputPath);
+            if (Directory.Exists(outputDirectory))
+            {
+                Directory.Delete(outputDirectory, recursive: true);
+            }
         }
     }
 

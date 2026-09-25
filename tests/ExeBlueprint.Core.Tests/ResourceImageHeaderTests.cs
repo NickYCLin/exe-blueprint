@@ -164,7 +164,8 @@ public sealed class ResourceImageHeaderTests
         Assert.Contains("PNG 檔頭尺寸 320 × 180 px（未驗證像素內容）", report);
         Assert.Contains("PNG 檔頭無效", report);
         Assert.Contains("預序列化 type-converter-byte-array", report);
-        var path = Path.Combine(Path.GetTempPath(), $"resource-image-{Guid.NewGuid():N}.json");
+        var directory = Path.Combine(Path.GetTempPath(), "exe-blueprint-tests", Guid.NewGuid().ToString("N"));
+        var path = Path.Combine(directory, "blueprint.json");
         try
         {
             await BlueprintJsonWriter.WriteAsync(document, path);
@@ -174,7 +175,13 @@ public sealed class ResourceImageHeaderTests
             Assert.Equal("invalid", entries[1].GetProperty("imageHeader").GetProperty("status").GetString());
             Assert.False(entries[1].GetProperty("imageHeader").TryGetProperty("width", out _));
         }
-        finally { File.Delete(path); }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
     }
 
     private static byte[] Envelope(int format, byte[] payload)

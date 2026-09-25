@@ -1,4 +1,5 @@
 using System.Text.Json;
+using ExeBlueprint.Generation;
 using ExeBlueprint.Models;
 
 namespace ExeBlueprint.Reporting;
@@ -11,6 +12,15 @@ public static class BlueprintJsonWriter
         WriteIndented = true
     };
 
+    // 序列化成與檔案輸出一致的文字（含結尾換行），讓寫檔可以走 GeneratedProjectWriter 的安全路徑。
+    public static string Serialize(BlueprintDocument document)
+    {
+        ArgumentNullException.ThrowIfNull(document);
+        return JsonSerializer.Serialize(document, Options) + "\n";
+    }
+
+    // 與骨架相同：交給 GeneratedProjectWriter 做輸出根目錄與目標的 reparse point 檢查及原子取代。
+    // 先前直接以 FileMode.Create 開檔，會跟隨既有的 symbolic link，也會就地截斷既有 hardlink 的外部 inode。
     public static async Task WriteAsync(
         BlueprintDocument document,
         string outputPath,
@@ -19,14 +29,7 @@ public static class BlueprintJsonWriter
         ArgumentNullException.ThrowIfNull(document);
         ArgumentException.ThrowIfNullOrWhiteSpace(outputPath);
 
-        await using var stream = new FileStream(
-            outputPath,
-            FileMode.Create,
-            FileAccess.Write,
-            FileShare.None,
-            81920,
-            useAsync: true);
-        await JsonSerializer.SerializeAsync(stream, document, Options, cancellationToken).ConfigureAwait(false);
-        await stream.WriteAsync("\n"u8.ToArray(), cancellationToken).ConfigureAwait(false);
+        await GeneratedProjectWriter.WriteSingleFileAsync(outputPath, Serialize(document), cancellationToken)
+            .ConfigureAwait(false);
     }
 }

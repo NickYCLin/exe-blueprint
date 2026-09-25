@@ -65,6 +65,10 @@ public sealed class BlueprintExportService
         var outputDirectory = string.IsNullOrWhiteSpace(request.OutputDirectory)
             ? CreateDefaultOutputDirectory(inputPath, request.BaseDirectory)
             : Path.GetFullPath(request.OutputDirectory);
+
+        // 分析前先確認輸出根目錄不是 symbolic link／reparse point 或一般檔案，讓不安全的目標在做完整
+        // 分析之前就失敗；之後寫入 blueprint.json、REPORT.md 與骨架時仍會再次檢查。
+        GeneratedProjectWriter.EnsureSafeOutputRoot(outputDirectory);
         var jsonPath = Path.Combine(outputDirectory, "blueprint.json");
         var reportPath = Path.Combine(outputDirectory, "REPORT.md");
 
