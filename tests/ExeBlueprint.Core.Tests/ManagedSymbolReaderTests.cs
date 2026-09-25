@@ -2392,6 +2392,21 @@ public sealed class ManagedSymbolReaderTests
         Assert.Null(entry.Error);
     }
 
+    // 截斷不可切在 surrogate pair 中間；其他截斷點都有這個保護，資源值先前沒有。
+    [Fact]
+    public void TruncatesResourceValuesWithoutSplittingSurrogatePairs()
+    {
+        var text = new string('a', 4_095) + "😀";
+        var entry = ManagedSymbolReader.DecodeResourceEntry(
+            "Emoji",
+            "ResourceTypeCode.String",
+            WriteResourceData(writer => writer.Write(text)));
+
+        Assert.True(entry.ValueTruncated);
+        Assert.Equal(4_095, entry.Value!.Length);
+        Assert.False(char.IsHighSurrogate(entry.Value[^1]));
+    }
+
     private static void AssertDecodedResource(string typeCode, byte[] data, string expectedValue)
     {
         var entry = ManagedSymbolReader.DecodeResourceEntry(

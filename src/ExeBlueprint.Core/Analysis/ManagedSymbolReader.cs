@@ -845,7 +845,7 @@ internal static class ManagedSymbolReader
             Name = name,
             Type = type,
             Status = "encoded",
-            Value = truncated ? value[..MaxResourceValueLength] : value,
+            Value = truncated ? TruncateResourceValue(value) : value,
             ValueTruncated = truncated,
             DataSize = data.Length,
             Serialization = new ManagedResourceSerializationModel
@@ -997,6 +997,19 @@ internal static class ManagedSymbolReader
         return "binary";
     }
 
+    // 截斷資源值時不要切在 surrogate pair 中間，否則 Value 會以孤立的 high surrogate 結尾；
+    // 與 BamlSummaryReader、MarkdownReportWriter 其他截斷點的做法一致。只在長度已超過上限時呼叫。
+    private static string TruncateResourceValue(string value)
+    {
+        var length = MaxResourceValueLength;
+        if (char.IsHighSurrogate(value[length - 1]))
+        {
+            length--;
+        }
+
+        return value[..length];
+    }
+
     private static bool HasPrefix(ReadOnlySpan<byte> payload, ReadOnlySpan<byte> prefix) =>
         payload.Length >= prefix.Length && payload[..prefix.Length].SequenceEqual(prefix);
 
@@ -1008,7 +1021,7 @@ internal static class ManagedSymbolReader
             Name = name,
             Type = type,
             Status = "decoded",
-            Value = truncated ? value![..MaxResourceValueLength] : value,
+            Value = truncated ? TruncateResourceValue(value!) : value,
             ValueTruncated = truncated
         };
     }
