@@ -68,7 +68,7 @@ public static class RustSkeletonGenerator
                 builder.AppendLine($"pub trait {name} {{");
                 foreach (var method in SkeletonSupport.EmittableMethods(type))
                 {
-                    builder.AppendLine($"    {Signature(method, includeBody: false)};");
+                    builder.AppendLine($"    {Signature(method, includeBody: false, visibility: "")};");
                 }
 
                 builder.AppendLine("}");
@@ -90,7 +90,7 @@ public static class RustSkeletonGenerator
                     builder.AppendLine($"impl {name} {{");
                     foreach (var method in methods)
                     {
-                        builder.AppendLine($"    {Signature(method, includeBody: true)}");
+                        builder.AppendLine($"    {Signature(method, includeBody: true, visibility: "pub ")}");
                     }
 
                     builder.AppendLine("}");
@@ -100,7 +100,8 @@ public static class RustSkeletonGenerator
         }
     }
 
-    private static string Signature(MethodModel method, bool includeBody)
+    // trait 裡的方法不能帶 pub（E0449），impl 裡的才需要；由呼叫端決定可見性前綴。
+    private static string Signature(MethodModel method, bool includeBody, string visibility)
     {
         var parameters = new List<string>();
         if (!method.IsStatic)
@@ -112,7 +113,7 @@ public static class RustSkeletonGenerator
             $"{ParameterName(parameter.Name)}: {LanguageTypeMap.ToRust(parameter.Type)}"));
 
         var returns = method.ReturnType == "void" ? "" : $" -> {LanguageTypeMap.ToRust(method.ReturnType)}";
-        var header = $"pub fn {SkeletonSupport.Sanitize(method.Name)}({string.Join(", ", parameters)}){returns}";
+        var header = $"{visibility}fn {SkeletonSupport.Sanitize(method.Name)}({string.Join(", ", parameters)}){returns}";
         return includeBody ? $"{header} {{ unimplemented!() }}" : header;
     }
 
