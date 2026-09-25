@@ -82,10 +82,17 @@ public static class CSharpSkeletonGenerator
                 nestedTypeIndex,
                 new HashSet<TypeModel>(TypeModelIdentityComparer)));
 
+            // 命名空間直接來自 metadata：含 / 會悄悄變成子目錄、含 : * 等會讓 writer 拒收；
+            // 大小寫只差的兩個命名空間會產生同一個檔名。整理成合法片段並在專案內保證唯一。
+            var usedFileNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var namespaceGroup in topLevelTypes.GroupBy(type => type.Namespace).OrderBy(group => group.Key, StringComparer.Ordinal))
             {
                 var namespaceName = namespaceGroup.Key ?? string.Empty;
-                var fileName = SkeletonSupport.EnsureWritableSegment(namespaceName, "_GlobalNamespace");
+                var fileName = SkeletonSupport.UniqueFileStem(
+                    usedFileNames,
+                    SkeletonSupport.EnsureWritableSegment(
+                        SkeletonSupport.SanitizePathSegment(namespaceName),
+                        "_GlobalNamespace"));
                 files.Add(new GeneratedFile
                 {
                     RelativePath = $"{projectDirectory}/{fileName}.cs",
@@ -2212,6 +2219,10 @@ public static class CSharpSkeletonGenerator
     {
         var descriptors = new List<ProjectDescriptor>();
         var usedDirectories = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // 根目錄會放 README.md 與 Reconstructed.slnx；組件名剛好是這兩個名字時，專案目錄會和檔案
+        // 撞在一起，writer 把檔案／目錄衝突當錯誤而讓整包匯出失敗。先把它們佔住，撞名就加序號。
+        usedDirectories.Add("README.md");
+        usedDirectories.Add("Reconstructed.slnx");
         foreach (var artifact in assemblies)
         {
             var assemblyName = AssemblyName(artifact);

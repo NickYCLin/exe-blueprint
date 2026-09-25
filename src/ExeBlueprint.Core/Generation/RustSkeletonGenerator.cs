@@ -13,11 +13,12 @@ public static class RustSkeletonGenerator
 
         var files = new List<GeneratedFile>();
         var assemblies = SkeletonSupport.Assemblies(document);
+        var usedStems = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var (_, assemblyName, types) in assemblies)
         {
             files.Add(new GeneratedFile
             {
-                RelativePath = $"{SkeletonSupport.SanitizeFileStem(assemblyName, "Reconstructed")}.rs",
+                RelativePath = $"{SkeletonSupport.UniqueFileStem(usedStems, SkeletonSupport.SanitizeFileStem(assemblyName, "Reconstructed"))}.rs",
                 Content = BuildFile(types)
             });
         }

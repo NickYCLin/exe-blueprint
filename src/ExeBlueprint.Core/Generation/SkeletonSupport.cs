@@ -156,4 +156,29 @@ internal static class SkeletonSupport
 
         return true;
     }
+
+    // 把可能含路徑分隔或檔名非法字元的文字整理成單一片段：/ \ : * ? " < > | 與控制字元換成底線，
+    // 內部的點保留。命名空間直接來自 metadata，含 / 會悄悄變成子目錄、含 : 或 * 則讓 writer 拒收。
+    public static string SanitizePathSegment(string value)
+    {
+        var characters = value.Select(character =>
+            character is '/' or '\\' or ':' or '*' or '?' or '"' or '<' or '>' or '|' || char.IsControl(character)
+                ? '_'
+                : character);
+        return new string(characters.ToArray());
+    }
+
+    // 同一個輸出目錄裡的檔名主幹不分大小寫必須唯一：組件名相同（例如各 RID 一份）、A.B 與 A_B
+    // 都會整理成同一個主幹，writer 會把重複路徑當成錯誤而讓整包匯出失敗。撞名就加序號。
+    public static string UniqueFileStem(HashSet<string> used, string stem)
+    {
+        var candidate = stem;
+        var suffix = 2;
+        while (!used.Add(candidate))
+        {
+            candidate = $"{stem}_{suffix++}";
+        }
+
+        return candidate;
+    }
 }

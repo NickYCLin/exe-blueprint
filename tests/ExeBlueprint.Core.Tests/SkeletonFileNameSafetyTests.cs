@@ -82,6 +82,110 @@ public sealed class SkeletonFileNameSafetyTests
         }
     }
 
+    // 同名組件（例如各 RID 各一份）在 C++／Rust／Go 會整理成同一個檔名主幹，writer 把重複路徑當錯誤，
+    // 整包匯出就失敗；C# 早已替專案目錄加序號，這三種語言也要。
+    [Fact]
+    public async Task DuplicateAssemblyNamesGetDistinctSourceFilesInEveryLanguage()
+    {
+        var document = await BuildDocument(("Same", ["Tests"]), ("Same", ["Other"]));
+
+        foreach (var (files, extension) in new (IReadOnlyList<GeneratedFile>, string)[]
+        {
+            (CppSkeletonGenerator.Generate(document), ".hpp"),
+            (RustSkeletonGenerator.Generate(document), ".rs"),
+            (GoSkeletonGenerator.Generate(document), ".go")
+        })
+        {
+            var sources = files
+                .Where(file => file.RelativePath.EndsWith(extension, StringComparison.Ordinal))
+                .Select(file => file.RelativePath)
+                .ToArray();
+            Assert.Equal(2, sources.Length);
+            Assert.Contains($"Same{extension}", sources);
+            Assert.Contains($"Same_2{extension}", sources);
+            await WriteToTemp(files);
+        }
+    }
+
+    // 命名空間直接來自 metadata：含 / 會變成子目錄、含 : * 等會讓 writer 拒收，大小寫只差的兩個
+    // 命名空間則會產生同一個檔名。整理成合法片段並在專案內保證唯一。
+    [Fact]
+    public async Task NamespaceFileNamesAreSanitizedAndUniqueWithinAProject()
+    {
+        var document = await BuildDocument(("Probe", ["Foo", "foo", "Bad/Name:*"]));
+
+        var files = CSharpSkeletonGenerator.Generate(document);
+        var sources = files
+            .Where(file => file.RelativePath.EndsWith(".cs", StringComparison.Ordinal))
+            .Select(file => file.RelativePath)
+            .ToArray();
+
+        Assert.Equal(3, sources.Length);
+        Assert.Contains("Probe/Foo.cs", sources);
+        Assert.Contains("Probe/foo_2.cs", sources);
+        Assert.Contains("Probe/Bad_Name__.cs", sources);
+        await WriteToTemp(files);
+    }
+
+    // 組件名剛好是 README.md 或 Reconstructed.slnx 時，專案目錄會撞到根目錄的同名檔案。
+    [Fact]
+    public async Task ProjectDirectoryAvoidsRootFileNames()
+    {
+        var document = await BuildDocument(("README.md", ["Tests"]));
+
+        var files = CSharpSkeletonGenerator.Generate(document);
+        var project = Assert.Single(files, file => file.RelativePath.EndsWith(".csproj", StringComparison.Ordinal));
+
+        Assert.StartsWith("README.md_2/", project.RelativePath, StringComparison.Ordinal);
+        await WriteToTemp(files);
+    }
+
+    private static async Task WriteToTemp(IReadOnlyList<GeneratedFile> files)
+    {
+        var output = Path.Combine(Path.GetTempPath(), "exe-blueprint-tests", Guid.NewGuid().ToString("N"));
+        try
+        {
+            await GeneratedProjectWriter.WriteAsync(files, output);
+        }
+        finally
+        {
+            if (Directory.Exists(output))
+            {
+                Directory.Delete(output, recursive: true);
+            }
+        }
+    }
+
+    // 每個 tuple 是一個組件：組件名加上其內每個命名空間各放一個型別。
+    private static async Task<BlueprintDocument> BuildDocument(params (string Assembly, string[] Namespaces)[] assemblies)
+    {
+        var analyzed = await new BlueprintAnalyzer().AnalyzeAsync(typeof(SkeletonFileNameSafetyTests).Assembly.Location);
+        var artifacts = assemblies.Select((item, index) => analyzed.Files[0] with
+        {
+            Id = $"artifact-{index}",
+            RelativePath = $"{index}/{item.Assembly}.dll",
+            FileName = $"{item.Assembly}.dll",
+            AssemblyName = item.Assembly,
+            ManagedReferences = [],
+            Code = new CodeModel
+            {
+                Kind = "managed",
+                NamespaceCount = item.Namespaces.Length,
+                TypeCount = item.Namespaces.Length,
+                Types = item.Namespaces.Select(typeNamespace => new TypeModel
+                {
+                    FullName = $"{typeNamespace}.Probe",
+                    Namespace = typeNamespace,
+                    Name = "Probe",
+                    Kind = "class",
+                    Accessibility = "internal"
+                }).ToArray()
+            }
+        }).ToArray();
+
+        return analyzed with { Files = artifacts };
+    }
+
     private static async Task<BlueprintDocument> BuildDocumentWithAssembly(
         string assemblyName,
         string typeNamespace)

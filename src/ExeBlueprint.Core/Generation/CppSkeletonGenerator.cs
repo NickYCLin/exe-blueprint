@@ -12,11 +12,12 @@ public static class CppSkeletonGenerator
         ArgumentNullException.ThrowIfNull(document);
 
         var files = new List<GeneratedFile>();
+        var usedStems = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var (_, assemblyName, types) in SkeletonSupport.Assemblies(document))
         {
             files.Add(new GeneratedFile
             {
-                RelativePath = $"{SkeletonSupport.SanitizeFileStem(assemblyName, "Reconstructed")}.hpp",
+                RelativePath = $"{SkeletonSupport.UniqueFileStem(usedStems, SkeletonSupport.SanitizeFileStem(assemblyName, "Reconstructed"))}.hpp",
                 Content = BuildFile(types)
             });
         }

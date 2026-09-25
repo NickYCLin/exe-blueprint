@@ -12,11 +12,12 @@ public static class GoSkeletonGenerator
         ArgumentNullException.ThrowIfNull(document);
 
         var files = new List<GeneratedFile>();
+        var usedStems = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var (_, assemblyName, types) in SkeletonSupport.Assemblies(document))
         {
             files.Add(new GeneratedFile
             {
-                RelativePath = $"{SkeletonSupport.SanitizeFileStem(assemblyName, "Reconstructed")}.go",
+                RelativePath = $"{SkeletonSupport.UniqueFileStem(usedStems, SkeletonSupport.SanitizeFileStem(assemblyName, "Reconstructed"))}.go",
                 Content = BuildFile(types)
             });
         }
