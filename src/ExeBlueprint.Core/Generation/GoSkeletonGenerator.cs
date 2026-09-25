@@ -58,7 +58,7 @@ public static class GoSkeletonGenerator
                     builder.AppendLine("const (");
                     foreach (var member in members)
                     {
-                        var value = member.ConstantValue?.Value ?? "iota";
+                        var value = SkeletonSupport.IntegralEnumValue(member.ConstantValue) ?? "iota";
                         builder.AppendLine($"    {name}{SkeletonSupport.Sanitize(member.Name)} {name} = {value}");
                     }
 

@@ -56,7 +56,7 @@ public static class RustSkeletonGenerator
                 builder.AppendLine($"pub enum {name} {{");
                 foreach (var member in SkeletonSupport.EnumMembers(type))
                 {
-                    var assignment = member.ConstantValue?.Value is string value ? $" = {value}" : "";
+                    var assignment = SkeletonSupport.IntegralEnumValue(member.ConstantValue) is { } value ? $" = {value}" : "";
                     builder.AppendLine($"    {SkeletonSupport.Sanitize(member.Name)}{assignment},");
                 }
 

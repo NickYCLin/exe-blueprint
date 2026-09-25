@@ -58,7 +58,7 @@ public static class CppSkeletonGenerator
             builder.AppendLine($"enum class {name} : {underlyingType} {{");
             builder.AppendLine(string.Join(",\n", SkeletonSupport.EnumMembers(type).Select(member =>
             {
-                var assignment = member.ConstantValue?.Value is string value ? $" = {value}" : "";
+                var assignment = SkeletonSupport.IntegralEnumValue(member.ConstantValue) is { } value ? $" = {value}" : "";
                 return $"    {SkeletonSupport.Sanitize(member.Name)}{assignment}";
             })));
             builder.AppendLine("};");

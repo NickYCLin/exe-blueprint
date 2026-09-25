@@ -388,7 +388,7 @@ public static class CSharpSkeletonGenerator
             .ToArray();
         foreach (var member in members)
         {
-            var assignment = member.ConstantValue?.Value is string value ? $" = {value}" : "";
+            var assignment = SkeletonSupport.IntegralEnumValue(member.ConstantValue) is { } value ? $" = {value}" : "";
             builder.AppendLine($"{body}{SafeName(member.Name)}{assignment},");
         }
     }

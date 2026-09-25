@@ -126,4 +126,34 @@ internal static class SkeletonSupport
             .Where(field => field.IsConstant && field.Name != "value__" && !IsGenerated(field.Name))
             .Select(field => (field.Name, field.ConstantValue))
             .ToArray();
+
+    // 列舉成員的值只接受整數常數，而且字面必須真的是整數。constant 的型別與內容都取自不受信任
+    // 的組件 metadata：若照字面寫進原始碼，一個型別為 string 的常數就能在骨架裡塞進任意程式碼
+    // （例如 Go 的 func init()），使用者一建置執行就中招。不是整數就不寫值，交由各語言的預設值。
+    public static string? IntegralEnumValue(ConstantValueModel? constant) =>
+        constant?.Value is { } value &&
+        constant.Type is "sbyte" or "byte" or "short" or "ushort" or "int" or "uint" or "long" or "ulong" &&
+        IsIntegerLiteral(value)
+            ? value
+            : null;
+
+    private static bool IsIntegerLiteral(string value)
+    {
+        var start = value.Length > 0 && value[0] == '-' ? 1 : 0;
+        var digits = value.Length - start;
+        if (digits is < 1 or > 20)
+        {
+            return false;
+        }
+
+        for (var index = start; index < value.Length; index++)
+        {
+            if (value[index] is < '0' or > '9')
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
 }
