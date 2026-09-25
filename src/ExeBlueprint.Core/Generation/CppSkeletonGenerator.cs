@@ -95,7 +95,8 @@ public static class CppSkeletonGenerator
         var prefix = method.IsStatic ? "static " : "";
         var header = $"{prefix}{returns} {SkeletonSupport.Sanitize(method.Name)}({parameters})";
 
-        if (isInterface)
+        // 介面的靜態成員不能是純虛擬：virtual static 不是合法 C++。靜態成員照一般方法給個實作。
+        if (isInterface && !method.IsStatic)
         {
             return $"virtual {header} = 0;";
         }
