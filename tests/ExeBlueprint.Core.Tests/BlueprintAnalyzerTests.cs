@@ -141,6 +141,23 @@ public sealed class BlueprintAnalyzerTests
         ImportedModules = imports
     };
 
+    // .e／.ec 也是 Eiffel 與 ESQL/C 的副檔名：單獨出現只能算弱證據，有支持庫佐證才是高信心。
+    [Fact]
+    public async Task EasyLanguageSourceExtensionAloneIsOnlyWeakEvidence()
+    {
+        await using var weak = new TemporaryDirectory();
+        await File.WriteAllTextAsync(Path.Combine(weak.Path, "program.e"), "class PROGRAM end");
+        var weakDocument = await new BlueprintAnalyzer().AnalyzeAsync(weak.Path);
+        var weakDetection = Assert.Single(weakDocument.Technologies, item => item.Id == "easy-language");
+        Assert.True(weakDetection.Confidence < 0.9);
+
+        await using var strong = new TemporaryDirectory();
+        await File.WriteAllTextAsync(Path.Combine(strong.Path, "program.e"), "test fixture");
+        await File.WriteAllTextAsync(Path.Combine(strong.Path, "support.fne"), "test fixture");
+        var strongDocument = await new BlueprintAnalyzer().AnalyzeAsync(strong.Path);
+        Assert.Contains(strongDocument.Technologies, item => item.Id == "easy-language" && item.Confidence >= 0.99);
+    }
+
     [Fact]
     public async Task ZipWithParentTraversalIsRejected()
     {

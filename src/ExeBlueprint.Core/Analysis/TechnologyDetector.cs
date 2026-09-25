@@ -158,9 +158,15 @@ internal static class TechnologyDetector
             Add(detections, "jvm", "Java／JVM", "runtime", 0.92, "套件含有 JVM 或 JAR");
         }
 
-        if (names.Contains("krnln.fnr") || files.Any(file => IsEasyLanguageExtension(Path.GetExtension(file.FileName))))
+        if (names.Contains("krnln.fnr") || files.Any(file => IsEasyLanguageLibraryExtension(Path.GetExtension(file.FileName))))
         {
-            Add(detections, "easy-language", "易語言", "language", 0.99, "套件含有易語言工程或支持庫檔案");
+            Add(detections, "easy-language", "易語言", "language", 0.99, "套件含有易語言支持庫或執行期檔案");
+        }
+        else if (files.Any(file => IsEasyLanguageSourceExtension(Path.GetExtension(file.FileName))))
+        {
+            // .e 與 .ec 也是 Eiffel、ESQL/C 的副檔名；沒有支持庫或執行期檔案佐證時只能算弱證據，
+            // 先前單獨出現就給 0.99 會把這些專案誤判成易語言。
+            Add(detections, "easy-language", "易語言", "language", 0.55, "只找到 .e／.ec 副檔名，未見易語言支持庫");
         }
 
         if (names.Any(name => name.Equals("WebView2Loader.dll", StringComparison.OrdinalIgnoreCase)) &&
@@ -176,10 +182,14 @@ internal static class TechnologyDetector
         name.StartsWith("Qt5", StringComparison.OrdinalIgnoreCase) ||
         name.StartsWith("Qt6", StringComparison.OrdinalIgnoreCase);
 
-    private static bool IsEasyLanguageExtension(string extension) =>
+    // .fne／.fnr／.fnl 是易語言獨有的支持庫與執行期副檔名。
+    private static bool IsEasyLanguageLibraryExtension(string extension) =>
         extension.Equals(".fne", StringComparison.OrdinalIgnoreCase) ||
         extension.Equals(".fnr", StringComparison.OrdinalIgnoreCase) ||
-        extension.Equals(".fnl", StringComparison.OrdinalIgnoreCase) ||
+        extension.Equals(".fnl", StringComparison.OrdinalIgnoreCase);
+
+    // .e／.ec 是易語言的工程與原始碼副檔名，但也被 Eiffel 與 ESQL/C 使用。
+    private static bool IsEasyLanguageSourceExtension(string extension) =>
         extension.Equals(".ec", StringComparison.OrdinalIgnoreCase) ||
         extension.Equals(".e", StringComparison.OrdinalIgnoreCase);
 
