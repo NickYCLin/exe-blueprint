@@ -217,6 +217,33 @@ public sealed class AsarInputIntegrationTests
         AssertNoBangPaths(document);
     }
 
+    // 巢狀 ASAR 的 header 含孤立代理字元跳脫時，應與其他畸形 header 相同：保留容器、記錄失敗展開與
+    // 警告，讓分析正常完成，而不是讓 InvalidOperationException 逃出並中止整個分析。
+    [Fact]
+    public async Task NestedAsarWithLoneSurrogateEscapeBecomesWarningInsteadOfCrash()
+    {
+        await using var temp = new TemporaryDirectory();
+        var outerPath = Path.Combine(temp.Path, "outer.asar");
+        var malformed = AsarTestArchiveBuilder.Create("""{"files":{"\udc00":{"size":0,"offset":"0"}}}""");
+        await File.WriteAllBytesAsync(outerPath, CreateRootFileArchive("surrogate.asar", malformed));
+
+        var document = await AnalyzeAsync(outerPath);
+
+        AssertOrigin(AssertArtifact(document, "outer.asar"), "direct", depth: 0);
+        var failedExpansion = Assert.Single(
+            document.Archives,
+            expansion => expansion.ContainerPath == "outer.asar/surrogate.asar");
+        Assert.False(failedExpansion.Complete);
+        Assert.False(string.IsNullOrWhiteSpace(failedExpansion.Error));
+        Assert.Contains(
+            document.Warnings,
+            warning => warning.Contains("outer.asar/surrogate.asar", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(
+            document.Files,
+            artifact => artifact.RelativePath.StartsWith("outer.asar/surrogate.asar/", StringComparison.Ordinal));
+        AssertNoBangPaths(document);
+    }
+
     [Fact]
     public async Task MaxFilesAndMaxTotalBytesAreSharedByContainersAndExpandedEntries()
     {

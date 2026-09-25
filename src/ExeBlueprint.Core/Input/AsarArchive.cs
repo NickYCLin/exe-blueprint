@@ -138,6 +138,13 @@ internal sealed class AsarArchive : IAsyncDisposable
         {
             throw Invalid("檔案在 ASAR header 結束前已截斷", exception);
         }
+        catch (InvalidOperationException exception)
+        {
+            // JSON 語法允許孤立代理字元跳脫（例如 "\udc00"），JsonDocument.Parse 會通過，但 JsonElement
+            // 讀取名稱或字串時會丟 InvalidOperationException。這裡當作畸形 header 轉成 InvalidDataException，
+            // 讓上層照其他畸形 header 的方式記錄警告，而不是讓整個分析崩潰。
+            throw Invalid("ASAR header 含無效的 UTF-16 字串（例如孤立的代理字元）", exception);
+        }
         finally
         {
             if (stream is not null)

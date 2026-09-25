@@ -84,6 +84,22 @@ public sealed class AsarArchiveTests
         await Assert.ThrowsAsync<InvalidDataException>(() => OpenAsync(archivePath));
     }
 
+    // JSON 語法允許 "\udc00" 這種孤立代理字元跳脫，JsonDocument.Parse 會通過，但讀取名稱或字串時
+    // JsonElement 會丟 InvalidOperationException。它必須被轉成 InvalidDataException，才能像其他畸形
+    // header 一樣變成警告，而不是讓整個分析崩潰。
+    [Theory]
+    [InlineData("""{"files":{"\udc00":{"size":0,"offset":"0"}}}""")]
+    [InlineData("""{"files":{"\ud800":{"size":0,"offset":"0"}}}""")]
+    [InlineData("""{"files":{"a.js":{"size":0,"offset":"0"},"\udc00":{"files":{}}}}""")]
+    public async Task RejectsLoneSurrogateEscapesAsInvalidData(string header)
+    {
+        await using var temp = new TemporaryDirectory();
+        var archivePath = Path.Combine(temp.Path, "surrogate.asar");
+        await AsarTestArchiveBuilder.WriteAsync(archivePath, header);
+
+        await Assert.ThrowsAsync<InvalidDataException>(() => OpenAsync(archivePath));
+    }
+
     [Fact]
     public async Task RejectsCaseInsensitiveUnicodeNameCollisions()
     {
