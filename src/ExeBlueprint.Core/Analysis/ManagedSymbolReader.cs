@@ -576,6 +576,14 @@ internal static class ManagedSymbolReader
     {
         try
         {
+            // ResourceReader 會照 header 裡的 numTypes／numResources 直接配置陣列，且每次
+            // GetResourceData 都重讀全部名稱並排序；這些數字都來自不受信任的資料，先套上與
+            // 預序列化路徑相同的上限，超過就當成無效資源表。
+            if (!TryValidateResourceTableHeader(data, out var headerError))
+            {
+                return new([], false, headerError);
+            }
+
             using var stream = new MemoryStream(data, writable: false);
             using var reader = new ResourceReader(stream);
             var enumerator = reader.GetEnumerator();
@@ -600,8 +608,10 @@ internal static class ManagedSymbolReader
                     reader.GetResourceData(key, out var type, out var resourceData);
                     entries.Add(DecodeResourceEntry(key, type, resourceData));
                 }
-                catch (Exception exception) when (exception is ArgumentException or BadImageFormatException or FormatException or InvalidOperationException or IOException)
+                catch (Exception exception) when (exception is ArgumentException or BadImageFormatException or FormatException or InvalidOperationException or IOException or OutOfMemoryException)
                 {
+                    // OutOfMemoryException 在這裡不是真的記憶體耗盡：ResourceReader 照資料裡的長度
+                    // new byte[0x7FFFFFFF]，超過 Array.MaxLength 必然失敗。當成這筆資源無效即可。
                     entries.Add(new ManagedResourceEntryModel
                     {
                         Name = key,
@@ -638,10 +648,88 @@ internal static class ManagedSymbolReader
                 preserialized.Truncated,
                 null);
         }
-        catch (Exception exception) when (exception is ArgumentException or BadImageFormatException or FormatException or InvalidOperationException or IOException or OverflowException)
+        catch (Exception exception) when (exception is ArgumentException or BadImageFormatException or FormatException or InvalidOperationException or IOException or OverflowException or OutOfMemoryException)
         {
+            // 名稱長度這類欄位在 enumerator.Key 才被讀到，配置失敗會落到這裡；同樣是資料造成的
+            // 確定性失敗，不是記憶體耗盡，回報資源表無效而不讓例外中止整個分析。
             return new([], false, "資源表格式損壞或不受支援。");
         }
+    }
+
+    private const int MaxResourceTableEntries = 100_000;
+    private const int MaxResourceTableTypes = 2_000;
+    private const int ResourceManagerMagic = unchecked((int)0xBEEFCACE);
+
+    // 只驗證 ResourceReader 會拿來配置陣列的兩個數量；格式不對或資料不足就交回 BCL，它丟的
+    // BadImageFormat／ArgumentException 本來就會被接住。回傳 false 代表數量超過上限。
+    private static bool TryValidateResourceTableHeader(byte[] data, out string? error)
+    {
+        error = null;
+        var position = 0;
+        if (!TryReadResourceInt32(data, ref position, out var magic) || magic != ResourceManagerMagic ||
+            !TryReadResourceInt32(data, ref position, out var headerVersion) ||
+            !TryReadResourceInt32(data, ref position, out var headerSkip))
+        {
+            return true;
+        }
+
+        if (headerVersion > 1)
+        {
+            if (headerSkip < 0 || headerSkip > data.Length - position)
+            {
+                return true;
+            }
+
+            position += headerSkip;
+        }
+        else
+        {
+            // 版本 1 的 header 依序放 reader type 與 resource set type 兩個 7-bit 長度前綴字串。
+            for (var index = 0; index < 2; index++)
+            {
+                if (!TryRead7BitEncodedInt(data, ref position, out var length) ||
+                    length > data.Length - position)
+                {
+                    return true;
+                }
+
+                position += length;
+            }
+        }
+
+        if (!TryReadResourceInt32(data, ref position, out _) ||
+            !TryReadResourceInt32(data, ref position, out var resourceCount) ||
+            !TryReadResourceInt32(data, ref position, out var typeCount))
+        {
+            return true;
+        }
+
+        if (resourceCount < 0 || resourceCount > MaxResourceTableEntries)
+        {
+            error = $"資源表宣告 {resourceCount:N0} 筆資源，超過 {MaxResourceTableEntries:N0} 筆安全解析上限或格式無效。";
+            return false;
+        }
+
+        if (typeCount < 0 || typeCount > MaxResourceTableTypes)
+        {
+            error = $"資源表宣告 {typeCount:N0} 個型別，超過 {MaxResourceTableTypes:N0} 個安全解析上限或格式無效。";
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool TryReadResourceInt32(byte[] data, ref int position, out int value)
+    {
+        if (position < 0 || data.Length - position < sizeof(int))
+        {
+            value = 0;
+            return false;
+        }
+
+        value = BinaryPrimitives.ReadInt32LittleEndian(data.AsSpan(position, sizeof(int)));
+        position += sizeof(int);
+        return true;
     }
 
     private static byte[]? TryReadEmbeddedResourceData(

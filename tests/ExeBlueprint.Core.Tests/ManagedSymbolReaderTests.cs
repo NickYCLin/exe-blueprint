@@ -2392,6 +2392,52 @@ public sealed class ManagedSymbolReaderTests
         Assert.Null(entry.Error);
     }
 
+    // .resources header 的 numTypes／numResources 與名稱長度都來自不受信任的資料。ResourceReader 會照這些
+    // 數字直接配置陣列，new Type[int.MaxValue] 超過 Array.MaxLength 必然 OOM，而 OutOfMemoryException 沒有
+    // 任何 catch 接住，整個多檔案分析就中止。這種資源表應回報無效，不能讓例外逃出。
+    [Fact]
+    public void RejectsResourceTableWithHostileTypeCountWithoutThrowing()
+    {
+        byte[] hostileTypeCount =
+        [
+            0xCE, 0xCA, 0xEF, 0xBE, // magic
+            0x02, 0x00, 0x00, 0x00, // header version 2：BCL 略過 reader type 驗證
+            0x00, 0x00, 0x00, 0x00, // header skip
+            0x02, 0x00, 0x00, 0x00, // RuntimeResourceSet version
+            0x00, 0x00, 0x00, 0x00, // numResources
+            0xFF, 0xFF, 0xFF, 0x7F  // numTypes = int.MaxValue
+        ];
+
+        var result = ManagedSymbolReader.ReadResourceTable(hostileTypeCount, 5_000);
+
+        Assert.Empty(result.Entries);
+        Assert.NotNull(result.Error);
+    }
+
+    [Fact]
+    public void RejectsResourceNameLengthBeyondArrayLimitWithoutThrowing()
+    {
+        // 合法 header、一筆資源；名稱長度的 7-bit 整數是 0x7FFFFFFF，讀 enumerator.Key 時會 new byte[int.MaxValue]。
+        byte[] hostileNameLength =
+        [
+            0xCE, 0xCA, 0xEF, 0xBE,
+            0x02, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00,
+            0x02, 0x00, 0x00, 0x00,
+            0x01, 0x00, 0x00, 0x00, // numResources = 1
+            0x00, 0x00, 0x00, 0x00, // numTypes = 0（此時位移 24，已對齊 8）
+            0x00, 0x00, 0x00, 0x00, // name hash[0]
+            0x00, 0x00, 0x00, 0x00, // name position[0]
+            0x28, 0x00, 0x00, 0x00, // data section offset
+            0xFF, 0xFF, 0xFF, 0xFF, 0x07 // name length = 0x7FFFFFFF
+        ];
+
+        var result = ManagedSymbolReader.ReadResourceTable(hostileNameLength, 5_000);
+
+        Assert.Empty(result.Entries);
+        Assert.NotNull(result.Error);
+    }
+
     // 超過 16 KiB 的 TypeConverterString 先前被整筆判成無效；應與一般 String 一樣回報 encoded 並標記截斷。
     [Fact]
     public void TruncatesLongTypeConverterStringsInsteadOfRejectingThem()
