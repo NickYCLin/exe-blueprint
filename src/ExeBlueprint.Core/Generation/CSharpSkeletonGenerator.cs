@@ -418,8 +418,9 @@ public static class CSharpSkeletonGenerator
             : Humanize(invoke.ReturnType, type.GenericParameters, invoke.GenericParameters);
         var parameters = invoke is null
             ? ""
-            : string.Join(", ", invoke.Parameters.Select(parameter =>
-                $"{ParameterType(parameter, Humanize(parameter.Type, type.GenericParameters, invoke.GenericParameters))} {SafeName(parameter.Name)}"));
+            : ParameterList(
+                invoke.Parameters,
+                parameter => ParameterType(parameter, Humanize(parameter.Type, type.GenericParameters, invoke.GenericParameters)));
         AppendConstrainedDeclaration(
             builder,
             $"{indent}{type.Accessibility}{(RequiresUnsafeContext(type) ? " unsafe" : "")} delegate " +
@@ -431,8 +432,9 @@ public static class CSharpSkeletonGenerator
 
     private static void AppendMethod(StringBuilder builder, TypeModel type, MethodModel method, string body)
     {
-        var parameters = string.Join(", ", method.Parameters.Select(parameter =>
-            $"{ParameterType(parameter, Humanize(parameter.Type, type.GenericParameters, method.GenericParameters))} {SafeName(parameter.Name)}"));
+        var parameters = ParameterList(
+            method.Parameters,
+            parameter => ParameterType(parameter, Humanize(parameter.Type, type.GenericParameters, method.GenericParameters)));
 
         if (method.IsConstructor)
         {
@@ -1868,6 +1870,16 @@ public static class CSharpSkeletonGenerator
         (property.HasGetter || property.HasSetter) &&
         !(property.HasSetter && IsByRefType(property.Type));
 
+    // 同名參數（混淆或 metadata 缺名稱）是 CS0100；第二個起加序號。方法、委派與索引子三處共用。
+    private static string ParameterList(
+        IEnumerable<ParameterModel> parameters,
+        Func<ParameterModel, string> renderType)
+    {
+        var usedNames = new HashSet<string>(StringComparer.Ordinal);
+        return string.Join(", ", parameters.Select(parameter =>
+            $"{renderType(parameter)} {SkeletonSupport.UniqueName(usedNames, SafeName(parameter.Name))}"));
+    }
+
     // 簽章裡的 by-ref 一律呈現為 ref；模型另外記錄的 out／in 修飾詞在這裡換回去，否則覆寫或實作
     // 外部介面的 out 方法會是 CS0115／CS0535。
     private static string ParameterType(ParameterModel parameter, string humanized) =>
@@ -1880,8 +1892,9 @@ public static class CSharpSkeletonGenerator
 
     private static string FormatIndexerName(PropertyModel property, IReadOnlyList<string> typeGenerics)
     {
-        var parameters = string.Join(", ", property.Parameters.Select(parameter =>
-            $"{ParameterType(parameter, Humanize(parameter.Type, typeGenerics, []))} {SafeName(parameter.Name)}"));
+        var parameters = ParameterList(
+            property.Parameters,
+            parameter => ParameterType(parameter, Humanize(parameter.Type, typeGenerics, [])));
         var separator = property.Name.LastIndexOf('.');
         if (separator < 0)
         {

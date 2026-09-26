@@ -118,6 +118,27 @@ public sealed class GoSkeletonSyntaxTests
         Assert.Contains("type Foo_2 struct {", go, StringComparison.Ordinal);
     }
 
+    // 同名參數是 duplicate argument；第二個起加序號。
+    [Fact]
+    public async Task DuplicateParameterNamesGetUniqueNames()
+    {
+        var document = await BuildDocument(new TypeModel
+        {
+            FullName = "Tests.Probe",
+            Namespace = "Tests",
+            Name = "Probe",
+            Kind = "class",
+            Accessibility = "internal",
+            Methods = [Method("Run") with { Parameters = [Parameter("x", "int"), Parameter("x", "int")] }]
+        });
+
+        var go = GoSkeletonGenerator.Generate(document)
+            .Single(file => file.RelativePath.EndsWith(".go", StringComparison.Ordinal))
+            .Content;
+
+        Assert.Contains("func (r *Probe) Run(x int32, x_2 int32) {", go, StringComparison.Ordinal);
+    }
+
     private static ParameterModel Parameter(string name, string type) => new() { Name = name, Type = type };
 
     private static MethodModel Method(string name, bool isStatic = false) => new()

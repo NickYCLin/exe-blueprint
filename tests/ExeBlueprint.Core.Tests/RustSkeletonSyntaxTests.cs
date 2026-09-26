@@ -177,6 +177,27 @@ public sealed class RustSkeletonSyntaxTests
         Assert.Contains("pub struct Foo_2 {", rust, StringComparison.Ordinal);
     }
 
+    // 同名參數是 E0415；第二個起加序號。
+    [Fact]
+    public async Task DuplicateParameterNamesGetUniqueNames()
+    {
+        var document = await BuildDocument(new TypeModel
+        {
+            FullName = "Tests.Probe",
+            Namespace = "Tests",
+            Name = "Probe",
+            Kind = "class",
+            Accessibility = "internal",
+            Methods = [Method("Run") with { Parameters = [Parameter("x", "int"), Parameter("x", "int")] }]
+        });
+
+        var rust = RustSkeletonGenerator.Generate(document)
+            .Single(file => file.RelativePath.EndsWith(".rs", StringComparison.Ordinal))
+            .Content;
+
+        Assert.Contains("pub fn Run(&self, x: i32, x_2: i32) { unimplemented!() }", rust, StringComparison.Ordinal);
+    }
+
     private static ParameterModel Parameter(string name, string type) => new() { Name = name, Type = type };
 
     private static FieldModel EnumMember(string name, string value) => new()

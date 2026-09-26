@@ -153,8 +153,10 @@ public static class RustSkeletonGenerator
             parameters.Add("&self");
         }
 
+        // 同名參數（混淆或 metadata 缺名稱）在 Rust 是 E0415；依序加序號。
+        var usedParameters = new HashSet<string>(StringComparer.Ordinal);
         parameters.AddRange(method.Parameters.Select(parameter =>
-            $"{ParameterName(parameter.Name)}: {LanguageTypeMap.ToRust(parameter.Type)}"));
+            $"{SkeletonSupport.UniqueName(usedParameters, ParameterName(parameter.Name))}: {LanguageTypeMap.ToRust(parameter.Type)}"));
 
         var returns = method.ReturnType == "void" ? "" : $" -> {LanguageTypeMap.ToRust(method.ReturnType)}";
         var header = $"{visibility}fn {methodName}({string.Join(", ", parameters)}){returns}";

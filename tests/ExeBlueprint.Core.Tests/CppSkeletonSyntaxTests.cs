@@ -77,6 +77,27 @@ public sealed class CppSkeletonSyntaxTests
         Assert.Contains("class Foo_2 {", cpp, StringComparison.Ordinal);
     }
 
+    // 同名參數是重複宣告；第二個起加序號。
+    [Fact]
+    public async Task DuplicateParameterNamesGetUniqueNames()
+    {
+        var document = await BuildDocument(new TypeModel
+        {
+            FullName = "Tests.Probe",
+            Namespace = "Tests",
+            Name = "Probe",
+            Kind = "class",
+            Accessibility = "internal",
+            Methods = [Method("Run", "void") with { Parameters = [Parameter("x", "int"), Parameter("x", "int")] }]
+        });
+
+        var cpp = CppSkeletonGenerator.Generate(document)
+            .Single(file => file.RelativePath.EndsWith(".hpp", StringComparison.Ordinal))
+            .Content;
+
+        Assert.Contains("void Run(int32_t x, int32_t x_2) { }", cpp, StringComparison.Ordinal);
+    }
+
     private static ParameterModel Parameter(string name, string type) => new() { Name = name, Type = type };
 
     private static MethodModel Method(string name, string returnType, bool isStatic = false) => new()

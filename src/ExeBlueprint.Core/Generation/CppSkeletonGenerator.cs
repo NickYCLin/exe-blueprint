@@ -92,8 +92,10 @@ public static class CppSkeletonGenerator
     private static string Method(MethodModel method, bool isInterface)
     {
         var returns = method.ReturnType == "void" ? "void" : LanguageTypeMap.ToCpp(method.ReturnType);
+        // 同名參數是重複宣告；依序加序號。
+        var usedParameters = new HashSet<string>(StringComparer.Ordinal);
         var parameters = string.Join(", ", method.Parameters.Select((parameter, index) =>
-            $"{LanguageTypeMap.ToCpp(parameter.Type)} {ParameterName(parameter.Name, index)}"));
+            $"{LanguageTypeMap.ToCpp(parameter.Type)} {SkeletonSupport.UniqueName(usedParameters, ParameterName(parameter.Name, index))}"));
         var prefix = method.IsStatic ? "static " : "";
         var header = $"{prefix}{returns} {Identifier(method.Name, "method")}({parameters})";
 

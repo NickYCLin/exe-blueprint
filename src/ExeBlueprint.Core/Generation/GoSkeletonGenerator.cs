@@ -117,9 +117,13 @@ public static class GoSkeletonGenerator
         }
     }
 
-    private static string Parameters(MethodModel method) =>
-        string.Join(", ", method.Parameters.Select((parameter, index) =>
-            $"{ParameterName(parameter.Name, index)} {LanguageTypeMap.ToGo(parameter.Type)}"));
+    private static string Parameters(MethodModel method)
+    {
+        // 同名參數是 duplicate argument；依序加序號。
+        var usedParameters = new HashSet<string>(StringComparer.Ordinal);
+        return string.Join(", ", method.Parameters.Select((parameter, index) =>
+            $"{SkeletonSupport.UniqueName(usedParameters, ParameterName(parameter.Name, index))} {LanguageTypeMap.ToGo(parameter.Type)}"));
+    }
 
     private static string ReturnSuffix(MethodModel method) =>
         method.ReturnType == "void" ? "" : $" {LanguageTypeMap.ToGo(method.ReturnType)}";
