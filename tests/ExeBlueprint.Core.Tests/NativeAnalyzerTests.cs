@@ -467,9 +467,11 @@ public sealed class NativeAnalyzerTests
         await using var temp = new TemporaryDirectory();
         var workspaceMarker = Path.Combine(temp.Path, "workspace.txt");
         var descendantMarker = Path.Combine(temp.Path, "descendant.txt");
+        // 子程序睡 3 秒再寫標記：測試偵測到 workspace 標記後才取消，整套測試平行跑時這段輪詢的
+        // await 接續可能被延後數百毫秒；原本只睡 1 秒，取消一晚到子程序就先寫完標記，看起來像沒砍掉。
         var unixScript =
             "#!/bin/sh\n"
-            + $"( sleep 1; printf child > '{descendantMarker}' ) &\n"
+            + $"( sleep 3; printf child > '{descendantMarker}' ) &\n"
             + $"printf '%s' \"$1\" > '{workspaceMarker}'\n"
             + "sleep 5\n";
         await WriteLauncherAsync(temp.Path, unixScript, "@exit /b 0\r\n");
@@ -486,7 +488,8 @@ public sealed class NativeAnalyzerTests
         Assert.True(File.Exists(workspaceMarker));
         var workspace = (await File.ReadAllTextAsync(workspaceMarker)).Trim();
         Assert.False(Directory.Exists(workspace));
-        await Task.Delay(1_200);
+        // 等得比子程序的睡眠更久：若它逃過了 process tree 的 kill，此時一定已寫出標記。
+        await Task.Delay(3_500);
         Assert.False(File.Exists(descendantMarker));
     }
 
