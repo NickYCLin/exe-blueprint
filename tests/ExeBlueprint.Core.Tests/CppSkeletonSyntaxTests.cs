@@ -61,6 +61,22 @@ public sealed class CppSkeletonSyntaxTests
         Assert.Contains("void delete_(int32_t class_, int32_t arg1) { }", cpp, StringComparison.Ordinal);
     }
 
+    // 所有命名空間攤平到同一個檔案，A.Foo 與 B.Foo 攤平後同名；第二個要加序號，否則重複定義。
+    [Fact]
+    public async Task SameSimpleTypeNameAcrossNamespacesGetsUniqueName()
+    {
+        var document = await BuildDocument(
+            new TypeModel { FullName = "A.Foo", Namespace = "A", Name = "Foo", Kind = "class", Accessibility = "internal" },
+            new TypeModel { FullName = "B.Foo", Namespace = "B", Name = "Foo", Kind = "class", Accessibility = "internal" });
+
+        var cpp = CppSkeletonGenerator.Generate(document)
+            .Single(file => file.RelativePath.EndsWith(".hpp", StringComparison.Ordinal))
+            .Content;
+
+        Assert.Contains("class Foo {", cpp, StringComparison.Ordinal);
+        Assert.Contains("class Foo_2 {", cpp, StringComparison.Ordinal);
+    }
+
     private static ParameterModel Parameter(string name, string type) => new() { Name = name, Type = type };
 
     private static MethodModel Method(string name, string returnType, bool isStatic = false) => new()

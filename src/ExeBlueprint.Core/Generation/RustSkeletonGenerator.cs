@@ -38,18 +38,20 @@ public static class RustSkeletonGenerator
         builder.AppendLine("#![allow(non_snake_case, non_camel_case_types, dead_code, unused_variables)]");
         builder.AppendLine();
 
+        // 所有命名空間攤平到同一個檔案，A.Foo 與 B.Foo 會變成兩個 Foo；型別名在檔案內保證唯一。
+        var usedTypeNames = new HashSet<string>(StringComparer.Ordinal);
         foreach (var type in types.OrderBy(type => type.Name, StringComparer.Ordinal))
         {
-            AppendType(builder, type);
+            AppendType(builder, type, usedTypeNames);
             builder.AppendLine();
         }
 
         return builder.ToString();
     }
 
-    private static void AppendType(StringBuilder builder, TypeModel type)
+    private static void AppendType(StringBuilder builder, TypeModel type, HashSet<string> usedTypeNames)
     {
-        var name = Identifier(SkeletonSupport.SimpleName(type.Name), "Type");
+        var name = SkeletonSupport.UniqueName(usedTypeNames, Identifier(SkeletonSupport.SimpleName(type.Name), "Type"));
         switch (type.Kind)
         {
             case "enum":

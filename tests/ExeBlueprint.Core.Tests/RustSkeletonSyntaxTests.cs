@@ -161,6 +161,22 @@ public sealed class RustSkeletonSyntaxTests
         Assert.Contains("    fn Do_2(&self);", rust, StringComparison.Ordinal);
     }
 
+    // 所有命名空間攤平到同一個檔案，A.Foo 與 B.Foo 攤平後同名；第二個要加序號，否則重複定義。
+    [Fact]
+    public async Task SameSimpleTypeNameAcrossNamespacesGetsUniqueName()
+    {
+        var document = await BuildDocument(
+            new TypeModel { FullName = "A.Foo", Namespace = "A", Name = "Foo", Kind = "class", Accessibility = "internal" },
+            new TypeModel { FullName = "B.Foo", Namespace = "B", Name = "Foo", Kind = "class", Accessibility = "internal" });
+
+        var rust = RustSkeletonGenerator.Generate(document)
+            .Single(file => file.RelativePath.EndsWith(".rs", StringComparison.Ordinal))
+            .Content;
+
+        Assert.Contains("pub struct Foo {", rust, StringComparison.Ordinal);
+        Assert.Contains("pub struct Foo_2 {", rust, StringComparison.Ordinal);
+    }
+
     private static ParameterModel Parameter(string name, string type) => new() { Name = name, Type = type };
 
     private static FieldModel EnumMember(string name, string value) => new()
