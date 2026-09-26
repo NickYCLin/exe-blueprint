@@ -419,7 +419,7 @@ public static class CSharpSkeletonGenerator
         var parameters = invoke is null
             ? ""
             : string.Join(", ", invoke.Parameters.Select(parameter =>
-                $"{Humanize(parameter.Type, type.GenericParameters, invoke.GenericParameters)} {SafeName(parameter.Name)}"));
+                $"{ParameterType(parameter, Humanize(parameter.Type, type.GenericParameters, invoke.GenericParameters))} {SafeName(parameter.Name)}"));
         AppendConstrainedDeclaration(
             builder,
             $"{indent}{type.Accessibility}{(RequiresUnsafeContext(type) ? " unsafe" : "")} delegate " +
@@ -432,7 +432,7 @@ public static class CSharpSkeletonGenerator
     private static void AppendMethod(StringBuilder builder, TypeModel type, MethodModel method, string body)
     {
         var parameters = string.Join(", ", method.Parameters.Select(parameter =>
-            $"{Humanize(parameter.Type, type.GenericParameters, method.GenericParameters)} {SafeName(parameter.Name)}"));
+            $"{ParameterType(parameter, Humanize(parameter.Type, type.GenericParameters, method.GenericParameters))} {SafeName(parameter.Name)}"));
 
         if (method.IsConstructor)
         {
@@ -1868,13 +1868,20 @@ public static class CSharpSkeletonGenerator
         (property.HasGetter || property.HasSetter) &&
         !(property.HasSetter && IsByRefType(property.Type));
 
+    // 簽章裡的 by-ref 一律呈現為 ref；模型另外記錄的 out／in 修飾詞在這裡換回去，否則覆寫或實作
+    // 外部介面的 out 方法會是 CS0115／CS0535。
+    private static string ParameterType(ParameterModel parameter, string humanized) =>
+        parameter.ByReference is "out" or "in" && humanized.StartsWith("ref ", StringComparison.Ordinal)
+            ? $"{parameter.ByReference} {humanized["ref ".Length..]}"
+            : humanized;
+
     private static bool IsExplicitInterfaceMember(string name) =>
         name.Contains('.', StringComparison.Ordinal);
 
     private static string FormatIndexerName(PropertyModel property, IReadOnlyList<string> typeGenerics)
     {
         var parameters = string.Join(", ", property.Parameters.Select(parameter =>
-            $"{Humanize(parameter.Type, typeGenerics, [])} {SafeName(parameter.Name)}"));
+            $"{ParameterType(parameter, Humanize(parameter.Type, typeGenerics, []))} {SafeName(parameter.Name)}"));
         var separator = property.Name.LastIndexOf('.');
         if (separator < 0)
         {

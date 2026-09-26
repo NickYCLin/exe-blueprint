@@ -748,6 +748,11 @@ public sealed record ParameterModel
     public required string Name { get; init; }
 
     public required string Type { get; init; }
+
+    // by-ref 參數的 C# 修飾詞：ref、out 或 in；非 by-ref 為 null。Type 字串一律以 ref 開頭表示 by-ref，
+    // 這裡再依 metadata 的 In／Out 旗標區分，讓 C# 骨架不會把 out 與 in 都寫成 ref。
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? ByReference { get; init; }
 }
 
 public sealed record CallEdge

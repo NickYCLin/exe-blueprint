@@ -13189,7 +13189,12 @@ internal static class ManagedSymbolReader
                     signature.ParameterTypes[index],
                     parameterHandles.TryGetValue(index + 1, out var parameterHandle) ? parameterHandle : default,
                     nullableContext);
-                parameters.Add(new ParameterModel { Name = name, Type = parameterType });
+                parameters.Add(new ParameterModel
+                {
+                    Name = name,
+                    Type = parameterType,
+                    ByReference = ByReferenceModifier(metadata, parameterHandle, parameterType)
+                });
             }
 
             // 舊式或 compiler-generated metadata 可能把 override Equals 的參數標成 oblivious；
@@ -13246,6 +13251,36 @@ internal static class ManagedSymbolReader
         }
 
         return handles;
+    }
+
+    // by-ref 參數在簽章裡都是 ref；C# 的 out 與 in 只反映在 Param 資料列的 Out／In 旗標上。
+    // 只有 Out 沒有 In 是 out，只有 In 沒有 Out 是 in，其餘（含兩者皆有的 [In, Out] ref）維持 ref。
+    private static string? ByReferenceModifier(MetadataReader metadata, ParameterHandle handle, string type)
+    {
+        if (type.StartsWith("out ", StringComparison.Ordinal))
+        {
+            return "out";
+        }
+
+        if (type.StartsWith("in ", StringComparison.Ordinal))
+        {
+            return "in";
+        }
+
+        if (!type.StartsWith("ref ", StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        if (handle.IsNil)
+        {
+            return "ref";
+        }
+
+        var attributes = metadata.GetParameter(handle).Attributes;
+        var isOut = (attributes & ParameterAttributes.Out) != 0;
+        var isIn = (attributes & ParameterAttributes.In) != 0;
+        return isOut && !isIn ? "out" : isIn && !isOut ? "in" : "ref";
     }
 
     private static string ApplyTopLevelNullableAnnotation(
@@ -15148,7 +15183,12 @@ internal static class ManagedSymbolReader
                 parameterTypes[index],
                 parameterHandles.TryGetValue(index + 1, out var parameterHandle) ? parameterHandle : default,
                 nullableContext);
-            parameters.Add(new ParameterModel { Name = name, Type = type });
+            parameters.Add(new ParameterModel
+            {
+                Name = name,
+                Type = type,
+                ByReference = ByReferenceModifier(metadata, parameterHandle, type)
+            });
         }
 
         return parameters;
