@@ -243,6 +243,11 @@ internal static class NativeAnalyzer
         var standardErrorTask = ReadBoundedTailAsync(process.StandardError, MaxProcessOutputTailChars);
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(request.TimeoutMs);
+
+        // 取消或逾時時立刻在 Cancel() 的執行緒上砍掉整個 process tree，而不是等 WaitForExitAsync 的
+        // 例外接續被排程：執行緒池忙碌時那個接續可能晚一秒以上，launcher 的子程序就有機會跑完。
+        // TryKill 會先看 HasExited 並吞掉已結束的例外，重複呼叫無害；catch 裡的 TryKill 保留作為保險。
+        using var killOnCancel = timeout.Token.Register(() => TryKill(process));
         try
         {
             await process.WaitForExitAsync(timeout.Token).ConfigureAwait(false);
