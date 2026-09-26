@@ -39,6 +39,52 @@ public sealed class SkeletonEnumSafetyTests
         Assert.Contains("ProbeTricky Probe = iota", go, StringComparison.Ordinal);
     }
 
+    // C# 只允許整數型別當列舉 underlying type；IL 允許的 char／bool 寫成 `enum E : char` 無法編譯。
+    [Fact]
+    public async Task UnexpressibleEnumUnderlyingTypesFallBackToDefault()
+    {
+        var analyzed = await new BlueprintAnalyzer().AnalyzeAsync(typeof(SkeletonEnumSafetyTests).Assembly.Location);
+        var artifact = analyzed.Files[0] with
+        {
+            Id = "underlying-probe",
+            RelativePath = "Probe.dll",
+            FileName = "Probe.dll",
+            AssemblyName = "Probe",
+            ManagedReferences = [],
+            Code = new CodeModel
+            {
+                Kind = "managed",
+                NamespaceCount = 1,
+                TypeCount = 2,
+                Types =
+                [
+                    Enum("Chars", "char", new ConstantValueModel { Type = "ushort", Value = "65" }),
+                    Enum("Longs", "long", new ConstantValueModel { Type = "long", Value = "1" })
+                ]
+            }
+        };
+
+        var csharp = Join(CSharpSkeletonGenerator.Generate(analyzed with { Files = [artifact] }));
+
+        Assert.DoesNotContain(": char", csharp, StringComparison.Ordinal);
+        Assert.Contains("enum Chars", csharp, StringComparison.Ordinal);
+        Assert.Contains("enum Longs : long", csharp, StringComparison.Ordinal);
+    }
+
+    private static TypeModel Enum(string name, string underlyingType, ConstantValueModel constant) => new()
+    {
+        FullName = $"Tests.{name}",
+        Namespace = "Tests",
+        Name = name,
+        Kind = "enum",
+        Accessibility = "internal",
+        Fields =
+        [
+            new FieldModel { Name = "value__", Type = underlyingType, Accessibility = "public" },
+            Member("A", constant)
+        ]
+    };
+
     private static string Join(IReadOnlyList<GeneratedFile> files) =>
         string.Join("\n", files.Select(file => file.Content));
 

@@ -811,8 +811,11 @@ public static class CSharpSkeletonGenerator
         var declaration = string.Join(" ", parts);
         if (type.Kind == "enum")
         {
+            // C# 只允許 byte／sbyte／short／ushort／int／uint／long／ulong 當列舉 underlying type；IL 允許的
+            // char、bool、nint 寫成 `enum E : char` 無法編譯，退回不標註（等同 int）。int 本來就不標。
             var underlyingType = SkeletonSupport.EnumUnderlyingType(type);
-            return underlyingType == "int" ? declaration : $"{declaration} : {underlyingType}";
+            var expressible = underlyingType is "byte" or "sbyte" or "short" or "ushort" or "uint" or "long" or "ulong";
+            return expressible ? $"{declaration} : {underlyingType}" : declaration;
         }
 
         return bases.Count == 0 ? declaration : $"{declaration} : {string.Join(", ", bases)}";
