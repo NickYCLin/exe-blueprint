@@ -150,7 +150,7 @@ public static class CSharpSkeletonGenerator
         var indent = "";
         if (!string.IsNullOrEmpty(namespaceName))
         {
-            builder.AppendLine($"namespace {namespaceName};");
+            builder.AppendLine($"namespace {SanitizeNamespace(namespaceName)};");
             builder.AppendLine();
         }
 
@@ -1914,6 +1914,23 @@ public static class CSharpSkeletonGenerator
         return humanized;
     }
 
+    // 型別文字來自簽章，合法內容只會有識別字字元與型別語法（. < > , [ ] ? * & ( ) ! : @ 與空白）；
+    // ; { } 換行 / = 這類字元只可能來自惡意的型別名稱，換成底線就無法在骨架裡塞進程式碼。
+    private static string FilterTypeText(string typeText)
+    {
+        var builder = new StringBuilder(typeText.Length);
+        foreach (var character in typeText)
+        {
+            builder.Append(
+                char.IsLetterOrDigit(character) ||
+                character is '_' or '.' or '<' or '>' or ',' or '[' or ']' or '?' or '*' or '&' or '(' or ')' or '!' or ':' or '@' or ' '
+                    ? character
+                    : '_');
+        }
+
+        return builder.ToString();
+    }
+
     private static bool TryHumanize(
         string typeText,
         IReadOnlyList<string> typeGenerics,
@@ -1974,7 +1991,7 @@ public static class CSharpSkeletonGenerator
             position = digitEnd;
         }
 
-        humanized = builder.ToString();
+        humanized = FilterTypeText(builder.ToString());
         return complete;
     }
 
@@ -2064,24 +2081,71 @@ public static class CSharpSkeletonGenerator
         }
     }
 
+    // 型別與委派名稱：去掉泛型 arity 後套用與成員相同的識別字規則，含標點或換行的名稱不再原樣落地，
+    // 混淆組件常見的 class、int 這類型別名也能以 @ 逐字識別字輸出。
     private static string CleanName(string name)
     {
         var backtick = name.IndexOf('`', StringComparison.Ordinal);
-        return backtick < 0 ? name : name[..backtick];
+        return SafeName(backtick < 0 ? name : name[..backtick]);
     }
 
+    // C# 識別字只允許字母、數字與底線（含 Unicode 字母），其餘字元一律換成底線。名稱直接來自不受信任
+    // 的 metadata：含 ; { } 或換行的名稱會把任意程式碼寫進骨架（例如塞一個 ModuleInitializer），使用者
+    // 建置執行就中招。格式字元（Cf，如零寬空白與 RTL 覆寫）編譯器比較識別字時會忽略，容易用來偽裝或
+    // 製造重複定義，也一併換掉。點保留：明確介面實作的名稱是 Ns.IFoo.Member，而點本身無法開啟或
+    // 結束任何語句，留著不會讓人塞進程式碼。
+    private static string SanitizeIdentifier(string name)
+    {
+        var builder = new StringBuilder(name.Length);
+        foreach (var character in name)
+        {
+            builder.Append(char.IsLetterOrDigit(character) || character is '_' or '.' ? character : '_');
+        }
+
+        return builder.ToString();
+    }
+
+    // 命名空間直接來自 metadata；逐段套用識別字規則後以 . 接回，含 ; 或換行的命名空間不再能塞入程式碼。
+    private static string SanitizeNamespace(string namespaceName) =>
+        string.Join('.', namespaceName.Split('.').Select(SafeName));
+
+    // 成員名稱：先過濾成合法識別字，空名稱用 _，開頭是數字補底線，關鍵字用 @ 逐字識別字。
     private static string SafeName(string name)
     {
         if (IsCompilerGenerated(name))
         {
-            return $"@{name.Replace('<', '_').Replace('>', '_')}";
+            return $"@{SanitizeIdentifier(name)}";
         }
 
-        return CSharpReservedKeywords.Contains(name) ? $"@{name}" : name;
+        var sanitized = SanitizeIdentifier(name);
+        if (sanitized.Length == 0)
+        {
+            return "_";
+        }
+
+        if (char.IsDigit(sanitized[0]))
+        {
+            sanitized = $"_{sanitized}";
+        }
+
+        return CSharpReservedKeywords.Contains(sanitized) ? $"@{sanitized}" : sanitized;
     }
 
-    private static string FormatGenericParameterIdentifier(string name) =>
-        CSharpGenericParameterKeywords.Contains(name) ? $"@{name}" : name;
+    private static string FormatGenericParameterIdentifier(string name)
+    {
+        var sanitized = SanitizeIdentifier(name);
+        if (sanitized.Length == 0)
+        {
+            return "T";
+        }
+
+        if (char.IsDigit(sanitized[0]))
+        {
+            sanitized = $"_{sanitized}";
+        }
+
+        return CSharpGenericParameterKeywords.Contains(sanitized) ? $"@{sanitized}" : sanitized;
+    }
 
     private static bool IsCompilerGenerated(string name) =>
         name.Contains('<', StringComparison.Ordinal) || name.Contains('>', StringComparison.Ordinal);
