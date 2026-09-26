@@ -170,13 +170,16 @@ internal static class SkeletonSupport
 
     // 同一個輸出目錄裡的檔名主幹不分大小寫必須唯一：組件名相同（例如各 RID 一份）、A.B 與 A_B
     // 都會整理成同一個主幹，writer 會把重複路徑當成錯誤而讓整包匯出失敗。撞名就加序號。
-    public static string UniqueFileStem(HashSet<string> used, string stem)
+    public static string UniqueFileStem(HashSet<string> used, string stem) => UniqueName(used, stem);
+
+    // 通用的撞名處理：識別字（多載方法、Sanitize 後相同的成員、攤平後同名的型別）也用同一套序號規則。
+    public static string UniqueName(HashSet<string> used, string name)
     {
-        var candidate = stem;
+        var candidate = name;
         var suffix = 2;
         while (!used.Add(candidate))
         {
-            candidate = $"{stem}_{suffix++}";
+            candidate = $"{name}_{suffix++}";
         }
 
         return candidate;

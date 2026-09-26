@@ -120,6 +120,47 @@ public sealed class RustSkeletonSyntaxTests
         Assert.Contains("pub struct r#struct {", rust, StringComparison.Ordinal);
     }
 
+    // .NET 的多載與 Sanitize 後相同的成員名在 Rust 都是重複定義（E0592／E0124），依序加序號。
+    [Fact]
+    public async Task OverloadsAndCollidingMembersGetUniqueNames()
+    {
+        var document = await BuildDocument(
+            new TypeModel
+            {
+                FullName = "Tests.Probe",
+                Namespace = "Tests",
+                Name = "Probe",
+                Kind = "class",
+                Accessibility = "internal",
+                Fields =
+                [
+                    new FieldModel { Name = "a-b", Type = "int", Accessibility = "public" },
+                    new FieldModel { Name = "a_b", Type = "int", Accessibility = "public" }
+                ],
+                Methods = [Method("Run"), Method("Run") with { Parameters = [Parameter("x", "int")] }]
+            },
+            new TypeModel
+            {
+                FullName = "Tests.IDo",
+                Namespace = "Tests",
+                Name = "IDo",
+                Kind = "interface",
+                Accessibility = "internal",
+                Methods = [Method("Do"), Method("Do")]
+            });
+
+        var rust = RustSkeletonGenerator.Generate(document)
+            .Single(file => file.RelativePath.EndsWith(".rs", StringComparison.Ordinal))
+            .Content;
+
+        Assert.Contains("    pub a_b: i32,", rust, StringComparison.Ordinal);
+        Assert.Contains("    pub a_b_2: i32,", rust, StringComparison.Ordinal);
+        Assert.Contains("    pub fn Run(&self) { unimplemented!() }", rust, StringComparison.Ordinal);
+        Assert.Contains("    pub fn Run_2(&self, x: i32) { unimplemented!() }", rust, StringComparison.Ordinal);
+        Assert.Contains("    fn Do(&self);", rust, StringComparison.Ordinal);
+        Assert.Contains("    fn Do_2(&self);", rust, StringComparison.Ordinal);
+    }
+
     private static ParameterModel Parameter(string name, string type) => new() { Name = name, Type = type };
 
     private static FieldModel EnumMember(string name, string value) => new()

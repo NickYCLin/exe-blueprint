@@ -101,9 +101,11 @@ public static class RustSkeletonGenerator
 
             case "interface":
                 builder.AppendLine($"pub trait {name} {{");
+                var usedTraitMethods = new HashSet<string>(StringComparer.Ordinal);
                 foreach (var method in SkeletonSupport.EmittableMethods(type))
                 {
-                    builder.AppendLine($"    {Signature(method, includeBody: false, visibility: "")};");
+                    var traitMethod = SkeletonSupport.UniqueName(usedTraitMethods, Identifier(method.Name, "method"));
+                    builder.AppendLine($"    {Signature(method, traitMethod, includeBody: false, visibility: "")};");
                 }
 
                 builder.AppendLine("}");
@@ -111,9 +113,11 @@ public static class RustSkeletonGenerator
 
             default:
                 builder.AppendLine($"pub struct {name} {{");
+                var usedFields = new HashSet<string>(StringComparer.Ordinal);
                 foreach (var (memberName, memberType) in SkeletonSupport.DataMembers(type))
                 {
-                    builder.AppendLine($"    pub {Identifier(memberName, "field")}: {LanguageTypeMap.ToRust(memberType)},");
+                    var field = SkeletonSupport.UniqueName(usedFields, Identifier(memberName, "field"));
+                    builder.AppendLine($"    pub {field}: {LanguageTypeMap.ToRust(memberType)},");
                 }
 
                 builder.AppendLine("}");
@@ -123,9 +127,12 @@ public static class RustSkeletonGenerator
                 {
                     builder.AppendLine();
                     builder.AppendLine($"impl {name} {{");
+                    // .NET 的多載在 Rust 是重複定義（E0592）；同名方法依序加序號。
+                    var usedMethods = new HashSet<string>(StringComparer.Ordinal);
                     foreach (var method in methods)
                     {
-                        builder.AppendLine($"    {Signature(method, includeBody: true, visibility: "pub ")}");
+                        var methodName = SkeletonSupport.UniqueName(usedMethods, Identifier(method.Name, "method"));
+                        builder.AppendLine($"    {Signature(method, methodName, includeBody: true, visibility: "pub ")}");
                     }
 
                     builder.AppendLine("}");
@@ -136,7 +143,7 @@ public static class RustSkeletonGenerator
     }
 
     // trait 裡的方法不能帶 pub（E0449），impl 裡的才需要；由呼叫端決定可見性前綴。
-    private static string Signature(MethodModel method, bool includeBody, string visibility)
+    private static string Signature(MethodModel method, string methodName, bool includeBody, string visibility)
     {
         var parameters = new List<string>();
         if (!method.IsStatic)
@@ -148,7 +155,7 @@ public static class RustSkeletonGenerator
             $"{ParameterName(parameter.Name)}: {LanguageTypeMap.ToRust(parameter.Type)}"));
 
         var returns = method.ReturnType == "void" ? "" : $" -> {LanguageTypeMap.ToRust(method.ReturnType)}";
-        var header = $"{visibility}fn {Identifier(method.Name, "method")}({string.Join(", ", parameters)}){returns}";
+        var header = $"{visibility}fn {methodName}({string.Join(", ", parameters)}){returns}";
         return includeBody ? $"{header} {{ unimplemented!() }}" : header;
     }
 

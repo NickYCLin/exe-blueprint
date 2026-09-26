@@ -70,9 +70,11 @@ public static class GoSkeletonGenerator
 
             case "interface":
                 builder.AppendLine($"type {name} interface {{");
+                var usedInterfaceMethods = new HashSet<string>(StringComparer.Ordinal);
                 foreach (var method in SkeletonSupport.EmittableMethods(type))
                 {
-                    builder.AppendLine($"    {Identifier(method.Name, "Method")}({Parameters(method)}){ReturnSuffix(method)}");
+                    var interfaceMethod = SkeletonSupport.UniqueName(usedInterfaceMethods, Identifier(method.Name, "Method"));
+                    builder.AppendLine($"    {interfaceMethod}({Parameters(method)}){ReturnSuffix(method)}");
                 }
 
                 builder.AppendLine("}");
@@ -80,9 +82,13 @@ public static class GoSkeletonGenerator
 
             default:
                 builder.AppendLine($"type {name} struct {{");
+                // Go 的欄位與方法共用同一個名稱空間，同名會是 "field and method with the same name"；
+                // .NET 的多載在這裡也是重複宣告。整個型別共用一個集合，撞名依序加序號。
+                var usedMembers = new HashSet<string>(StringComparer.Ordinal);
                 foreach (var (memberName, memberType) in SkeletonSupport.DataMembers(type))
                 {
-                    builder.AppendLine($"    {Identifier(memberName, "Field")} {LanguageTypeMap.ToGo(memberType)}");
+                    var field = SkeletonSupport.UniqueName(usedMembers, Identifier(memberName, "Field"));
+                    builder.AppendLine($"    {field} {LanguageTypeMap.ToGo(memberType)}");
                 }
 
                 builder.AppendLine("}");
@@ -92,11 +98,13 @@ public static class GoSkeletonGenerator
                     builder.AppendLine();
                     if (method.IsStatic)
                     {
-                        builder.AppendLine($"func {name}_{SkeletonSupport.IdentifierStem(method.Name, "Method")}({Parameters(method)}){ReturnSuffix(method)} {{");
+                        var staticName = SkeletonSupport.UniqueName(usedMembers, $"{name}_{SkeletonSupport.IdentifierStem(method.Name, "Method")}");
+                        builder.AppendLine($"func {staticName}({Parameters(method)}){ReturnSuffix(method)} {{");
                     }
                     else
                     {
-                        builder.AppendLine($"func (r *{name}) {Identifier(method.Name, "Method")}({Parameters(method)}){ReturnSuffix(method)} {{");
+                        var methodName = SkeletonSupport.UniqueName(usedMembers, Identifier(method.Name, "Method"));
+                        builder.AppendLine($"func (r *{name}) {methodName}({Parameters(method)}){ReturnSuffix(method)} {{");
                     }
 
                     builder.AppendLine("    panic(\"not implemented\")");
