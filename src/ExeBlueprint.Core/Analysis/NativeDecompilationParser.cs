@@ -15,18 +15,24 @@ internal static class NativeDecompilationParser
         if (!document.RootElement.TryGetProperty("decompilation", out var evidence))
             return null;
         ValidateProperties(evidence);
+        RequireKind(evidence, JsonValueKind.Object);
         foreach (var property in new[] { "candidateCount", "complete", "truncated", "functions" })
             if (!evidence.TryGetProperty(property, out _))
                 throw new InvalidDataException("Ghidra 偽碼證據缺少必要欄位。");
         if (!evidence.TryGetProperty("limits", out var limitValues))
             throw new InvalidDataException("Ghidra 偽碼證據缺少限制。");
+        RequireKind(limitValues, JsonValueKind.Object);
         foreach (var property in new[] { "maxFunctions", "maxFunctionCharacters", "maxTotalCharacters", "functionTimeoutSeconds", "totalTimeoutSeconds" })
             if (!limitValues.TryGetProperty(property, out _))
                 throw new InvalidDataException("Ghidra 偽碼限制缺少必要欄位。");
+        RequireKind(evidence.GetProperty("functions"), JsonValueKind.Array);
         foreach (var function in evidence.GetProperty("functions").EnumerateArray())
+        {
+            RequireKind(function, JsonValueKind.Object);
             foreach (var property in new[] { "address", "status", "code", "diagnostic", "elapsedMilliseconds" })
                 if (!function.TryGetProperty(property, out _))
                     throw new InvalidDataException("Ghidra 逐函式偽碼缺少必要欄位。");
+        }
         var result = evidence.Deserialize<NativeDecompilation>(Options)
             ?? throw new InvalidDataException("Ghidra 偽碼證據不可為 null。");
         if (result.InputSha256 is null || result.InputSha256.Length != 64
@@ -57,6 +63,12 @@ internal static class NativeDecompilationParser
         if (total > result.Limits.MaxTotalCharacters)
             throw new InvalidDataException("Ghidra 偽碼超過全局字元預算。");
         return result;
+    }
+
+    private static void RequireKind(JsonElement element, JsonValueKind kind)
+    {
+        if (element.ValueKind != kind)
+            throw new InvalidDataException("Ghidra 偽碼證據的欄位型別不正確。");
     }
 
     private static void ValidateProperties(JsonElement element)

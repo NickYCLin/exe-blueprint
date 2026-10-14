@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using ExeBlueprint.Analysis;
 using ExeBlueprint.Models;
 
@@ -75,6 +76,112 @@ public sealed class NativeDecompilationTests
         Assert.ThrowsAny<JsonException>(() => NativeDecompilationParser.Parse("{", [Function]));
     }
 
+    [Theory]
+    [InlineData("functions", "[null]")]
+    [InlineData("functions", "[1]")]
+    [InlineData("functions", "[\"worker\"]")]
+    [InlineData("functions", "null")]
+    [InlineData("functions", "{}")]
+    [InlineData("limits", "null")]
+    [InlineData("limits", "[]")]
+    public async Task RejectsNullAndWrongContainerTypesInParserAndAnalyzer(string field, string value)
+    {
+        var evidence = JsonNode.Parse(Json(Evidence()))!["decompilation"]!;
+        evidence[field] = JsonNode.Parse(value);
+        var json = new JsonObject { ["decompilation"] = evidence.DeepClone() }.ToJsonString();
+        Assert.Throws<InvalidDataException>(() => NativeDecompilationParser.Parse(json, [Function]));
+        var result = await ProbeAnalyzer(evidence, "matching", 0);
+        Assert.Equal("none", result.Backend);
+        Assert.Empty(result.Functions);
+        Assert.Null(result.Decompilation);
+        Assert.Contains("型別", result.Note);
+    }
+
+    [Theory]
+    [InlineData("status", "17")]
+    [InlineData("code", "{}")]
+    [InlineData("elapsedMilliseconds", "\"slow\"")]
+    public async Task RejectsWrongRecordTypesInParserAndAnalyzer(string field, string value)
+    {
+        var evidence = JsonNode.Parse(Json(Evidence()))!["decompilation"]!;
+        evidence["functions"]![0]![field] = JsonNode.Parse(value);
+        var json = new JsonObject { ["decompilation"] = evidence.DeepClone() }.ToJsonString();
+        Assert.ThrowsAny<JsonException>(() => NativeDecompilationParser.Parse(json, [Function]));
+        var result = await ProbeAnalyzer(evidence, "matching", 0);
+        Assert.Equal("none", result.Backend);
+        Assert.Empty(result.Functions);
+        Assert.Contains("JSON", result.Note);
+    }
+
+    [Theory]
+    [InlineData("missing", 1)]
+    [InlineData("mismatch", 1)]
+    [InlineData("mismatch", 0)]
+    [InlineData("wrong_type", 1)]
+    [InlineData("duplicate", 1)]
+    public async Task RejectsUnverifiedBaselineRegardlessOfProcessDiagnostic(string checkpointHash, int exitCode)
+    {
+        var result = await ProbeAnalyzer(null, checkpointHash, exitCode);
+        Assert.Equal("none", result.Backend);
+        Assert.Empty(result.Functions);
+        Assert.Null(result.CallGraph);
+        Assert.Null(result.Decompilation);
+        Assert.Contains("SHA256", result.Note);
+        Assert.DoesNotContain("backend_partial", result.Note);
+    }
+
+    [Fact]
+    public async Task PreservesOnlyHashVerifiedBaselineAfterBackendFailure()
+    {
+        var result = await ProbeAnalyzer(null, "matching", 1);
+        Assert.Equal("ghidra", result.Backend);
+        Assert.Single(result.Functions);
+        Assert.Equal("backend_partial", result.Decompilation!.LimitReason);
+        Assert.Equal("unavailable", result.Decompilation.AnalyzerVersion);
+        Assert.False(result.Decompilation.Complete);
+    }
+
+    private static async Task<NativeCodeModel> ProbeAnalyzer(JsonNode? evidence, string checkpointHash, int exitCode)
+    {
+        var directory = Directory.CreateTempSubdirectory("native-provenance-test-").FullName;
+        try
+        {
+            var support = Directory.CreateDirectory(Path.Combine(directory, "support")).FullName;
+            var launcher = Path.Combine(support, OperatingSystem.IsWindows() ? "analyzeHeadless.bat" : "analyzeHeadless");
+            await File.WriteAllTextAsync(launcher, string.Empty);
+            if (!OperatingSystem.IsWindows())
+                File.SetUnixFileMode(launcher, UnixFileMode.UserRead | UnixFileMode.UserExecute);
+            var input = Path.Combine(directory, "synthetic.bin");
+            await File.WriteAllBytesAsync(input, [1, 2, 3]);
+            return await NativeAnalyzer.AnalyzeAsync(input, new()
+            { GhidraInstallDir = directory, NativeDecompilation = new() }, async (request, cancellation) =>
+            {
+                using var config = JsonDocument.Parse(await File.ReadAllTextAsync(request.DecompilationConfigPath!, cancellation));
+                var hash = config.RootElement.GetProperty("inputSha256").GetString()!;
+                var payload = JsonNode.Parse("""
+                    {"schemaVersion":3,"functionCount":1,"functions":[{"name":"worker","address":"00401000","signature":"int worker()","external":false}],"truncated":false,"callGraph":{"calls":[],"truncated":false}}
+                    """)!;
+                if (checkpointHash != "missing")
+                    payload["inputSha256"] = checkpointHash == "wrong_type" ? JsonValue.Create(17)
+                        : JsonValue.Create(checkpointHash == "mismatch" ? new string('b', 64) : hash);
+                if (evidence is not null)
+                {
+                    payload["decompilation"] = evidence.DeepClone();
+                    payload["decompilation"]!["inputSha256"] = hash;
+                }
+                var json = payload.ToJsonString();
+                if (checkpointHash == "duplicate")
+                    json = json.Insert(1, $"\"inputSha256\":\"{hash}\",");
+                await File.WriteAllTextAsync(request.OutputPath, json, cancellation);
+                return new GhidraRunResult(exitCode, string.Empty, "Imported program SHA256 differs from input evidence");
+            }, CancellationToken.None);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     [Fact]
     public async Task MissingBackendAndInvalidLimitsDoNotLaunch()
     {
@@ -123,6 +230,7 @@ public sealed class NativeDecompilationTests
                 var json = JsonSerializer.Serialize(new
                 {
                     schemaVersion = 3, functionCount = 1,
+                    inputSha256 = evidence.InputSha256,
                     functions = new[] { new { name = "worker", address = Function.Address, signature = "int worker()", external = false } },
                     truncated = false, callGraph = new { calls = Array.Empty<object>(), truncated = false },
                     decompilation = evidence

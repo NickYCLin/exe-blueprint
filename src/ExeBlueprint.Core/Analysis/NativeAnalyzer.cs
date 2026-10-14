@@ -132,6 +132,16 @@ internal static class NativeAnalyzer
             }
 
             var json = await ReadOutputJsonAsync(outputPath, cancellationToken).ConfigureAwait(false);
+            if (configPath is not null)
+            {
+                using var checkpoint = JsonDocument.Parse(json);
+                var root = checkpoint.RootElement;
+                if (root.ValueKind != JsonValueKind.Object
+                    || root.EnumerateObject().Count(property => property.Name == "inputSha256") != 1
+                    || root.GetProperty("inputSha256").ValueKind != JsonValueKind.String
+                    || !string.Equals(root.GetProperty("inputSha256").GetString(), inputSha256, StringComparison.OrdinalIgnoreCase))
+                    return Failure("Ghidra checkpoint 缺少實際匯入 SHA256 或與請求不符；拒絕保留函式及呼叫圖。");
+            }
             var parsed = GhidraOutputParser.Parse(json);
             if (!parsed.IsValid)
             {
