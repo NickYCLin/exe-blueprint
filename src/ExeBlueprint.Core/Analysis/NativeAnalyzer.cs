@@ -1,6 +1,8 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Text;
+using System.Text.Json;
+using System.Security.Cryptography;
 using ExeBlueprint.Models;
 
 namespace ExeBlueprint.Analysis;
@@ -70,6 +72,8 @@ internal static class NativeAnalyzer
         {
             return Failure("Ghidra 分析逾時必須大於 0 毫秒。");
         }
+        if (options.NativeDecompilation is { IsValid: false })
+            return Failure("Ghidra 偽碼輸出限制不在安全範圍內。");
 
         var headless = LocateHeadless(options);
         if (headless is null)
@@ -92,6 +96,16 @@ internal static class NativeAnalyzer
             var scriptPath = Path.Combine(workspace, "ExportFunctions.py");
             var outputPath = Path.Combine(workspace, "functions.json");
             await WriteExportScriptAsync(scriptPath, cancellationToken).ConfigureAwait(false);
+            string? configPath = null;
+            string? inputSha256 = null;
+            if (options.NativeDecompilation is { } limits)
+            {
+                await using var input = File.OpenRead(filePath);
+                inputSha256 = Convert.ToHexStringLower(await SHA256.HashDataAsync(input, cancellationToken).ConfigureAwait(false));
+                configPath = Path.Combine(workspace, "decompilation.json");
+                await File.WriteAllTextAsync(configPath, JsonSerializer.Serialize(new { inputSha256, limits },
+                    new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }), cancellationToken).ConfigureAwait(false);
+            }
 
             var run = await processRunner(
                     new GhidraRunRequest(
@@ -101,11 +115,11 @@ internal static class NativeAnalyzer
                         Path.GetDirectoryName(scriptPath)!,
                         Path.GetFileName(scriptPath),
                         outputPath,
-                        options.NativeAnalysisTimeoutMs),
+                        options.NativeAnalysisTimeoutMs) { DecompilationConfigPath = configPath },
                     cancellationToken)
                 .ConfigureAwait(false);
 
-            if (run.ExitCode != 0)
+            if (run.ExitCode != 0 && !(configPath is not null && File.Exists(outputPath)))
             {
                 var diagnostic = FormatDiagnostic(run.StandardErrorTail, run.StandardOutputTail);
                 return Failure($"Ghidra 執行失敗（exit code {run.ExitCode}）{diagnostic}");
@@ -123,6 +137,19 @@ internal static class NativeAnalyzer
             {
                 return Failure(parsed.Error ?? "Ghidra JSON 輸出無法解析。");
             }
+            var evidence = configPath is null ? null : NativeDecompilationParser.Parse(json, parsed.Functions);
+            if (evidence is not null && (!string.Equals(evidence.InputSha256, inputSha256, StringComparison.OrdinalIgnoreCase)
+                || evidence.Limits != options.NativeDecompilation))
+                return Failure("Ghidra 偽碼證據的輸入 SHA256 或限制與請求不符。");
+            if (configPath is not null && (evidence is null || run.ExitCode != 0))
+            {
+                evidence = (evidence ?? new NativeDecompilation
+                {
+                    InputSha256 = inputSha256!, AnalyzerVersion = "unavailable",
+                    Limits = options.NativeDecompilation!,
+                    CandidateCount = parsed.Functions.Count(function => !function.IsExternal)
+                }) with { Complete = false, Truncated = true, LimitReason = run.TimedOut ? "process_timeout" : "backend_partial" };
+            }
 
             return new NativeCodeModel
             {
@@ -131,7 +158,10 @@ internal static class NativeAnalyzer
                 Functions = parsed.Functions,
                 FunctionsTruncated = parsed.Truncated,
                 CallGraph = parsed.CallGraph,
-                Note = BuildOutputNote(parsed)
+                Decompilation = evidence,
+                Note = evidence is { Complete: false } || evidence is { Truncated: true }
+                    ? $"{BuildOutputNote(parsed)} Ghidra 偽碼結果不完整，請查看逐函式狀態及限制。".Trim()
+                    : BuildOutputNote(parsed)
             };
         }
         catch (GhidraUnsafeCleanupException exception)
@@ -158,6 +188,10 @@ internal static class NativeAnalyzer
                 or DecoderFallbackException)
         {
             return Failure($"Ghidra 分析失敗：{exception.Message}");
+        }
+        catch (JsonException exception)
+        {
+            return Failure($"Ghidra 偽碼 JSON 無法解析：{exception.Message}");
         }
         finally
         {
@@ -264,6 +298,8 @@ internal static class NativeAnalyzer
             }
 
             cancellationToken.ThrowIfCancellationRequested();
+            if (request.DecompilationConfigPath is not null)
+                return new GhidraRunResult(-1, output.Value.StandardOutput, output.Value.StandardError) { TimedOut = true };
             throw new InvalidOperationException($"Ghidra 分析超過 {request.TimeoutMs} 毫秒逾時。");
         }
 
@@ -280,7 +316,7 @@ internal static class NativeAnalyzer
     {
         var isWindowsBatch = OperatingSystem.IsWindows()
             && Path.GetExtension(request.LauncherPath).ToLowerInvariant() is ".bat" or ".cmd";
-        var arguments = new[]
+        var arguments = new List<string>
         {
             request.WorkspacePath,
             "exe-blueprint",
@@ -293,6 +329,8 @@ internal static class NativeAnalyzer
             request.OutputPath,
             "-deleteProject"
         };
+        if (request.DecompilationConfigPath is not null)
+            arguments.Insert(arguments.Count - 1, request.DecompilationConfigPath);
         var startInfo = new ProcessStartInfo
         {
             FileName = isWindowsBatch ? GetCommandInterpreter() : request.LauncherPath,
@@ -504,11 +542,17 @@ internal sealed record GhidraRunRequest(
     string ScriptDirectory,
     string ScriptName,
     string OutputPath,
-    int TimeoutMs);
+    int TimeoutMs)
+{
+    public string? DecompilationConfigPath { get; init; }
+}
 
 internal sealed record GhidraRunResult(
     int ExitCode,
     string StandardOutputTail,
-    string StandardErrorTail);
+    string StandardErrorTail)
+{
+    public bool TimedOut { get; init; }
+}
 
 internal sealed class GhidraUnsafeCleanupException(string message) : Exception(message);

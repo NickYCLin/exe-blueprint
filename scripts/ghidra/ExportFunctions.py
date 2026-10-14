@@ -11,6 +11,7 @@
 # 唯一目標為函式範圍外另一個入口的直接 JUMP 記為 tail call，不推測 ABI 或資料指標。
 
 import json
+import os
 
 args = getScriptArgs()
 out = args[0]
@@ -28,6 +29,8 @@ max_json_chars = 24 * 1024 * 1024
 fields_truncated = False
 output_budget_truncated = False
 estimated_json_chars = 512
+if len(args) > 1:
+    estimated_json_chars += 8192
 
 def bounded(value):
     global fields_truncated
@@ -177,11 +180,119 @@ def export_calls():
 
 export_calls()
 monitor.checkCancelled()
-with open(out, "w") as fh:
-    json.dump({
+payload = {
         "schemaVersion": 3,
         "functionCount": function_count,
         "functions": funcs,
         "truncated": truncated,
         "callGraph": {"calls": calls, "truncated": graph_truncated},
-    }, fh, separators=(",", ":"))
+    }
+
+def checkpoint():
+    temporary = out + ".tmp"
+    with open(temporary, "w") as fh:
+        json.dump(payload, fh, separators=(",", ":"))
+    if len(args) > 1:
+        from java.nio.file import Files, Paths, StandardCopyOption
+        Files.move(Paths.get(temporary), Paths.get(out), StandardCopyOption.REPLACE_EXISTING)
+    else:
+        os.rename(temporary, out)
+
+checkpoint()
+if len(args) > 1:
+    from ghidra.app.decompiler import DecompInterface
+    from ghidra.framework import Application
+    from java.lang import System
+    with open(args[1], "r") as fh:
+        config = json.load(fh)
+    imported_sha256 = str(currentProgram.getExecutableSHA256()).lower()
+    if imported_sha256 != config["inputSha256"].lower():
+        raise ValueError("Imported program SHA256 differs from input evidence")
+    limits = config["limits"]
+    clock = lambda: System.nanoTime() / 1000000000.0
+    started = clock()
+    candidates = [f for f in function_objects if not f.isExternal()]
+    evidence = {
+        "inputSha256": config["inputSha256"],
+        "analyzerVersion": str(Application.getApplicationVersion()),
+        "limits": limits,
+        "candidateCount": len(candidates),
+        "complete": False,
+        "truncated": truncated,
+        "limitReason": "function_inventory" if truncated else None,
+        "functions": [],
+    }
+    payload["decompilation"] = evidence
+    checkpoint()
+    decompiler = DecompInterface()
+    total_characters = 0
+
+    def fit_code(value, allowance):
+        characters = []
+        units = 0
+        for character in value:
+            size = 2 if ord(character) > 0xffff else 1
+            if units + size > allowance:
+                break
+            characters.append(character)
+            units += size
+        if characters and 0xd800 <= ord(characters[-1]) <= 0xdbff:
+            characters.pop()
+            units -= 1
+        return u"".join(characters), units
+
+    try:
+        opened = decompiler.openProgram(currentProgram)
+        for function in candidates:
+            monitor.checkCancelled()
+            remaining = limits["totalTimeoutSeconds"] - (clock() - started)
+            reason = None
+            if len(evidence["functions"]) >= limits["maxFunctions"]:
+                reason = "function_count"
+            elif total_characters >= limits["maxTotalCharacters"]:
+                reason = "total_characters"
+            elif remaining < 1:
+                reason = "total_time"
+            if reason:
+                evidence["truncated"] = True
+                evidence["limitReason"] = reason
+                break
+            entry = {"address": address_text(function.getEntryPoint()),
+                     "status": "failed", "code": None, "diagnostic": None,
+                     "elapsedMilliseconds": 0}
+            function_started = clock()
+            try:
+                if not opened:
+                    entry["diagnostic"] = "Decompiler could not open program"
+                else:
+                    result = decompiler.decompileFunction(function, min(
+                        limits["functionTimeoutSeconds"], int(remaining)), monitor)
+                    monitor.checkCancelled()
+                    if result.isTimedOut():
+                        entry["status"] = "timeout"
+                    elif result.decompileCompleted() and result.getDecompiledFunction() is not None:
+                        code = unicode(result.getDecompiledFunction().getC())
+                        allowance = min(limits["maxFunctionCharacters"],
+                                        limits["maxTotalCharacters"] - total_characters)
+                        entry["code"], units = fit_code(code, allowance)
+                        entry["status"] = "truncated" if entry["code"] != code else "success"
+                        total_characters += units
+                    else:
+                        entry["diagnostic"] = unicode(result.getErrorMessage())[:1000]
+            except Exception as error:
+                monitor.checkCancelled()
+                entry["diagnostic"] = unicode(error)[:1000]
+            entry["elapsedMilliseconds"] = int((clock() - function_started) * 1000)
+            if entry["status"] == "truncated":
+                evidence["truncated"] = True
+            available = max_json_chars - len(json.dumps(payload, separators=(",", ":")))
+            if len(json.dumps(entry, separators=(",", ":"))) + 2 > available:
+                evidence["truncated"] = True
+                evidence["limitReason"] = "json_characters"
+                break
+            evidence["functions"].append(entry)
+            checkpoint()
+        evidence["complete"] = len(evidence["functions"]) == len(candidates) and not truncated
+    finally:
+        decompiler.dispose()
+        checkpoint()

@@ -39,4 +39,21 @@ public sealed record AnalysisOptions
 
     // 單一原生檔的 Ghidra 分析逾時（毫秒）。
     public int NativeAnalysisTimeoutMs { get; init; } = 180_000;
+
+    public NativeDecompilationLimits? NativeDecompilation { get; init; }
+}
+
+public sealed record NativeDecompilationLimits
+{
+    public int MaxFunctions { get; init; } = 256;
+    public int MaxFunctionCharacters { get; init; } = 65_536;
+    public int MaxTotalCharacters { get; init; } = 1_048_576;
+    public int FunctionTimeoutSeconds { get; init; } = 10;
+    public int TotalTimeoutSeconds { get; init; } = 60;
+
+    internal bool IsValid => MaxFunctions is > 0 and <= 4096
+        && MaxFunctionCharacters is > 0 and <= 262_144
+        && MaxTotalCharacters is > 0 and <= 8_388_608
+        && FunctionTimeoutSeconds is > 0 and <= 60
+        && TotalTimeoutSeconds is > 0 and <= 600;
 }
