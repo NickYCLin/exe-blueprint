@@ -15,6 +15,29 @@ public sealed record NativeCodeModel
 
     // null 表示後端沒有匯出呼叫圖，與已掃描但沒有呼叫不同。
     public NativeCallGraph? CallGraph { get; init; }
+
+    public NativeDecompilation? Decompilation { get; init; }
+}
+
+public sealed record NativeDecompilation
+{
+    public required string InputSha256 { get; init; }
+    public required string AnalyzerVersion { get; init; }
+    public required ExeBlueprint.Analysis.NativeDecompilationLimits Limits { get; init; }
+    public int CandidateCount { get; init; }
+    public bool Complete { get; init; }
+    public bool Truncated { get; init; }
+    public string? LimitReason { get; init; }
+    public IReadOnlyList<NativePseudocode> Functions { get; init; } = [];
+}
+
+public sealed record NativePseudocode
+{
+    public required string Address { get; init; }
+    public required string Status { get; init; }
+    public string? Code { get; init; }
+    public string? Diagnostic { get; init; }
+    public long ElapsedMilliseconds { get; init; }
 }
 
 public sealed record NativeCallGraph

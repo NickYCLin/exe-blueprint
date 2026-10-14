@@ -6,6 +6,9 @@ import re
 import tempfile
 from types import SimpleNamespace
 import unittest
+import sys
+import os
+from unittest.mock import patch
 
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts/ghidra/ExportFunctions.py"
@@ -62,7 +65,8 @@ class ExportFunctionsTests(unittest.TestCase):
         }
         return functions, refs
 
-    def export(self, functions=None, refs=None, limits=None, check_cancelled=lambda: None):
+    def export(self, functions=None, refs=None, limits=None, check_cancelled=lambda: None,
+               decompilation=None, decompiler=None, clock=lambda: 0):
         if functions is None:
             functions, refs = self.fixture()
         refs = refs or {}
@@ -78,6 +82,7 @@ class ExportFunctionsTests(unittest.TestCase):
             getReferencesFrom=lambda address: refs.get(address, []),
         )
         program = SimpleNamespace(
+            getExecutableSHA256=lambda: "a" * 64,
             getFunctionManager=lambda: manager,
             getListing=lambda: SimpleNamespace(getInstructions=lambda body, _: iter(body.instructions)),
             getReferenceManager=lambda: reference_manager,
@@ -89,13 +94,65 @@ class ExportFunctionsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "functions.json"
             environment = {
-                "getScriptArgs": lambda: [str(output)],
+                "getScriptArgs": lambda: [str(output)] + ([str(output) + ".config"] if decompilation else []),
                 "currentProgram": program,
                 "monitor": SimpleNamespace(checkCancelled=check_cancelled),
+                "unicode": str,
             }
-            exec(compile(source, str(SCRIPT), "exec"), environment)
+            if decompilation:
+                Path(str(output) + ".config").write_text(json.dumps({
+                    "inputSha256": "a" * 64, "limits": decompilation}), encoding="utf-8")
+            modules = {
+                "ghidra.app.decompiler": SimpleNamespace(DecompInterface=lambda: decompiler),
+                "ghidra.framework": SimpleNamespace(Application=SimpleNamespace(getApplicationVersion=lambda: "test")),
+                "java.lang": SimpleNamespace(System=SimpleNamespace(nanoTime=clock)),
+                "java.nio.file": SimpleNamespace(Files=SimpleNamespace(move=lambda source, target, _: os.replace(source, target)),
+                    Paths=SimpleNamespace(get=lambda value: value), StandardCopyOption=SimpleNamespace(REPLACE_EXISTING=0)),
+            }
+            with patch.dict(sys.modules, modules):
+                exec(compile(source, str(SCRIPT), "exec"), environment)
             raw = output.read_bytes()
             return json.loads(raw), len(raw)
+
+    def pseudocode(self, code="if (x) return 1;", timeout=False, failed=False, **overrides):
+        result = SimpleNamespace(isTimedOut=lambda: timeout, decompileCompleted=lambda: not failed,
+            getDecompiledFunction=lambda: SimpleNamespace(getC=lambda: code), getErrorMessage=lambda: "failure")
+        backend = SimpleNamespace(openProgram=lambda _: True,
+            decompileFunction=lambda *_: result, dispose=lambda: None)
+        limits = dict(maxFunctions=256, maxFunctionCharacters=65536, maxTotalCharacters=1048576,
+                      functionTimeoutSeconds=10, totalTimeoutSeconds=60)
+        limits.update(overrides)
+        return self.export(decompilation=limits, decompiler=backend)[0]["decompilation"]
+
+    def test_pseudocode_success_timeout_and_failure(self):
+        for arguments, status in [({}, "success"), ({"timeout": True}, "timeout"), ({"failed": True}, "failed")]:
+            evidence = self.pseudocode(**arguments)
+            self.assertTrue(evidence["complete"])
+            self.assertEqual([status, status], [entry["status"] for entry in evidence["functions"]])
+            self.assertEqual("a" * 64, evidence["inputSha256"])
+
+    def test_pseudocode_character_and_function_limits(self):
+        evidence = self.pseudocode(maxFunctionCharacters=3, maxTotalCharacters=4)
+        self.assertTrue(evidence["truncated"])
+        self.assertEqual([3, 1], [len(entry["code"]) for entry in evidence["functions"]])
+        evidence = self.pseudocode(maxFunctions=1)
+        self.assertFalse(evidence["complete"])
+        self.assertEqual("function_count", evidence["limitReason"])
+
+    def test_pseudocode_total_time_limit(self):
+        backend = SimpleNamespace(openProgram=lambda _: True, dispose=lambda: None)
+        ticks = iter([0, 2_000_000_000])
+        limits = dict(maxFunctions=1, maxFunctionCharacters=10, maxTotalCharacters=10,
+                      functionTimeoutSeconds=1, totalTimeoutSeconds=1)
+        evidence = self.export(decompilation=limits, decompiler=backend,
+                               clock=lambda: next(ticks))[0]["decompilation"]
+        self.assertEqual("total_time", evidence["limitReason"])
+        self.assertEqual([], evidence["functions"])
+
+    def test_pseudocode_utf16_budget_does_not_split_non_bmp_character(self):
+        evidence = self.pseudocode(code="a\U0001f642b", maxFunctionCharacters=2)
+        self.assertEqual(["a", "a"], [entry["code"] for entry in evidence["functions"]])
+        self.assertTrue(evidence["truncated"])
 
     def test_exports_direct_external_recursive_and_unresolved_calls(self):
         result, _ = self.export()

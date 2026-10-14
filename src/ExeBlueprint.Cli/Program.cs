@@ -1,6 +1,7 @@
 using System.Reflection;
 using System.Text;
 using ExeBlueprint.Application;
+using ExeBlueprint.Analysis;
 
 Console.OutputEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
 using var cancellation = new CancellationTokenSource();
@@ -45,7 +46,8 @@ static async Task<int> RunAsync(string[] args, CancellationToken cancellationTok
             EmitRust = parsed.EmitRust,
             EmitGo = parsed.EmitGo,
             EnableNativeAnalysis = parsed.Native,
-            GhidraInstallDir = parsed.GhidraDir
+            GhidraInstallDir = parsed.GhidraDir,
+            NativeDecompilation = parsed.Decompile ? new NativeDecompilationLimits() : null
         }, new ConsoleAnalysisProgress(), cancellationToken);
 
         foreach (var skeleton in result.Skeletons)
@@ -108,6 +110,7 @@ static ParsedArguments ParseArguments(string[] args)
     var emitRust = false;
     var emitGo = false;
     var native = false;
+    var decompile = false;
     string? ghidraDir = null;
 
     while (index < args.Length)
@@ -115,6 +118,10 @@ static ParsedArguments ParseArguments(string[] args)
         var option = args[index++];
         switch (option)
         {
+            case "--native-pseudocode":
+                decompile = true;
+                native = true;
+                break;
             case "--native":
                 native = true;
                 break;
@@ -172,7 +179,7 @@ static ParsedArguments ParseArguments(string[] args)
     if (inventoryOnly && (emitCSharp || emitCpp || emitRust || emitGo || native))
         throw new ArgumentException("--inventory 只盤點結構，不能同時產生骨架或啟用 Ghidra；請另做深入分析。");
     return new ParsedArguments(inputPath, outputDirectory, force, jsonOnly, emitCSharp, emitCpp, emitRust, emitGo, native,
-        ghidraDir, inventoryOnly, sourceMode, sourceAnalysis);
+        ghidraDir, inventoryOnly, sourceMode, sourceAnalysis, decompile);
 }
 
 static string FormatTechnologies(IEnumerable<string> technologies)
@@ -204,6 +211,7 @@ static void PrintHelp()
     Console.WriteLine("  --emit-rust          另外產生 Rust 型別骨架");
     Console.WriteLine("  --emit-go            另外產生 Go 型別骨架");
     Console.WriteLine("  --native             對原生 PE 用 Ghidra 抽函式（需 GHIDRA_INSTALL_DIR）");
+    Console.WriteLine("  --native-pseudocode  額外輸出受預算限制的逐函式偽碼（預設關閉）");
     Console.WriteLine("  --ghidra <目錄>      指定 Ghidra 安裝目錄並開啟原生分析");
     Console.WriteLine("  --force              覆寫既有 blueprint.json 與 REPORT.md");
     Console.WriteLine("  -v, --version        顯示版本");
@@ -225,7 +233,8 @@ internal sealed record ParsedArguments(
     string? GhidraDir,
     bool InventoryOnly,
     bool SourceMode,
-    bool SourceAnalysis);
+    bool SourceAnalysis,
+    bool Decompile);
 
 internal sealed class ConsoleAnalysisProgress : IProgress<BlueprintExportProgress>
 {

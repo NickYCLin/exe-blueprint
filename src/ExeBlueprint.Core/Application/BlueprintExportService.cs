@@ -34,6 +34,8 @@ public sealed record BlueprintExportRequest
     public bool EnableNativeAnalysis { get; init; }
 
     public string? GhidraInstallDir { get; init; }
+
+    public NativeDecompilationLimits? NativeDecompilation { get; init; }
 }
 
 public sealed record BlueprintExportProgress(string Message, int? CompletedFiles = null, int? TotalFiles = null);
@@ -88,7 +90,8 @@ public sealed class BlueprintExportService
             EnableSourceAnalysis = request.EnableSourceAnalysis,
             ExcludedOutputDirectory = outputDirectory,
             EnableNativeAnalysis = request.EnableNativeAnalysis,
-            GhidraInstallDir = NullIfWhiteSpace(request.GhidraInstallDir)
+            GhidraInstallDir = NullIfWhiteSpace(request.GhidraInstallDir),
+            NativeDecompilation = request.NativeDecompilation
         };
         var fileProgress = new InlineProgress<AnalysisProgress>(value => progress?.Report(value.Stage switch
         {
