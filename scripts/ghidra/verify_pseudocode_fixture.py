@@ -21,7 +21,7 @@ def main():
                   functionTimeoutSeconds=10, totalTimeoutSeconds=60)
     headless = arguments.ghidra / "support" / ("analyzeHeadless.bat" if os.name == "nt" else "analyzeHeadless")
 
-    def analyze(label, settings=None):
+    def analyze(label, settings=None, requested_digest=None, expect_rejection=False):
         output = (arguments.output / (label + ".json")).resolve()
         command = [str(headless.resolve())]
         with tempfile.TemporaryDirectory(prefix="pseudocode-verification-") as project:
@@ -30,20 +30,27 @@ def main():
                             "-postScript", "ExportFunctions.py", str(output)])
             if settings is not None:
                 config = arguments.output / (label + ".config.json")
-                config.write_text(json.dumps(dict(inputSha256=digest, limits=settings)), encoding="utf-8")
+                config.write_text(json.dumps(dict(inputSha256=requested_digest or digest, limits=settings)), encoding="utf-8")
                 command.append(str(config.resolve()))
             command.append("-deleteProject")
             with (arguments.output / (label + ".log")).open("w", encoding="utf-8") as log:
-                subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, timeout=180, check=True)
+                subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, timeout=180, check=not expect_rejection)
+        if expect_rejection:
+            assert not output.exists(), "Mismatched import published a checkpoint"
+            assert "Imported program SHA256 differs from input evidence" in (arguments.output / (label + ".log")).read_text(encoding="utf-8")
+            return None
         return json.loads(output.read_text(encoding="utf-8"))
 
     baseline = analyze("baseline")
     enabled = analyze("enabled", limits)
     reduced = analyze("reduced", dict(limits, maxFunctions=2, maxFunctionCharacters=80, maxTotalCharacters=120))
+    wrong_digest = ("0" if digest[0] != "0" else "1") + digest[1:]
+    analyze("mismatch", limits, requested_digest=wrong_digest, expect_rejection=True)
     for result in (enabled, reduced):
         for key in ("schemaVersion", "functionCount", "functions", "truncated", "callGraph"):
             assert baseline[key] == result[key], key
         assert result["decompilation"]["inputSha256"] == digest
+        assert result["inputSha256"] == digest
     evidence = enabled["decompilation"]
     assert evidence["complete"] and not evidence["truncated"]
     functions = {function["name"]: function["address"] for function in enabled["functions"]}
@@ -65,7 +72,7 @@ def main():
     summary = dict(inputSha256=digest, analyzerVersion=evidence["analyzerVersion"],
                    functions=functions, statuses={name: bodies[address]["status"] for name, address in functions.items()},
                    callCount=len(edges), graphCompatible=True, reducedCharacters=sizes,
-                   reducedReason=partial["limitReason"])
+                   reducedReason=partial["limitReason"], mismatchedInputRejected=True)
     (arguments.output / "acceptance.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(json.dumps(summary, indent=2))
 
