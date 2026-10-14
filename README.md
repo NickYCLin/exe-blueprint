@@ -113,6 +113,8 @@ dotnet run --project ./src/ExeBlueprint.Cli -- analyze ./App.dll --json-only
 dotnet run --project ./src/ExeBlueprint.Cli -- analyze ./Native.exe --native --ghidra ./ghidra
 ```
 
+需要逐函式偽碼時，使用 `--native-pseudocode --ghidra ./ghidra`；此選項同時開啟原生分析，預設不啟用。JSON 的 `nativeCode.decompilation` 保留輸入 SHA256、Ghidra 版本、函式位址、狀態與限制，函式清單和 CALL 圖維持相容。預設最多 256 個函式，每函式 65,536／全局 1,048,576 個 UTF-16 字元，每函式 10 秒／全局 60 秒；仍受整個 headless 程序的 180 秒期限限制。偽碼不是可直接執行的重建程式，完整性與真 Ghidra 驗證方式見[偽碼驗收](docs/native-pseudocode-acceptance.md)。
+
 找不到 Ghidra 時，其他分析仍會繼續，原生分析會附上略過原因。匯出腳本使用 Jython；Ghidra 12.1.3 需先安裝隨附的 Jython 擴充，步驟與實測範圍見[原生分析驗收](docs/native-acceptance.md)。輸出目錄已有報告時預設不覆寫；需要覆寫時加上 `--force`。完整參數可用 `dotnet run --project ./src/ExeBlueprint.Cli -- --help` 查看。
 
 ### 大型系統先盤點
