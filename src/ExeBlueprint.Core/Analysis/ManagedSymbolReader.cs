@@ -11,6 +11,7 @@ using System.Resources;
 using System.Security.Cryptography;
 using System.Text;
 using ExeBlueprint.Models;
+using ExeBlueprint.Generation;
 
 namespace ExeBlueprint.Analysis;
 
@@ -204,7 +205,7 @@ internal static class ManagedSymbolReader
                             il,
                             decoded,
                             isInstance,
-                            ReadParameterNames(metadata, method),
+                            ReadReconstructionParameterNames(metadata, method),
                             reconstructionSignature.ParameterTypes,
                             reconstructionSignature.ReturnType,
                             localTypes,
@@ -244,7 +245,7 @@ internal static class ManagedSymbolReader
                             methodHandle,
                             typeHandle,
                             definition.BaseType,
-                            ReadParameterNames(metadata, method),
+                            ReadReconstructionParameterNames(metadata, method),
                             reconstructionSignature,
                             genericParameterResult,
                             localTypes,
@@ -2818,7 +2819,7 @@ internal static class ManagedSymbolReader
             }
 
             argument = new ConstructorArgument(
-                $"typeof({typeParameter.Text})",
+                $"typeof({typeParameter.BodyText})",
                 CreateCliType(systemType, enumTypes),
                 systemType,
                 IsFoldedExpression: true);
@@ -3019,7 +3020,7 @@ internal static class ManagedSymbolReader
             }
 
             argument = new ConstructorArgument(
-                $"default({localType.Text})",
+                $"default({localType.BodyText})",
                 CreateCliType(localType, enumTypes),
                 localType,
                 IsFoldedExpression: true);
@@ -3177,7 +3178,7 @@ internal static class ManagedSymbolReader
             }
 
             argument = new ConstructorArgument(
-                $"new {nullableSignature.Text}({source.Expression})",
+                $"new {nullableSignature.BodyText}({source.Expression})",
                 CreateCliType(nullableSignature, enumTypes),
                 nullableSignature,
                 IsFoldedExpression: true);
@@ -3480,7 +3481,7 @@ internal static class ManagedSymbolReader
                 return false;
             }
 
-            rendered = $"(({targetType.Text})null!)";
+            rendered = $"(({targetType.BodyText})null!)";
             return true;
         }
 
@@ -3538,7 +3539,7 @@ internal static class ManagedSymbolReader
                 sourceSignature,
                 target.Signature))
         {
-            rendered = $"({targetType.Text}){expression}";
+            rendered = $"({targetType.BodyText}){expression}";
             return true;
         }
 
@@ -3572,7 +3573,7 @@ internal static class ManagedSymbolReader
             return false;
         }
 
-        rendered = $"unchecked(({targetType.Text}){expression})";
+        rendered = $"unchecked(({targetType.BodyText}){expression})";
         return true;
     }
 
@@ -4230,7 +4231,7 @@ internal static class ManagedSymbolReader
                     region.HandlerOffset,
                     region.HandlerLength,
                     region.Kind == ExceptionRegionKind.Catch && !region.CatchType.IsNil
-                        ? GetTypeName(metadata, region.CatchType)
+                        ? GetBodyTypeName(metadata, region.CatchType)
                         : null,
                     region.Kind == ExceptionRegionKind.Filter ? region.FilterOffset : -1))
                 .ToArray();
@@ -5033,7 +5034,9 @@ internal static class ManagedSymbolReader
 
         public static implicit operator CliType(string value) => new(value);
 
-        public override string ToString() => Text;
+        public string BodyText => StructuralSignature?.BodyText ?? Text;
+
+        public override string ToString() => BodyText;
     }
 
     internal readonly record struct ExceptionRegionInfo(
@@ -5170,7 +5173,7 @@ internal static class ManagedSymbolReader
                 il,
                 decoded,
                 isInstance,
-                ReadParameterNames(metadata, method),
+                ReadReconstructionParameterNames(metadata, method),
                 signature.ParameterTypes.Select(type => CreateCliType(type, enumTypes)).ToArray(),
                 CreateCliType(signature.ReturnType, enumTypes),
                 localTypes: [],
@@ -5341,7 +5344,7 @@ internal static class ManagedSymbolReader
                 methodHandle,
                 declaringType,
                 definition.BaseType,
-                ReadParameterNames(metadata, method),
+                ReadReconstructionParameterNames(metadata, method),
                 new MethodReconstructionSignature(
                     CreateCliType(signature.ReturnType, enumTypes),
                     signature.ParameterTypes.Select(type => CreateCliType(type, enumTypes)).ToArray()),
@@ -6556,7 +6559,7 @@ internal static class ManagedSymbolReader
             return null;
         }
 
-        var catchType = GetTypeName(
+        var catchType = GetBodyTypeName(
             context.Metadata,
             MetadataTokens.EntityHandle(BinaryPrimitives.ReadInt32LittleEndian(
                 context.Il.AsSpan(isInstance.OperandOffset, 4))));
@@ -6987,7 +6990,7 @@ internal static class ManagedSymbolReader
         if (context.ExpressionTypes.TryGetValue(selector, out var selectorType) &&
             IsPotentialEnumType(selectorType.Text))
         {
-            return $"unchecked(({selectorType.Text}){value})";
+            return $"unchecked(({selectorType.BodyText}){value})";
         }
 
         return value.ToString(CultureInfo.InvariantCulture);
@@ -8026,7 +8029,7 @@ internal static class ManagedSymbolReader
                 PushExpression(
                     context,
                     stack,
-                    $"(({castType.Text}){castValue})",
+                    $"(({castType.BodyText}){castValue})",
                     castType);
                 return true;
             case "isinst":
@@ -8047,7 +8050,7 @@ internal static class ManagedSymbolReader
                 PushExpression(
                     context,
                     stack,
-                    $"({instValue} as {instType.Text})",
+                    $"({instValue} as {instType.BodyText})",
                     instType);
                 return true;
 
@@ -9106,7 +9109,7 @@ internal static class ManagedSymbolReader
             return "var";
         }
 
-        return type.Text;
+        return type.BodyText;
     }
 
     // 編譯器產生的名稱（狀態機、lambda、匿名型別）沒辦法在 C# 直接寫出來，碰到就放棄整個方法。
@@ -9207,7 +9210,7 @@ internal static class ManagedSymbolReader
             return TryEmitOperator(context, info, args, stack);
         }
 
-        var target = info.DeclaringType;
+        var target = info.DeclaringCliType.BodyText;
         if (info.HasThis &&
             !TryRenderInstanceCallTarget(
                 context,
@@ -9224,7 +9227,7 @@ internal static class ManagedSymbolReader
         {
             if (info.ParamCount == 0)
             {
-                PushExpression(context, stack, $"{targetPrefix}{info.Name["get_".Length..]}", info.ReturnType);
+                PushExpression(context, stack, $"{targetPrefix}{CSharpSkeletonGenerator.SafeName(info.Name["get_".Length..])}", info.ReturnType);
                 return true;
             }
 
@@ -9246,7 +9249,7 @@ internal static class ManagedSymbolReader
 
             if (info.ParamCount == 1)
             {
-                statements.Add($"{targetPrefix}{info.Name["set_".Length..]} = {args[0]};");
+                statements.Add($"{targetPrefix}{CSharpSkeletonGenerator.SafeName(info.Name["set_".Length..])} = {args[0]};");
                 return true;
             }
 
@@ -9260,8 +9263,8 @@ internal static class ManagedSymbolReader
         }
 
         var methodName = info.GenericArguments.Count == 0
-            ? info.Name
-            : $"{info.Name}<{string.Join(", ", info.GenericArguments)}>";
+            ? CSharpSkeletonGenerator.SafeName(info.Name)
+            : $"{CSharpSkeletonGenerator.SafeName(info.Name)}<{string.Join(", ", info.GenericArguments)}>";
         var call = $"{targetPrefix}{methodName}({string.Join(", ", args)})";
         if (info.ReturnsVoid)
         {
@@ -9405,7 +9408,7 @@ internal static class ManagedSymbolReader
 
         // IL callvirt 會保留宣告 slot；C# 若直接用 concrete receiver，可能改綁到同名 public member。
         // 明確轉成 metadata declaring interface，保留 explicit interface dispatch、overload 與回傳型別。
-        target = $"(({info.DeclaringType}){receiver})";
+        target = $"(({info.DeclaringCliType.BodyText}){receiver})";
         return true;
     }
 
@@ -9652,7 +9655,7 @@ internal static class ManagedSymbolReader
         var expression = info.ArrayPseudoMember is
         { Kind: ArrayPseudoMemberKind.Constructor } arrayConstructor
             ? $"new {arrayConstructor.ElementType}[{string.Join(", ", args)}]"
-            : $"new {info.DeclaringType}({string.Join(", ", args)})";
+            : $"new {info.DeclaringCliType.BodyText}({string.Join(", ", args)})";
         PushExpression(context, stack, expression, info.DeclaringCliType);
         if (info.ArrayPseudoMember is null)
         {
@@ -9740,7 +9743,7 @@ internal static class ManagedSymbolReader
 
         rendered = IsNumericOrReferenceParameter(parameterType?.Text)
             ? argument
-            : $"unchecked(({parameterType?.Text}){argument})";
+            : $"unchecked(({parameterType?.BodyText}){argument})";
         return true;
     }
 
@@ -9844,7 +9847,7 @@ internal static class ManagedSymbolReader
                 return false;
             }
 
-            rendered = $"unchecked(({targetType.Text}){expression})";
+            rendered = $"unchecked(({targetType.BodyText}){expression})";
             return true;
         }
 
@@ -9873,7 +9876,7 @@ internal static class ManagedSymbolReader
             return false;
         }
 
-        rendered = $"unchecked(({targetType.Text}){expression})";
+        rendered = $"unchecked(({targetType.BodyText}){expression})";
         return true;
     }
 
@@ -10439,7 +10442,7 @@ internal static class ManagedSymbolReader
                     }
                 }
 
-                var genericArguments = decodedGenericArguments.Select(type => type.Text).ToArray();
+                var genericArguments = decodedGenericArguments.Select(type => type.BodyText).ToArray();
                 return resolved with
                 {
                     ReturnType = instantiatedReturnType,
@@ -10928,7 +10931,7 @@ internal static class ManagedSymbolReader
                             AreSameConstructorSignature(signature.ReturnType, elementType):
                 pseudoMember = new ArrayPseudoMemberInfo(
                     ArrayPseudoMemberKind.Get,
-                    elementType.Text,
+                    elementType.BodyText,
                     rank);
                 return true;
 
@@ -10937,7 +10940,7 @@ internal static class ManagedSymbolReader
                             AreSameConstructorSignature(parameters[^1], elementType):
                 pseudoMember = new ArrayPseudoMemberInfo(
                     ArrayPseudoMemberKind.Set,
-                    elementType.Text,
+                    elementType.BodyText,
                     rank);
                 return true;
 
@@ -10946,7 +10949,7 @@ internal static class ManagedSymbolReader
                               signature.ReturnType.PrimitiveType == PrimitiveTypeCode.Void:
                 pseudoMember = new ArrayPseudoMemberInfo(
                     ArrayPseudoMemberKind.Constructor,
-                    elementType.Text,
+                    elementType.BodyText,
                     rank);
                 return true;
 
@@ -12422,7 +12425,7 @@ internal static class ManagedSymbolReader
             return false;
         }
 
-        target = $"{field.DeclaringType}.";
+        target = $"{field.DeclaringCliType.BodyText}.";
         return true;
     }
 
@@ -12589,10 +12592,10 @@ internal static class ManagedSymbolReader
     {
         if (name.StartsWith('<') && name.EndsWith(">k__BackingField", StringComparison.Ordinal))
         {
-            return name[1..name.IndexOf('>', StringComparison.Ordinal)];
+            return CSharpSkeletonGenerator.SafeName(name[1..name.IndexOf('>', StringComparison.Ordinal)]);
         }
 
-        return name;
+        return CSharpSkeletonGenerator.SafeName(name);
     }
 
     // 骨架產生器輸出常數字串時也共用這套完整跳脫，避免兩邊各自維護一份不一致的規則。
@@ -13037,6 +13040,17 @@ internal static class ManagedSymbolReader
         return builder.ToString();
     }
 
+    private static string? GetBodyTypeName(MetadataReader metadata, EntityHandle handle) => handle.Kind switch
+    {
+        HandleKind.TypeDefinition => SignatureTypeNameProvider.Instance.GetTypeFromDefinition(
+            metadata, (TypeDefinitionHandle)handle, 0x12).BodyText,
+        HandleKind.TypeReference => SignatureTypeNameProvider.Instance.GetTypeFromReference(
+            metadata, (TypeReferenceHandle)handle, 0x12).BodyText,
+        HandleKind.TypeSpecification => metadata.GetTypeSpecification((TypeSpecificationHandle)handle)
+            .DecodeSignature(SignatureTypeNameProvider.Instance, null).BodyText,
+        _ => null
+    };
+
     private static string? GetTypeName(MetadataReader metadata, EntityHandle handle)
     {
         if (handle.IsNil)
@@ -13417,6 +13431,32 @@ internal static class ManagedSymbolReader
 
         return names;
     }
+
+    private static Dictionary<int, string> ReadReconstructionParameterNames(MetadataReader metadata, MethodDefinition method)
+    {
+        var names = ReadParameterNames(metadata, method);
+        var used = new HashSet<string>(StringComparer.Ordinal);
+        var count = method.DecodeSignature(SignatureTypeNameProvider.Instance, null).ParameterTypes.Length;
+        for (var index = 1; index <= count; index++)
+        {
+            var name = names.TryGetValue(index, out var value) && !string.IsNullOrEmpty(value) ? value : $"arg{index - 1}";
+            names[index] = SkeletonSupport.UniqueName(used, CSharpSkeletonGenerator.SafeName(name));
+        }
+        return names;
+    }
+
+    internal static string RenderMetadataTypeSegment(string name)
+    {
+        var separator = name.IndexOf('`');
+        if (separator < 0)
+            return CSharpSkeletonGenerator.SafeName(name);
+        var suffix = name[(separator + 1)..];
+        return CSharpSkeletonGenerator.SafeName(name[..separator])
+            + (suffix.Length > 0 && suffix.All(char.IsAsciiDigit) ? "`" + suffix : string.Empty);
+    }
+
+    internal static string RenderMetadataNamespace(string name) =>
+        name.Length == 0 ? string.Empty : string.Join('.', name.Split('.').Select(CSharpSkeletonGenerator.SafeName));
 
     internal sealed record TypeGenericParameterReadResult(
         IReadOnlyList<GenericParameterModel> Parameters,
@@ -15436,6 +15476,55 @@ internal sealed record SignatureTypeName(
     bool IsUnsupported = false,
     bool IsTrustedFunctionPointerCallingConvention = false)
 {
+    public string? BodyNominalName { get; init; }
+    public string? BodyGenericDefinitionName { get; init; }
+
+    public string BodyText
+    {
+        get
+        {
+            var remaining = 65_536;
+            return RenderBodyType(this, ref remaining, 0);
+        }
+    }
+
+    private static string RenderBodyType(SignatureTypeName type, ref int remaining, int depth)
+    {
+        if (depth > 64 || remaining <= 0)
+            throw new BadImageFormatException("重建型別名稱超過輸出限制。");
+        string rendered;
+        if (type.ArrayElementType is { } arrayElement)
+            rendered = RenderBodyType(arrayElement, ref remaining, depth + 1) + $"[{new string(',', Math.Max(type.ArrayRank - 1, 0))}]";
+        else if (type.SzArrayElementType is { } szElement)
+            rendered = RenderBodyType(szElement, ref remaining, depth + 1) + "[]";
+        else if (type.ByReferenceElementType is { } referenceElement)
+            rendered = "ref " + RenderBodyType(referenceElement, ref remaining, depth + 1);
+        else if (type.PointerElementType is { } pointerElement)
+            rendered = RenderBodyType(pointerElement, ref remaining, depth + 1) + "*";
+        else if (type.BodyGenericDefinitionName is { } genericName && !type.GenericArguments.IsDefaultOrEmpty)
+        {
+            var arguments = ImmutableArray.CreateBuilder<SignatureTypeName>();
+            foreach (var argument in type.GenericArguments)
+                arguments.Add(new SignatureTypeName(RenderBodyType(argument, ref remaining, depth + 1)));
+            rendered = SignatureTypeNameProvider.Instance.GetGenericInstantiation(new SignatureTypeName(genericName), arguments.ToImmutable()).Text;
+        }
+        else if (type.FunctionPointerSignature is { } pointer)
+        {
+            var parts = new List<string>();
+            foreach (var parameter in pointer.ParameterTypes)
+                parts.Add(RenderBodyType(parameter, ref remaining, depth + 1));
+            parts.Add(RenderBodyType(pointer.ReturnType, ref remaining, depth + 1));
+            rendered = type.Text[..type.Text.IndexOf('<')] + "<" + string.Join(", ", parts) + ">";
+        }
+        else
+            rendered = type.BodyNominalName is { } nominal
+                ? string.Join('.', nominal.Split('.').Select(segment => segment.Split('`')[0])) : type.Text;
+        remaining -= rendered.Length;
+        if (remaining < 0)
+            throw new BadImageFormatException("重建型別名稱超過輸出限制。");
+        return rendered;
+    }
+
     public SignatureTypeName(string text)
         : this(text, [], false, false)
     {
@@ -15768,8 +15857,9 @@ internal sealed class SignatureTypeNameProvider : ISignatureTypeProvider<Signatu
         var name = reader.GetString(definition.Name);
         var declaringType = definition.GetDeclaringType();
         var namespaceName = reader.GetString(definition.Namespace);
+        var declaringSignature = declaringType.IsNil ? null : GetTypeFromDefinition(reader, declaringType, rawTypeKind);
         var text = !declaringType.IsNil
-            ? $"{GetTypeFromDefinition(reader, declaringType, rawTypeKind).Text}.{name}"
+            ? $"{declaringSignature!.Text}.{name}"
             : string.IsNullOrEmpty(namespaceName) ? name : $"{namespaceName}.{name}";
         return new SignatureTypeName(
             text,
@@ -15779,7 +15869,13 @@ internal sealed class SignatureTypeNameProvider : ISignatureTypeProvider<Signatu
             handle,
             rawTypeKind,
             reader.ResolveSignatureTypeKind(handle, rawTypeKind),
-            IsExactNamedType: true);
+            IsExactNamedType: true)
+        {
+            BodyNominalName = !declaringType.IsNil
+                ? $"{declaringSignature!.BodyNominalName}.{ManagedSymbolReader.RenderMetadataTypeSegment(name)}"
+                : string.IsNullOrEmpty(namespaceName) ? ManagedSymbolReader.RenderMetadataTypeSegment(name)
+                : $"{ManagedSymbolReader.RenderMetadataNamespace(namespaceName)}.{ManagedSymbolReader.RenderMetadataTypeSegment(name)}"
+        };
     }
 
     private static bool IsTrustedFunctionPointerCallingConvention(
@@ -15813,8 +15909,10 @@ internal sealed class SignatureTypeNameProvider : ISignatureTypeProvider<Signatu
         var reference = reader.GetTypeReference(handle);
         var name = reader.GetString(reference.Name);
         var namespaceName = reader.GetString(reference.Namespace);
+        var declaringSignature = reference.ResolutionScope.Kind == HandleKind.TypeReference
+            ? GetTypeFromReference(reader, (TypeReferenceHandle)reference.ResolutionScope, rawTypeKind) : null;
         var text = reference.ResolutionScope.Kind == HandleKind.TypeReference
-            ? $"{GetTypeFromReference(reader, (TypeReferenceHandle)reference.ResolutionScope, rawTypeKind).Text}.{name}"
+            ? $"{declaringSignature!.Text}.{name}"
             : string.IsNullOrEmpty(namespaceName) ? name : $"{namespaceName}.{name}";
         return new SignatureTypeName(
             text,
@@ -15826,7 +15924,13 @@ internal sealed class SignatureTypeNameProvider : ISignatureTypeProvider<Signatu
             reader.ResolveSignatureTypeKind(handle, rawTypeKind),
             IsExactNamedType: true,
             IsTrustedFunctionPointerCallingConvention:
-                IsTrustedFunctionPointerCallingConvention(reader, reference, name, namespaceName));
+                IsTrustedFunctionPointerCallingConvention(reader, reference, name, namespaceName))
+        {
+            BodyNominalName = reference.ResolutionScope.Kind == HandleKind.TypeReference
+                ? $"{declaringSignature!.BodyNominalName}.{ManagedSymbolReader.RenderMetadataTypeSegment(name)}"
+                : string.IsNullOrEmpty(namespaceName) ? ManagedSymbolReader.RenderMetadataTypeSegment(name)
+                : $"{ManagedSymbolReader.RenderMetadataNamespace(namespaceName)}.{ManagedSymbolReader.RenderMetadataTypeSegment(name)}"
+        };
     }
 
     private static SignatureTypeName FormatLegacyGenericInstantiation(
@@ -15864,7 +15968,10 @@ internal sealed class SignatureTypeNameProvider : ISignatureTypeProvider<Signatu
             HasPinnedQualifier: genericType.HasPinnedQualifier ||
                                 typeArguments.Any(type => type.HasPinnedQualifier),
             IsUnsupported: genericType.IsUnsupported ||
-                           typeArguments.Any(type => type.IsUnsupported));
+                           typeArguments.Any(type => type.IsUnsupported))
+        {
+            BodyGenericDefinitionName = genericType.BodyNominalName ?? genericType.Text
+        };
     }
 
     private static SignatureTypeName Wrap(

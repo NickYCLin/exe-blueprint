@@ -2110,7 +2110,7 @@ public static class CSharpSkeletonGenerator
         string.Join('.', namespaceName.Split('.').Select(SafeName));
 
     // 成員名稱：先過濾成合法識別字，空名稱用 _，開頭是數字補底線，關鍵字用 @ 逐字識別字。
-    private static string SafeName(string name)
+    internal static string SafeName(string name)
     {
         if (IsCompilerGenerated(name))
         {
