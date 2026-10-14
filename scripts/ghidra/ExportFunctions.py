@@ -198,7 +198,6 @@ def checkpoint():
     else:
         os.rename(temporary, out)
 
-checkpoint()
 if len(args) > 1:
     from ghidra.app.decompiler import DecompInterface
     from ghidra.framework import Application
@@ -208,12 +207,14 @@ if len(args) > 1:
     imported_sha256 = str(currentProgram.getExecutableSHA256()).lower()
     if imported_sha256 != config["inputSha256"].lower():
         raise ValueError("Imported program SHA256 differs from input evidence")
+    payload["inputSha256"] = imported_sha256
+    checkpoint()
     limits = config["limits"]
     clock = lambda: System.nanoTime() / 1000000000.0
     started = clock()
     candidates = [f for f in function_objects if not f.isExternal()]
     evidence = {
-        "inputSha256": config["inputSha256"],
+        "inputSha256": imported_sha256,
         "analyzerVersion": str(Application.getApplicationVersion()),
         "limits": limits,
         "candidateCount": len(candidates),
@@ -296,3 +297,5 @@ if len(args) > 1:
     finally:
         decompiler.dispose()
         checkpoint()
+else:
+    checkpoint()

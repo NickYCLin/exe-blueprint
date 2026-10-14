@@ -9,6 +9,47 @@ namespace ExeBlueprint.Core.Tests;
 
 public sealed class MetadataBodyNameMappingTests
 {
+    [Theory(Timeout = 10000)]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ResolvesDeepMetadataParentsOnceAndKeepsRawIdentity(bool references)
+    {
+        await Task.Run(() =>
+        {
+            const int depth = 40;
+            var metadata = new MetadataBuilder();
+            metadata.AddModule(0, metadata.GetOrAddString("nested-fixture"), metadata.GetOrAddGuid(Guid.NewGuid()), default, default);
+            var assembly = metadata.AddAssemblyReference(metadata.GetOrAddString("external"), new Version(1, 0), default, default, default, default);
+            EntityHandle parent = assembly;
+            var names = Enumerable.Range(0, depth).Select(index => $"level;{index}").ToArray();
+            foreach (var name in names)
+            {
+                var space = metadata.GetOrAddString(parent == assembly ? "raw;namespace" : string.Empty);
+                if (references)
+                    parent = metadata.AddTypeReference(parent, space, metadata.GetOrAddString(name));
+                else
+                {
+                    var handle = metadata.AddTypeDefinition(TypeAttributes.Public, space, metadata.GetOrAddString(name), default,
+                        MetadataTokens.FieldDefinitionHandle(1), MetadataTokens.MethodDefinitionHandle(1));
+                    if (parent.Kind == HandleKind.TypeDefinition)
+                        metadata.AddNestedType(handle, (TypeDefinitionHandle)parent);
+                    parent = handle;
+                }
+            }
+            var image = new BlobBuilder();
+            new MetadataRootBuilder(metadata).Serialize(image, 0, 0);
+            using var fixture = MetadataReaderProvider.FromMetadataImage(image.ToImmutableArray());
+            var reader = fixture.GetMetadataReader();
+            var provider = SignatureTypeNameProvider.Instance;
+            var signature = references
+                ? provider.GetTypeFromReference(reader, (TypeReferenceHandle)parent, 0x12)
+                : provider.GetTypeFromDefinition(reader, (TypeDefinitionHandle)parent, 0x12);
+            Assert.Equal("raw;namespace." + string.Join(".", names), signature.Text);
+            Assert.Equal("raw_namespace." + string.Join(".", names.Select(name => name.Replace(';', '_'))), signature.BodyText);
+            Assert.Equal(parent, signature.NominalHandle);
+        });
+    }
+
     [Theory]
     [InlineData("class", "@class")]
     [InlineData("bad;\nname", "bad__name")]

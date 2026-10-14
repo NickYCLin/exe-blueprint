@@ -66,7 +66,7 @@ class ExportFunctionsTests(unittest.TestCase):
         return functions, refs
 
     def export(self, functions=None, refs=None, limits=None, check_cancelled=lambda: None,
-               decompilation=None, decompiler=None, clock=lambda: 0):
+               decompilation=None, decompiler=None, clock=lambda: 0, imported_sha256="a" * 64):
         if functions is None:
             functions, refs = self.fixture()
         refs = refs or {}
@@ -82,7 +82,7 @@ class ExportFunctionsTests(unittest.TestCase):
             getReferencesFrom=lambda address: refs.get(address, []),
         )
         program = SimpleNamespace(
-            getExecutableSHA256=lambda: "a" * 64,
+            getExecutableSHA256=lambda: imported_sha256,
             getFunctionManager=lambda: manager,
             getListing=lambda: SimpleNamespace(getInstructions=lambda body, _: iter(body.instructions)),
             getReferenceManager=lambda: reference_manager,
@@ -110,9 +110,17 @@ class ExportFunctionsTests(unittest.TestCase):
                     Paths=SimpleNamespace(get=lambda value: value), StandardCopyOption=SimpleNamespace(REPLACE_EXISTING=0)),
             }
             with patch.dict(sys.modules, modules):
-                exec(compile(source, str(SCRIPT), "exec"), environment)
+                try:
+                    exec(compile(source, str(SCRIPT), "exec"), environment)
+                except ValueError:
+                    self.assertFalse(output.exists())
+                    raise
             raw = output.read_bytes()
             return json.loads(raw), len(raw)
+
+    def test_import_mismatch_never_publishes_baseline_checkpoint(self):
+        with self.assertRaisesRegex(ValueError, "Imported program SHA256"):
+            self.export(decompilation={"maxFunctions": 1}, imported_sha256="b" * 64)
 
     def pseudocode(self, code="if (x) return 1;", timeout=False, failed=False, **overrides):
         result = SimpleNamespace(isTimedOut=lambda: timeout, decompileCompleted=lambda: not failed,
