@@ -43,3 +43,11 @@ branch `1dbf81000`、loop `1dbf8101c`、choice `1dbf81050`、caller `1dbf810c5` 
 2026-10-14 後續修正加入直接 parser 及完整 Analyzer 的 null／錯型別測試，functions:[null] 明確拋 InvalidDataException，Analyzer 安全回傳失敗而非崩潰。三位元組自有輸入搭配 fake processRunner，驗證 exit=0/1 的不匹配 hash，以及缺少、錯型別、重複 hash 的有效基礎圖都不會保留；只有 hash 已驗證的基礎圖能轉成 backend_partial。測試亦刻意讓已驗證基礎圖帶有 mismatch stderr，確認 Analyzer 的信任判斷依 JSON hash 而非診斷字串。
 
 另建立 40 層 TypeDefinition／TypeReference 合成 metadata，10 秒測試期限內解析，核對完整 raw 名稱、清理後名稱及原始 nominal handle，防止同一父層重複遞迴回歸。Release build 為 0 warnings/errors，全套 Core 944、Desktop 23、Python 17 項通過。
+
+## 缺後端的請求證據
+
+2026-10-15 使用同一自有 DLL，執行 `analyze ... --ghidra /不存在的目錄 --native-pseudocode --json-only`，重現 `Backend=none` 但 decompilation 為 null，無法從該欄位區分未請求與已請求但缺後端。修正後，只有 opt-in 且輸入可讀時保留主機實際讀取的輸入 SHA256、原請求 limits、analyzerVersion=unavailable、limitReason=backend_unavailable、complete=false，函式清單為空且沒有 CALL 圖；沒有輸出被裁切，因此 truncated=false。這是請求失敗證據，不是已通過 Ghidra 匯入核對的 checkpoint，零筆函式不表示已完成掃描或輸入沒有函式。
+
+未啟用偽碼時仍不產生 decompilation；輸入無法讀取時安全失敗，不虛構 hash。取消與不匹配 checkpoint 的拒絕行為維持不變。本次只補缺後端路徑，其他無 checkpoint 的程序失敗仍由 Backend=none 與 Note 說明，未宣稱所有失敗路徑都有偽碼證據。
+
+新增測試先重現 opt-in 的 Assert.NotNull 失敗，修正後 NativeDecompilationTests 35 項通過；`dotnet build ExeBlueprint.slnx -c Release` 為 0 warnings/errors，`dotnet test ExeBlueprint.slnx -c Release --no-build` 的 Core 946、Desktop 23 項與 `python3 -B -m unittest discover -s tests/ghidra -v` 的 17 項全數通過。最終 Release CLI 分別以不存在的後端路徑及既有 Ghidra 12.1.4 靜態分析自有 DLL：前者保留 backend_unavailable 證據且無圖，後者仍為 4 個成功函式、5 個 CALL，if／loop／switch／call 偽碼及 SHA256 核對通過，函式清單與 CALL 圖和先前驗收結果相同。未執行 DLL 或重建產物。

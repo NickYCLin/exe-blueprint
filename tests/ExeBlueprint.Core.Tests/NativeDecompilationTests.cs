@@ -204,6 +204,45 @@ public sealed class NativeDecompilationTests
     }
 
     [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task MissingBackendRetainsOnlyRequestedFailureEvidence(bool enabled)
+    {
+        var directory = Directory.CreateTempSubdirectory("native-missing-backend-").FullName;
+        try
+        {
+            var input = Path.Combine(directory, "synthetic.bin");
+            await File.WriteAllBytesAsync(input, [1, 2, 3]);
+            var limits = new NativeDecompilationLimits { MaxFunctions = 7 };
+            var result = await NativeAnalyzer.AnalyzeAsync(input, new()
+            {
+                GhidraInstallDir = Path.Combine(directory, "absent"),
+                NativeDecompilation = enabled ? limits : null
+            }, CancellationToken.None);
+            Assert.Equal("none", result.Backend);
+            Assert.Empty(result.Functions);
+            Assert.Null(result.CallGraph);
+            if (!enabled)
+            {
+                Assert.Null(result.Decompilation);
+                return;
+            }
+            Assert.NotNull(result.Decompilation);
+            Assert.Equal("039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81", result.Decompilation.InputSha256);
+            Assert.Equal("unavailable", result.Decompilation.AnalyzerVersion);
+            Assert.Equal("backend_unavailable", result.Decompilation.LimitReason);
+            Assert.Equal(limits, result.Decompilation.Limits);
+            Assert.False(result.Decompilation.Complete);
+            Assert.False(result.Decompilation.Truncated);
+            Assert.Empty(result.Decompilation.Functions);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Theory]
     [InlineData(0, false, null)]
     [InlineData(1, false, "backend_partial")]
     [InlineData(-1, true, "process_timeout")]

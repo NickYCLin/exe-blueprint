@@ -75,16 +75,30 @@ internal static class NativeAnalyzer
         if (options.NativeDecompilation is { IsValid: false })
             return Failure("Ghidra 偽碼輸出限制不在安全範圍內。");
 
-        var headless = LocateHeadless(options);
-        if (headless is null)
-        {
-            return Failure(
-                "未偵測到可執行的 Ghidra headless，原生 PE 未做函式分析。設定 GHIDRA_INSTALL_DIR 或用 --ghidra 指定安裝目錄即可啟用。");
-        }
-
         string? workspace = null;
         try
         {
+            var headless = LocateHeadless(options);
+            if (headless is null)
+            {
+                var failure = Failure(
+                    "未偵測到可執行的 Ghidra headless，原生 PE 未做函式分析。設定 GHIDRA_INSTALL_DIR 或用 --ghidra 指定安裝目錄即可啟用。");
+                if (options.NativeDecompilation is not { } requestedLimits)
+                    return failure;
+                await using var input = File.OpenRead(filePath);
+                var requestedSha256 = Convert.ToHexStringLower(await SHA256.HashDataAsync(input, cancellationToken).ConfigureAwait(false));
+                return failure with
+                {
+                    Decompilation = new NativeDecompilation
+                    {
+                        InputSha256 = requestedSha256,
+                        AnalyzerVersion = "unavailable",
+                        Limits = requestedLimits,
+                        LimitReason = "backend_unavailable"
+                    }
+                };
+            }
+
             workspace = Directory.CreateTempSubdirectory("exe-blueprint-ghidra-").FullName;
             if (!OperatingSystem.IsWindows())
             {
